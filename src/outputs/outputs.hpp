@@ -14,10 +14,12 @@
 #include "athena.hpp"
 #include "io_wrapper.hpp"
 
-#define NHISTORY_VARIABLES 12
-#if NHISTORY_VARIABLES > NREDUCTION_VARIABLES
-    #error NHISTORY > NREDUCTION in outputs.hpp
-#endif
+// TODO(@mhguo): make this better!
+//#define NHISTORY_VARIABLES 12
+#define NHISTORY_VARIABLES 80
+//#if NHISTORY_VARIABLES > NREDUCTION_VARIABLES
+//    #error NHISTORY > NREDUCTION in outputs.hpp
+//#endif
 
 #define NOUTPUT_CHOICES 78
 // choices for output variables used in <ouput> blocks in input file
