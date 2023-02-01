@@ -69,8 +69,10 @@ struct LogicalLocation {
 
 struct EventCounters {
   int nfofc, neos_dfloor, neos_efloor, neos_tfloor, neos_vceil, neos_fail, maxit_c2p;
+  int nfofc_d, nfofc_p, nfofc_g;
   EventCounters() : nfofc(0), neos_dfloor(0), neos_efloor(0), neos_tfloor(0),
-                    neos_vceil(0), neos_fail(0), maxit_c2p(0) {}
+                    neos_vceil(0), neos_fail(0), maxit_c2p(0), nfofc_d(0), nfofc_p(0),
+                    nfofc_g(0) {}
 };
 
 // Forward declarations required due to recursive definitions amongst mesh classes
