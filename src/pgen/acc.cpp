@@ -21,6 +21,7 @@
 
 #include "pgen/turb_dens.hpp"
 #include "pgen/turb_vel.hpp"
+#include "pgen/turb_init.hpp"
 
 #include <Kokkos_Random.hpp>
 
@@ -464,15 +465,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (eos.is_ideal) {
       u0(m,IEN,k,j,i) = pgas/gm1;
     }
-    // TODO(@mhguo): write a reasonable initial perturbation
-    if (turb) {
-      auto rand_gen = rand_pool64.get_state();  // get random number state this thread
-      Real dens = u0(m,IDN,k,j,i);
-      u0(m,IM1,k,j,i) += dens*turb_amp*(rand_gen.frand() - 0.5);
-      u0(m,IM2,k,j,i) += dens*turb_amp*(rand_gen.frand() - 0.5);
-      u0(m,IM3,k,j,i) += dens*turb_amp*(rand_gen.frand() - 0.5);
-      rand_pool64.free_state(rand_gen);  // free state for use by other threads
-    }
   });
   for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
     if (it->block_name.compare(0, 9, "turb_dens") == 0) {
@@ -485,6 +477,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (it->block_name.compare(0, 9, "turb_vel") == 0) {
       TurbulenceVel *pturb;
       pturb = new TurbulenceVel(it->block_name,pmbp, pin);
+      pturb->InitializeModes(1);
+      pturb->AddForcing(1);
+      delete pturb;
+    }
+    if (it->block_name.compare(0, 9, "turb_init") == 0) {
+      TurbulenceInit *pturb;
+      pturb = new TurbulenceInit(it->block_name,pmbp, pin);
       pturb->InitializeModes(1);
       pturb->AddForcing(1);
       delete pturb;
