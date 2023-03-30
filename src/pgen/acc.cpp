@@ -22,6 +22,7 @@
 #include "pgen/turb_dens.hpp"
 #include "pgen/turb_vel.hpp"
 #include "pgen/turb_init.hpp"
+#include "pgen/turb_mhd.hpp"
 
 #include <Kokkos_Random.hpp>
 
@@ -169,6 +170,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
+  int &ng = indcs.ng;
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   auto &size = pmbp->pmb->mb_size;
   int nmb1 = (pmbp->nmb_thispack-1);
@@ -179,7 +181,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (!profile && !acc.potential) {
     if (pmbp->phydro != nullptr) {
       auto &u0 = pmbp->phydro->u0;
-      par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks,ke,js,je,is,ie,
+      par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         u0(m,IDN,k,j,i) = 1.0;
         u0(m,IM1,k,j,i) = 0.0;
@@ -190,7 +192,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
     if (pmbp->pmhd != nullptr) {
       auto &u0 = pmbp->pmhd->u0;
-      par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks,ke,js,je,is,ie,
+      par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         u0(m,IDN,k,j,i) = 1.0;
         u0(m,IM1,k,j,i) = 0.0;
@@ -431,7 +433,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Set initial conditions
   Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
-  par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks,ke,js,je,is,ie,
+  par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
@@ -474,7 +476,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       pturb->AddTurbing(1);
       delete pturb;
     }
-    if (it->block_name.compare(0, 9, "turb_vel") == 0) {
+    if (it->block_name.compare(0, 8, "turb_vel") == 0) {
       TurbulenceVel *pturb;
       pturb = new TurbulenceVel(it->block_name,pmbp, pin);
       pturb->InitializeModes(1);
@@ -484,6 +486,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (it->block_name.compare(0, 9, "turb_init") == 0) {
       TurbulenceInit *pturb;
       pturb = new TurbulenceInit(it->block_name,pmbp, pin);
+      pturb->InitializeModes(1);
+      pturb->AddForcing(1);
+      delete pturb;
+    }
+    if (it->block_name.compare(0, 8, "turb_mhd") == 0) {
+      TurbulenceMhd *pturb;
+      pturb = new TurbulenceMhd(it->block_name,pmbp, pin);
       pturb->InitializeModes(1);
       pturb->AddForcing(1);
       delete pturb;
@@ -941,6 +950,42 @@ void RadialBoundary(Mesh *pm) {
       u0_(m,IM3,(ke+k+1),j,i) = 0.0;
     }
   });
+
+  if (pm->pmb_pack->pmhd != nullptr) {
+    auto b0 = pm->pmb_pack->pmhd->b0;
+    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      int nx2 = indcs.nx2;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      int nx3 = indcs.nx3;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (rad < rin) {
+        b0.x1f(m,k,j,i) = 0.0;
+        b0.x2f(m,k,j,i) = 0.0;
+        b0.x3f(m,k,j,i) = 0.0;
+      }
+
+      if (rad < rbin) {
+      }
+
+      if (rad > rbout) {
+      }
+
+    });
+  }
 
   return;
 }
