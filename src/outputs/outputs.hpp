@@ -244,7 +244,7 @@ class EventLogOutput : public BaseTypeOutput {
 class Outputs {
  public:
   Outputs(ParameterInput *pin, Mesh *pm);
-  ~Outputs() = default;
+  ~Outputs();
 
   // use vector of pointers to BaseTypeOutputs since it is an abstract base class
   std::vector<BaseTypeOutput*> pout_list;
