@@ -18,6 +18,7 @@
 #include "parameter_input.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "mesh/mesh.hpp"
+#include "eos/eos.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "ion-neutral/ion_neutral.hpp"
@@ -50,7 +51,6 @@ class TurbulenceMhd {
   int n0;
   int turb_flag;
   int turb_count;
-  bool only_hydro;
   Real tcorr,dedt;
   Real expo;
   Real last_dt;
@@ -109,7 +109,6 @@ TurbulenceMhd::TurbulenceMhd(std::string bk, MeshBlockPack *pp, ParameterInput *
   turb_flag = pin->GetOrAddInteger(bk,"turb_flag",0);
   turb_count = pin->GetOrAddInteger(bk,"turb_count",0);
   seed = pin->GetOrAddInteger(bk,"seed",-1);
-  only_hydro = pin->GetOrAddBoolean(bk,"only_hydro",false);
   if (ncells3>1) { // 3D
     ntot = (nhigh+1)*(nhigh+1)*(nhigh+1);
     nwave = 8;
@@ -556,7 +555,7 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
   // TODO(@mhguo): rm this!
   //std::cout<<"m0="<<m0<<"  m1="<<m1<<"  m2="<<m2<<"  m3="<<m3<<std::endl;
   Real m00 = m0;
-  par_for("net_mom_2", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  par_for("net_mom_2", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     force_new_(m,0,k,j,i) -= m1/m0;
     force_new_(m,1,k,j,i) -= m2/m0;
@@ -577,15 +576,30 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
                                                               //     >> ionized density
   
   // Normalization: a constant beta
+  auto &eos = pmy_pack->pmhd->peos->eos_data;
+  auto &mbsize = pmy_pack->pmb->mb_size;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real v_turb = sqrt(u(m,IEN,k,j,i)/u(m,IDN,k,j,i));
-    force_new_(m,0,k,j,i) *= v_turb;
-    force_new_(m,1,k,j,i) *= v_turb;
-    force_new_(m,2,k,j,i) *= v_turb;
+    Real a_turb = sqrt(u(m,IEN,k,j,i));
+    force_new_(m,0,k,j,i) *= a_turb;
+    force_new_(m,1,k,j,i) *= a_turb;
+    force_new_(m,2,k,j,i) *= a_turb;
 
-    //sum_m0 += u(m,IEN,k,j,i);
-    //sum_m1 += force_new_(m,0,k,j,i)*force_new_(m,0,k,j,i);
+    Real x1v = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
+    Real x3v = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    if (rad < eos.r_in) {
+      force_new_(m,0,k,j,i) = 0.0;
+      force_new_(m,1,k,j,i) = 0.0;
+      force_new_(m,2,k,j,i) = 0.0;
+    } else if (rad < 10.0*eos.r_in) {
+      Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in/9.0*M_PI/2.0));
+      force_new_(m,0,k,j,i) *= fac_smooth;
+      force_new_(m,1,k,j,i) *= fac_smooth;
+      force_new_(m,2,k,j,i) *= fac_smooth;
+    }
   });
   // TODO(@mhguo): rm this cout!
   std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
@@ -769,87 +783,67 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
     auto f_n_ = force_new;
     std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
 
-    par_for("push", DevExeSpace(),0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
+    auto b0 = pmy_pack->pmhd->b0;
+    // TODO(@mhguo): write a correct plasma beta!!!
+    Real fac_beta = sqrt(inv_beta/dedt);
+    auto &size = pmy_pack->pmb->mb_size;
+    par_for("turb-b", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      Real den = u(m,IDN,k,j,i);
-      Real v1 = (fcorr*force_(m,0,k,j,i) + gcorr*f_n_(m,0,k,j,i))*beta_dt;
-      Real v2 = (fcorr*force_(m,1,k,j,i) + gcorr*f_n_(m,1,k,j,i))*beta_dt;
-      Real v3 = (fcorr*force_(m,2,k,j,i) + gcorr*f_n_(m,2,k,j,i))*beta_dt;
-      Real m1 = u(m,IM1,k,j,i);
-      Real m2 = u(m,IM2,k,j,i);
-      Real m3 = u(m,IM3,k,j,i);
-
-      // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.5*den*(v1*v1+v2*v2+v3*v3);
-      // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.25*den*(v1*v1+v2*v2+v3*v3);
-      u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
-      u(m,IM1,k,j,i) += den*v1;
-      u(m,IM2,k,j,i) += den*v2;
-      u(m,IM3,k,j,i) += den*v3;
+      //Real &x1min = size.d_view(m).x1min;
+      //Real &x1max = size.d_view(m).x1max;
+      //int nx1 = indcs.nx1;
+      //Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real dx1 = size.d_view(m).dx1;
+      Real dx2 = size.d_view(m).dx2;
+      Real dx3 = size.d_view(m).dx3;
+      b0.x1f(m,k,j,i) = 0.25*(((f_n_(m,2,k,j+1,i-1)-f_n_(m,2,k,j-1,i-1))
+                              +(f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  )))/dx2
+                             -((f_n_(m,1,k+1,j,i-1)-f_n_(m,1,k-1,j,i-1))
+                              +(f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  )))/dx3
+                              )*fac_beta;
+      b0.x2f(m,k,j,i) = 0.25*(((f_n_(m,0,k+1,j-1,i)-f_n_(m,0,k-1,j-1,i))
+                              +(f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i)))/dx3
+                             -((f_n_(m,2,k,j-1,i+1)-f_n_(m,2,k,j-1,i-1))
+                              +(f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1)))/dx1
+                              )*fac_beta;
+      b0.x3f(m,k,j,i) = 0.25*(((f_n_(m,1,k-1,j,i+1)-f_n_(m,1,k-1,j,i-1))
+                              +(f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1)))/dx1
+                             -((f_n_(m,0,k-1,j+1,i)-f_n_(m,0,k-1,j-1,i))
+                              +(f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i)))/dx2
+                              )*fac_beta;
+      if (i==ie) {
+        b0.x1f(m,k,j,ie+1) = 0.25*(((f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  ))
+                                   +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j-1,i+1)))/dx2
+                                  -((f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  ))
+                                   +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k-1,j,i+1)))/dx3
+                                  )*fac_beta;
+      }
+      if (j==je) {
+        b0.x2f(m,k,je+1,i) = 0.25*(((f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i))
+                                   +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k-1,j+1,i)))/dx3
+                                  -((f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1))
+                                   +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j+1,i-1)))/dx1
+                                  )*fac_beta;
+      }
+      if (k==ke) {
+        b0.x3f(m,ke+1,j,i) = 0.25*(((f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1))
+                                   +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k+1,j,i-1)))/dx1
+                                  -((f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i))
+                                   +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k+1,j-1,i)))/dx2
+                                  )*fac_beta;
+      }
+      // TODO(@mhguo): rm this cout!
+      if (m==1&&k==6&&j==6&&i==4) {
+        printf("den_new: %.6e\n",u(m,IDN,k,j,i));
+        printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),
+                u(m,IM3,k,j,i));
+        printf("ein_new: %.6e %.6e %.6e\n",u(m,IEN,k,j,i));
+        printf("f_new:   %.6e %.6e %.6e\n",f_n_(m,0,k,j,i),f_n_(m,1,k,j,i),
+                f_n_(m,2,k,j,i));
+        printf("b0_new:  %.6e %.6e %.6e\n",b0.x1f(m,k,j,i),b0.x2f(m,k,j,i),
+                b0.x3f(m,k,j,i));
+      }
     });
-
-    if (!only_hydro) {
-      auto b0 = pmy_pack->pmhd->b0;
-      // TODO(@mhguo): write a correct plasma beta!!!
-      Real fac_beta = sqrt(inv_beta/dedt);
-      auto &size = pmy_pack->pmb->mb_size;
-      par_for("turb-b", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        //Real &x1min = size.d_view(m).x1min;
-        //Real &x1max = size.d_view(m).x1max;
-        //int nx1 = indcs.nx1;
-        //Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-        Real dx1 = size.d_view(m).dx1;
-        Real dx2 = size.d_view(m).dx2;
-        Real dx3 = size.d_view(m).dx3;
-        b0.x1f(m,k,j,i) = 0.25*(((f_n_(m,2,k,j+1,i-1)-f_n_(m,2,k,j-1,i-1))
-                                +(f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  )))/dx2
-                               -((f_n_(m,1,k+1,j,i-1)-f_n_(m,1,k-1,j,i-1))
-                                +(f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  )))/dx3
-                               )*fac_beta;
-        b0.x2f(m,k,j,i) = 0.25*(((f_n_(m,0,k+1,j-1,i)-f_n_(m,0,k-1,j-1,i))
-                                +(f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i)))/dx3
-                               -((f_n_(m,2,k,j-1,i+1)-f_n_(m,2,k,j-1,i-1))
-                                +(f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1)))/dx1
-                               )*fac_beta;
-        b0.x3f(m,k,j,i) = 0.25*(((f_n_(m,1,k-1,j,i+1)-f_n_(m,1,k-1,j,i-1))
-                                +(f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1)))/dx1
-                               -((f_n_(m,0,k-1,j+1,i)-f_n_(m,0,k-1,j-1,i))
-                                +(f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i)))/dx2
-                               )*fac_beta;
-        if (i==ie) {
-          b0.x1f(m,k,j,ie+1) = 0.25*(((f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  ))
-                                     +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j-1,i+1)))/dx2
-                                    -((f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  ))
-                                     +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k-1,j,i+1)))/dx3
-                                    )*fac_beta;
-        }
-        if (j==je) {
-          b0.x2f(m,k,je+1,i) = 0.25*(((f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i))
-                                     +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k-1,j+1,i)))/dx3
-                                    -((f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1))
-                                     +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j+1,i-1)))/dx1
-                                    )*fac_beta;
-        }
-        if (k==ke) {
-          b0.x3f(m,ke+1,j,i) = 0.25*(((f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1))
-                                     +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k+1,j,i-1)))/dx1
-                                    -((f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i))
-                                     +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k+1,j-1,i)))/dx2
-                                    )*fac_beta;
-        }
-        // TODO(@mhguo): rm this cout!
-        if (m==1&&k==6&&j==6&&i==4) {
-          printf("den_new: %.6e\n",u(m,IDN,k,j,i));
-          printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),
-                  u(m,IM3,k,j,i));
-          printf("ein_new: %.6e %.6e %.6e\n",u(m,IEN,k,j,i));
-          printf("f_new:   %.6e %.6e %.6e\n",f_n_(m,0,k,j,i),f_n_(m,1,k,j,i),
-                  f_n_(m,2,k,j,i));
-          printf("b0_new:  %.6e %.6e %.6e\n",b0.x1f(m,k,j,i),b0.x2f(m,k,j,i),
-                  b0.x3f(m,k,j,i));
-        }
-      });
-    }
   } else {
     // modify conserved variables
     DvceArray5D<Real> u,w,u_,w_;

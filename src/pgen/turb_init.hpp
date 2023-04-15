@@ -550,7 +550,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   // TODO(@mhguo): rm this!
   //std::cout<<"m0="<<m0<<"  m1="<<m1<<"  m2="<<m2<<"  m3="<<m3<<std::endl;
   Real m00 = m0;
-  par_for("net_mom_2", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  par_for("net_mom_2", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     force_new_(m,0,k,j,i) -= m1/m0;
     force_new_(m,1,k,j,i) -= m2/m0;
@@ -563,6 +563,34 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   if (pmy_pack->pmhd != nullptr) u = (pmy_pack->pmhd->u0);
   if (pmy_pack->pionn != nullptr) u = (pmy_pack->phydro->u0); // assume neutral density
                                                               //     >> ionized density
+  // Normalization: a constant Mach number
+  auto &eos = pmy_pack->pmhd->peos->eos_data;
+  auto &mbsize = pmy_pack->pmb->mb_size;
+  par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real v_turb = sqrt(u(m,IEN,k,j,i)/u(m,IDN,k,j,i));
+    force_new_(m,0,k,j,i) *= v_turb;
+    force_new_(m,1,k,j,i) *= v_turb;
+    force_new_(m,2,k,j,i) *= v_turb;
+
+    Real x1v = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
+    Real x3v = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    if (rad < eos.r_in) {
+      force_new_(m,0,k,j,i) = 0.0;
+      force_new_(m,1,k,j,i) = 0.0;
+      force_new_(m,2,k,j,i) = 0.0;
+    } else if (rad < 3.0*eos.r_in) {
+      Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in*M_PI/4.0));
+      force_new_(m,0,k,j,i) *= fac_smooth;
+      force_new_(m,1,k,j,i) *= fac_smooth;
+      force_new_(m,2,k,j,i) *= fac_smooth;
+    }
+  });
+  // TODO(@mhguo): rm this cout!
+  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
 
   m0 = 0.0, m1 = 0.0;
   if (!(pmy_pack->pmesh->multilevel)) {
@@ -751,13 +779,6 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
       Real m1 = u(m,IM1,k,j,i);
       Real m2 = u(m,IM2,k,j,i);
       Real m3 = u(m,IM3,k,j,i);
-
-      // TODO(@mhguo): rm this cout!
-      //if (m==0&&k==6&&j==6&&i==6) {
-      //  printf("den: %.6e\n",u(m,IDN,k,j,i));
-      //  printf("mom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
-      //  printf("v: %.6e %.6e %.6e\n",v1,v2,v3);
-      //}
 
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.5*den*(v1*v1+v2*v2+v3*v3);
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.25*den*(v1*v1+v2*v2+v3*v3);

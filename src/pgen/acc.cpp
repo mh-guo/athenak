@@ -952,23 +952,21 @@ void RadialBoundary(Mesh *pm) {
   });
 
   if (pm->pmb_pack->pmhd != nullptr) {
+    //TODO(@mhguo) Do nothing?
     auto b0 = pm->pmb_pack->pmhd->b0;
-    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    par_for("bfield_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      Real &x1min = size.d_view(m).x1min;
+      /*Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
-      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
       Real &x2min = size.d_view(m).x2min;
       Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
-      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
       Real &x3min = size.d_view(m).x3min;
       Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
-      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
@@ -976,14 +974,10 @@ void RadialBoundary(Mesh *pm) {
         b0.x1f(m,k,j,i) = 0.0;
         b0.x2f(m,k,j,i) = 0.0;
         b0.x3f(m,k,j,i) = 0.0;
-      }
-
-      if (rad < rbin) {
-      }
-
-      if (rad > rbout) {
-      }
-
+        b0.x1f(m,k,j,i+1) = 0.0;
+        b0.x2f(m,k,j+1,i) = 0.0;
+        b0.x3f(m,k+1,j,i) = 0.0;
+      }*/
     });
   }
 
