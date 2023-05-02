@@ -18,7 +18,6 @@
 #include "mhd.hpp"
 #include "diffusion/conduction.hpp"
 #include "srcterms/srcterms.hpp"
-#include "coordinates/cell_locations.hpp"
 
 namespace mhd {
 
@@ -144,27 +143,6 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
           cf = eos.IdealMHDFastSpeed(w_d, w_bz, w_bx, w_by);
         }
         max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
-
-        if (eos.r_in > 0.0) {
-          Real &x1min = mbsize.d_view(m).x1min;
-          Real &x1max = mbsize.d_view(m).x1max;
-          Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-          Real &x2min = mbsize.d_view(m).x2min;
-          Real &x2max = mbsize.d_view(m).x2max;
-          Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-          Real &x3min = mbsize.d_view(m).x3min;
-          Real &x3max = mbsize.d_view(m).x3max;
-          Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-          Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-          if (rad < eos.r_in) {
-            max_dv1 = FLT_MIN;
-            max_dv2 = FLT_MIN;
-            max_dv3 = FLT_MIN;
-          }
-        }
       }
 
       min_dt1 = fmin((mbsize.d_view(m).dx1/max_dv1), min_dt1);
