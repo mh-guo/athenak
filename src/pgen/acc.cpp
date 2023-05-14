@@ -12,6 +12,8 @@
 #include "mesh/mesh.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
+#include "eos/ideal_c2p_hyd.hpp"
+#include "eos/ideal_c2p_mhd.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "pgen.hpp"
@@ -76,6 +78,7 @@ struct pgenacc {
   Real rad_entry, dens_entry; // Parameters for entropy
   Real rb_in; // Inner boundary radius
   Real rb_out; // Outer boundary radius
+  Real dt_floor; // floor of timestep
   bool turb; // turbulence
   Real turb_amp; // amplitude of the perturbations
   bool cooling;
@@ -102,7 +105,7 @@ struct pgenacc {
   bool turb_init;
   int ndiag;
   Real t_cold;  // criterion of cold gas
-  Real tf_hot;  // criterion of hot gas
+  Real t_hot;  // criterion of hot gas
   DualArray1D<Real> dens_arr;
   DualArray1D<Real> logcooling_arr;
   array_acc::RadSum v_arr;
@@ -293,7 +296,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc.heat_tceiling = pin->GetOrAddReal("problem","heat_tceiling",
                         std::numeric_limits<float>::max());
   acc.t_cold = pin->GetOrAddReal("problem","t_cold",0.03);
-  acc.tf_hot = pin->GetOrAddReal("problem","tf_hot",0.3);
+  acc.t_hot = pin->GetOrAddReal("problem","t_hot",0.3);
   // End get parameters
 
   Real &mbh = acc.m_bh;
@@ -323,6 +326,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // update problem-specific parameters
   eos.r_in = acc.r_in;
+  acc.dt_floor = eos.dt_floor;
   acc.tfloor = eos.tfloor;
   acc.gamma = eos.gamma;
   acc.temp_0 = cs_iso*cs_iso;
@@ -736,7 +740,8 @@ void RadialBoundary(Mesh *pm) {
   Real &rin = acc.r_in;
   Real &sinkd = acc.sink_d;
   Real &sinkt = acc.sink_t;
-  Real sinke = sinkd*sinkt/(gamma-1.0);
+  Real sinke = sinkd*sinkt/gm1;
+  Real dtfloor = acc.dt_floor;
   //Real tfloor = acc.tfloor;
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
@@ -956,7 +961,7 @@ void RadialBoundary(Mesh *pm) {
     auto b0 = pm->pmb_pack->pmhd->b0;
     par_for("bfield_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      /*Real &x1min = size.d_view(m).x1min;
+      Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
       Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
@@ -971,13 +976,25 @@ void RadialBoundary(Mesh *pm) {
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
       if (rad < rin) {
-        b0.x1f(m,k,j,i) = 0.0;
+        Real va1_ceil = size.d_view(m).dx1/dtfloor;
+        Real va2_ceil = size.d_view(m).dx2/dtfloor;
+        Real va3_ceil = size.d_view(m).dx3/dtfloor;
+        Real bx = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
+        Real by = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
+        Real bz = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
+        u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bx/va1_ceil));
+        u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(by/va2_ceil));
+        u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bz/va3_ceil));
+        Real dens = u0_(m,IDN,k,j,i);
+        Real etot = dens*sinkt/gm1 + 0.5*(SQR(bx) + SQR(by) + SQR(bz));
+        u0_(m,IEN,k,j,i) = etot;
+        /*b0.x1f(m,k,j,i) = 0.0;
         b0.x2f(m,k,j,i) = 0.0;
         b0.x3f(m,k,j,i) = 0.0;
         b0.x1f(m,k,j,i+1) = 0.0;
         b0.x2f(m,k,j+1,i) = 0.0;
-        b0.x3f(m,k+1,j,i) = 0.0;
-      }*/
+        b0.x3f(m,k+1,j,i) = 0.0;*/
+      }
     });
   }
 
@@ -1020,7 +1037,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   Real gamma = acc.gamma;
   Real gm1 = gamma - 1.0;
   Real t_cold = acc.t_cold;
-  Real tf_hot = acc.tf_hot;
+  Real t_hot = acc.t_hot;
   // capture class variabels for kernel
   auto &u0_ = (pm->pmb_pack->pmhd != nullptr) ?
               pm->pmb_pack->pmhd->u0 : pm->pmb_pack->phydro->u0;
@@ -1083,7 +1100,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real rho_ini = DensFnDevice(x,d_arr);
     Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
     Real temp_ini = pgas_ini/rho_ini;
-    Real t_hot = tf_hot*temp_ini;
+    Real t_hot = t_hot*temp_ini;
     
     //Real coldgas = (temp<1e-2)? vol*dens : 0.0;
 
@@ -1445,10 +1462,16 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
   MeshBlockPack *pmy_pack = pm->pmb_pack;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
   int nmb1 = pmy_pack->nmb_thispack - 1;
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+  Real beta = bdt/pm->dt;
+  Real cfl_no = pm->cfl_no;
+  auto &eos = eos_data;
   Real use_e = eos_data.use_e;
   Real dfloor = eos_data.dfloor;
   Real tfloor = eos_data.tfloor;
@@ -1460,6 +1483,108 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cooling_unit = pmy_pack->punit->pressure_cgs()/pmy_pack->punit->time_cgs()
                       /n_unit/n_unit;
   Real heating_unit = pmy_pack->punit->pressure_cgs()/pmy_pack->punit->time_cgs()/n_unit;
+  Real gamma_heating = 2.0e-26/heating_unit;
+
+  bool is_hydro = true;
+  DvceArray5D<Real> bcc;
+  if (pmy_pack->pmhd != nullptr) {
+    is_hydro = false;
+    // using bcc is ok here because b0 is not updated yet
+    bcc = pmy_pack->pmhd->bcc0;
+  }
+
+  int nsubcycle=0, nsubcycle_count=0;
+  Kokkos::parallel_reduce("cooling", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, int &sum0, int &sum1) {
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+    Real dens=1.0, temp = 1.0, eint = 1.0;
+    dens = w0(m,IDN,k,j,i);
+    if (use_e) {
+      temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+      eint = w0(m,IEN,k,j,i);
+    } else {
+      temp = w0(m,ITM,k,j,i);
+      eint = w0(m,ITM,k,j,i)*w0(m,IDN,k,j,i)/gm1;
+    }
+
+    bool sub_cycling = true;
+    bool sub_cycling_used = false;
+    Real bdt_now = 0.0;
+    while (sub_cycling) {
+      Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
+      // soft function
+      lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
+      Real cooling_heating =  dens * (dens * lambda_cooling - gamma_heating);
+      Real dt_cool = (eint/(FLT_MIN + fabs(cooling_heating)));
+      // half of the timestep
+      Real bdt_cool = 0.5*beta*cfl_no*dt_cool;
+      if (bdt_now+bdt_cool<bdt) {
+        u0(m,IEN,k,j,i) -= bdt_cool * cooling_heating;
+
+        // compute new temperature and internal energy
+
+        // load single state conserved variables
+        HydPrim1D w;
+        if (is_hydro) {
+          HydCons1D u;
+          u.d  = u0(m,IDN,k,j,i);
+          u.mx = u0(m,IM1,k,j,i);
+          u.my = u0(m,IM2,k,j,i);
+          u.mz = u0(m,IM3,k,j,i);
+          u.e  = u0(m,IEN,k,j,i);
+          // call c2p function
+          bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+          SingleC2P_IdealHyd(u, eos, w, dfloor_used, efloor_used, tfloor_used);
+        } else {
+          MHDCons1D u;
+          u.d  = u0(m,IDN,k,j,i);
+          u.mx = u0(m,IM1,k,j,i);
+          u.my = u0(m,IM2,k,j,i);
+          u.mz = u0(m,IM3,k,j,i);
+          u.e  = u0(m,IEN,k,j,i);
+          u.bx = bcc(m,IBX,k,j,i);
+          u.by = bcc(m,IBY,k,j,i);
+          u.bz = bcc(m,IBZ,k,j,i);
+          // call c2p function
+          bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+          SingleC2P_IdealMHD(u, eos, w, dfloor_used, efloor_used, tfloor_used);
+        }
+        
+        dens = w.d;
+        temp = gm1*w.e/w.d;
+        eint = w.e;
+        sub_cycling_used = true;
+        sum1++;
+      } else {
+        u0(m,IEN,k,j,i) -= (bdt-bdt_now) * cooling_heating;
+        sub_cycling = false;
+      }
+      bdt_now += bdt_cool;
+    }
+    if (sub_cycling_used) {
+      sum0++;
+    }
+  }, Kokkos::Sum<int>(nsubcycle), Kokkos::Sum<int>(nsubcycle_count));
+#if MPI_PARALLEL_ENABLED
+  int* pnsubcycle = &(nsubcycle);
+  int* pnsubcycle_count = &(nsubcycle_count);
+  MPI_Allreduce(MPI_IN_PLACE, pnsubcycle, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, pnsubcycle_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank == 0) {
+    if (acc.ndiag>0 && pm->ncycle % acc.ndiag == 0) {
+      if (nsubcycle>0 || nsubcycle_count >0) {
+        std::cout << " nsubcycle_cell=" << nsubcycle << std::endl
+                  << " nsubcycle_count=" << nsubcycle_count << std::endl;
+      }
+    }
+  }
+  return;
 
   par_for("cooling", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -1655,6 +1780,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
                       /n_unit/n_unit;
 
+  Real rin = acc.r_in;
   Real rmin_heat = acc.rmin_heat;
   Real rmax_heat = acc.rmax_heat;
   int weight = acc.heat_weight;
@@ -1715,12 +1841,13 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         }
         Real u_d = fmax(u0(m,IDN,k,j,i), dfloor);
         Real e_k = 0.5*(SQR(u0(m,IM1,k,j,i))+SQR(u0(m,IM2,k,j,i))+SQR(u0(m,IM3,k,j,i)))/u_d;
+        // TODO(@mhguo): remove e_m
         Real u_eint = fmax(u0(m,IEN,k,j,i) - e_k, efloor);
         Real u_temp = gm1*u_eint/u_d;
 
         Real lambda_cooling = ISMCoolFn(temp_unit*w_temp)/cooling_unit;
         // soft function
-        lambda_cooling *= exp(-1.0e1*pow(tfloor/w_temp,4.0));
+        lambda_cooling *= exp(-50.0*pow(tfloor/w_temp,4.0));
         Real q_cooling = w_dens*w_dens*lambda_cooling;
         Real bde = -q_cooling*bdt;
         
@@ -1810,7 +1937,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-    if (rmin_heat <= rad && rad <= rmax_heat) {
+    if (rin <= rad && rmin_heat <= rad && rad <= rmax_heat) {
       Real var = GetRadialVar(logcoolarr,rad,logr0,logh,bins);
       Real q_heating = (weight == 0)? var : var*w0(m,IDN,k,j,i);
       // soft function
@@ -1826,7 +1953,9 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         q_heating *= SQR(sin(0.25*M_PI*(rad/rmin_heat-1.0)));
       }
       // add soft ceiling
-      q_heating *= exp(-1.0e1*pow(w_temp/2.0e1,4.0));
+      // q_heating *= exp(-1.0e1*pow(w_temp/2.0e1,4.0));
+      // Stop heating when T>1 in code unit (T>7e7K in cgs)
+      q_heating *= exp(-1.0e1*pow(w_temp/2.0e0,4.0));
       //if (m==19 && k==4 && j==4 && i==4) {
       //  printf("q_heating: rad=%0.6e q_heating=%0.6e\n",rad,q_heating);
       //}

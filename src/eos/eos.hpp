@@ -33,6 +33,7 @@ struct EOS_Data {
   Real daverage;
   Real rdfloor;      // r-dependent dfloor
   Real r_in;
+  Real dt_floor;     // floor of timestep
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
   // or temperature e/d) into pressure.

@@ -564,7 +564,8 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   if (pmy_pack->pionn != nullptr) u = (pmy_pack->phydro->u0); // assume neutral density
                                                               //     >> ionized density
   // Normalization: a constant Mach number
-  auto &eos = pmy_pack->pmhd->peos->eos_data;
+  EOS_Data &eos = (pmy_pack->pmhd != nullptr) ?
+                  pmy_pack->pmhd->peos->eos_data : pmy_pack->phydro->peos->eos_data;
   auto &mbsize = pmy_pack->pmb->mb_size;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {

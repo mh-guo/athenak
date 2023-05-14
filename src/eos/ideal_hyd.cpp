@@ -9,8 +9,8 @@
 #include "athena.hpp"
 #include "hydro/hydro.hpp"
 #include "eos/eos.hpp"
-#include "coordinates/cell_locations.hpp"
 #include "eos/ideal_c2p_hyd.hpp"
+#include "coordinates/cell_locations.hpp"
 
 //----------------------------------------------------------------------------------------
 // ctor: also calls EOS base class constructor
@@ -43,7 +43,6 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   auto &size = pmy_pack->pmb->mb_size;
   Real r_in = eos_data.r_in;
   Real gm1 = (eos_data.gamma - 1.0);
-  Real igm1 = 1.0/(gm1);
 
   Real &dfloor_ = eos_data.dfloor;
   Real efloor = eos_data.pfloor/gm1;
