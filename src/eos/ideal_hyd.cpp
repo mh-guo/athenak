@@ -44,7 +44,6 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   Real r_in = eos_data.r_in;
   Real gm1 = (eos_data.gamma - 1.0);
 
-  Real &dfloor_ = eos_data.dfloor;
   Real efloor = eos_data.pfloor/gm1;
   Real &tfloor = eos_data.tfloor;
   Real &daverage = eos_data.daverage;
@@ -133,26 +132,12 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
               w.d/w_dim + w_dim/w.d > 1e2 || w.d/w_dip + w_dip/w.d > 1e2) {
             sum2++;
             fofc_flag = true;
-            // TODO(@mhguo): tmpcout!
-            //printf("dfloor m=%d %d %d %d rad=%.4e wd=%.4e ud=%.4e 
-            //km=%.4e kp=%.4e jm=%.4e jp=%.4e im=%.4e ip=%.4e\n",
-            //  m,k,j,i,rad,w.d,u.d,
-            //  cons(m,IDN,k-1,j,i),cons(m,IDN,k+1,j,i),
-            //  cons(m,IDN,k,j-1,i),cons(m,IDN,k,j+1,i),
-            //  cons(m,IDN,k,j,i-1),cons(m,IDN,k,j,i+1));
-            //w_dkm,w_dkp,w_djm,w_djp,w_dim,w_dip,
           }
         }
       }
     } else {
       // (@mhguo): beg of old floor
       Real dave = daverage;
-
-      // apply density floor, without changing momentum or energy
-      // TODO(@mhguo): rm this dfloor since it is done in SingleC2P_IdealHyd()
-      if (u.d < dfloor_) {
-        u.d = dfloor_;
-      }
       // (@mhguo) r-dependent floor
       if (rdfloor>0.0) {
         Real &x1min = size.d_view(m).x1min;
@@ -242,9 +227,6 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       // apply temperature floor
       Real tmp = gm1*w.e*di;
       if (tmp < tfloor) {
-        // TODO(@mhguo): tmpcout!
-        //printf("tfloor m=%d %d %d %d w_d=%.4e tmp=%.4e\n",
-        //  m,k,j,i,w_d,tmp);
         w.e = w.d*tfloor/gm1;
         u.e = w.e + e_k;
       }

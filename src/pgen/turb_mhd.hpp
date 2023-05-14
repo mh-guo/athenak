@@ -154,12 +154,9 @@ TurbulenceMhd::~TurbulenceMhd() {
 
 TaskStatus TurbulenceMhd::InitializeModes(int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
-  int &nx1 = indcs.nx1;
-  int &nx2 = indcs.nx2;
-  int &nx3 = indcs.nx3;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
   int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
@@ -552,8 +549,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
     m3 = gm_sum4[3];
 #endif
 
-  // TODO(@mhguo): rm this!
-  //std::cout<<"m0="<<m0<<"  m1="<<m1<<"  m2="<<m2<<"  m3="<<m3<<std::endl;
   Real m00 = m0;
   par_for("net_mom_2", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -601,8 +596,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
       force_new_(m,2,k,j,i) *= fac_smooth;
     }
   });
-  // TODO(@mhguo): rm this cout!
-  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
 
   m0 = 0.0, m1 = 0.0;
   if (!(pmy_pack->pmesh->multilevel)) {
@@ -721,9 +714,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
     s = m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
   }
 
-  // TODO(@mhguo): rm this cout!
-  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<"  s="<<s<<std::endl;
-
   // Now normalize new force array
   par_for("OU_process", DevExeSpace(),0,nmb-1,0,2,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
@@ -738,8 +728,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
 
 TaskStatus TurbulenceMhd::AddForcing(int stage) {
   // turb_flag == 1 : decaying turbulence
-  // TODO(@mhguo): rm this!
-  //std::cout << "turb_count=" << turb_count << std::endl;
   if (turb_flag == 1) {
     if (turb_count == 0) {
       return TaskStatus::complete;
@@ -831,17 +819,6 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
                                   -((f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i))
                                    +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k+1,j-1,i)))/dx2
                                   )*fac_beta;
-      }
-      // TODO(@mhguo): rm this cout!
-      if (m==1&&k==6&&j==6&&i==4) {
-        printf("den_new: %.6e\n",u(m,IDN,k,j,i));
-        printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),
-                u(m,IM3,k,j,i));
-        printf("ein_new: %.6e %.6e %.6e\n",u(m,IEN,k,j,i));
-        printf("f_new:   %.6e %.6e %.6e\n",f_n_(m,0,k,j,i),f_n_(m,1,k,j,i),
-                f_n_(m,2,k,j,i));
-        printf("b0_new:  %.6e %.6e %.6e\n",b0.x1f(m,k,j,i),b0.x2f(m,k,j,i),
-                b0.x3f(m,k,j,i));
       }
     });
     par_for("turb-be", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,

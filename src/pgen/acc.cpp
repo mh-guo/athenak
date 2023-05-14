@@ -102,10 +102,9 @@ struct pgenacc {
   Real heat_beg_time;
   Real heat_sof_time; // soft time
   int heat_cycle; // heating rate updating cycle
-  bool turb_init;
   int ndiag;
   Real t_cold;  // criterion of cold gas
-  Real t_hot;  // criterion of hot gas
+  Real tf_hot;  // criterion of hot gas as fraction of initial temperature
   DualArray1D<Real> dens_arr;
   DualArray1D<Real> logcooling_arr;
   array_acc::RadSum v_arr;
@@ -119,7 +118,6 @@ pgenacc acc;
 
 // prototypes for user-defined BCs and source terms
 void RadialBoundary(Mesh *pm);
-void FixedBoundary(Mesh *pm);
 void AddUserSrcs(Mesh *pm, const Real bdt);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
 
@@ -296,7 +294,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc.heat_tceiling = pin->GetOrAddReal("problem","heat_tceiling",
                         std::numeric_limits<float>::max());
   acc.t_cold = pin->GetOrAddReal("problem","t_cold",0.03);
-  acc.t_hot = pin->GetOrAddReal("problem","t_hot",0.3);
+  acc.tf_hot = pin->GetOrAddReal("problem","tf_hot",0.3);
   // End get parameters
 
   Real &mbh = acc.m_bh;
@@ -309,9 +307,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real &xi = acc.xi_entry;
   Real grav = acc.grav;
   //Real r_in_old = acc.r_in_old;
-
-  bool &turb = acc.turb;
-  Real &turb_amp = acc.turb_amp;
 
   // Find the equilibrium point of the cooling curve by n*Lambda-Gamma=0
   // Real number_density=hrate/ISMCoolFn(temp);
@@ -1037,7 +1032,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   Real gamma = acc.gamma;
   Real gm1 = gamma - 1.0;
   Real t_cold = acc.t_cold;
-  Real t_hot = acc.t_hot;
+  Real tf_hot = acc.tf_hot;
   // capture class variabels for kernel
   auto &u0_ = (pm->pmb_pack->pmhd != nullptr) ?
               pm->pmb_pack->pmhd->u0 : pm->pmb_pack->phydro->u0;
@@ -1100,7 +1095,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real rho_ini = DensFnDevice(x,d_arr);
     Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
     Real temp_ini = pgas_ini/rho_ini;
-    Real t_hot = t_hot*temp_ini;
+    Real t_hot = tf_hot*temp_ini;
     
     //Real coldgas = (temp<1e-2)? vol*dens : 0.0;
 
@@ -1288,13 +1283,6 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
       AddPowHeating(pm,bdt,u0,w0,eos_data);
     }
   }
-  // TODO(@mhguo): write a reasonable initial perturbation
-  //if (acc.turb_init) {
-  //  acc.pturb->InitializeModes(1);
-  //  acc.pturb->AddForcing(1);
-  //  delete acc.pturb;
-  //  acc.turb_init = false;
-  //}
   // (@mhguo) change inner radius, if necessary
   if (acc.r_in_new<acc.r_in_old) {
     Real t_now = pm->time-acc.r_in_beg_t;
@@ -1402,9 +1390,7 @@ void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int ks = indcs.ks, ke = indcs.ke;
   auto &size = pmbp->pmb->mb_size;
   int nmb1 = pmbp->nmb_thispack - 1;
-  Real use_e = eos_data.use_e;
   Real gamma = eos_data.gamma;
-  Real gm1 = gamma - 1.0;
   Real temp_unit = pmbp->punit->temperature_cgs();
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;

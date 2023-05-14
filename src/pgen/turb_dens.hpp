@@ -568,8 +568,6 @@ TaskStatus TurbulenceDens::InitializeModes(int stage) {
     m3 = gm_sum4[3];
 #endif
 
-  // TODO(@mhguo): rm this!
-  //std::cout<<"m0="<<m0<<"  m1="<<m1<<"  m2="<<m2<<"  m3="<<m3<<std::endl;
   Real m00 = m0;
   par_for("net_mom_2", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -701,9 +699,6 @@ TaskStatus TurbulenceDens::InitializeModes(int stage) {
     s = m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
   }*/
   s = sqrt(dedt/(m1/m0));
-
-  // TODO(@mhguo): rm this!
-  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<"  s="<<s<<std::endl;
 
   // Now normalize new force array
   par_for("OU_process", DevExeSpace(),0,nmb-1,0,2,0,ncells3-1,0,ncells2-1,0,ncells1-1,
