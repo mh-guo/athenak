@@ -368,6 +368,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     acc->heatnorm = acc->fac_heat*coolrate/heatrate;
   }
 
+  // Spherical Grid for user-defined history
+  auto &grids = spherical_grids;
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, 1.1*acc->r_in));
+  // Enroll additional radii for flux analysis by
+  // pushing back the grids vector with additional SphericalGrid instances
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 10.0*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 100.0*acc->r_in));
+
   // Print info
   if (global_variable::my_rank == 0) {
     std::cout << "============== Check Initialization ===============" << std::endl;
@@ -1018,8 +1026,6 @@ void AccRefine(MeshBlockPack* pmbp) {
   int nmb = pmbp->nmb_thispack;
   int mbs = pmesh->gids_eachrank[global_variable::my_rank];
   if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
-    auto &u0 = (pmbp->phydro != nullptr)? pmbp->phydro->u0 : pmbp->pmhd->u0;
-    auto &w0 = (pmbp->phydro != nullptr)? pmbp->phydro->w0 : pmbp->pmhd->w0;
     par_for_outer("AccRefineCond",DevExeSpace(), 0, 0, 0, (nmb-1),
     KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
       Real &x1min = size.d_view(m).x1min;
@@ -1039,16 +1045,52 @@ void AccRefine(MeshBlockPack* pmbp) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn RadialBoundary
-//! \brief Sets boundary condition on surfaces of computational domain and radial regions
+//! \fn AccHistOutput
+//! \brief User-defined history output
 
-// TODO(@mhguo): write a correct output value such as accretion rate
 void AccHistOutput(HistoryData *pdata, Mesh *pm) {
-  //int n0 = pdata->nhist;
-  int n0 = 0;
-  const int nuser = 58;
-  pdata->nhist = n0 + nuser;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  Real &rin = acc->r_in;
+  Real &rbout = acc->rb_out;
+  Real &radentry = acc->rad_entry;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  auto &d_arr = acc->dens_arr;
+  Real gamma = acc->gamma;
+  Real gm1 = gamma - 1.0;
+  Real t_cold = acc->t_cold;
+  Real tf_hot = acc->tf_hot;
+  int nvars; bool is_mhd = false;
+  DvceArray5D<Real> w0_, bcc0_;
+  if (pmbp->phydro != nullptr) {
+    nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
+    w0_ = pmbp->phydro->w0;
+  } else if (pmbp->pmhd != nullptr) {
+    is_mhd = true;
+    nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+    w0_ = pmbp->pmhd->w0;
+    bcc0_ = pmbp->pmhd->bcc0;
+  }
+  // extract grids, number of radii, number of fluxes, and history appending index
+  auto &grids = pm->pgen->spherical_grids;
+  int nradii = grids.size();
+  //const int nflux = (is_mhd) ? 7 : 6;
+  const int nflux = 7;
+  // TODO(@mhguo): check what is necessary!
+  // set number of and names of history variables for hydro or mhd
+  //  (0) mass
+  //  (1) mass accretion rate
+  //  (2) energy flux
+  //  (3) angular momentum flux * 3
+  //  (4) magnetic flux (iff MHD)
+  const int nsph = 3 * nflux;
+  const int nreduce = 58;
+  const int nuser = nsph + nreduce;
+  pdata->nhist = nuser;
   const char *data_label[nuser] = {
+    "m_1", "mdot_1", "edot_1", "lxdot_1", "lydot_1", "lzdot_1", "phi_1",
+    "m_10", "mdot_10", "edot_10", "lxdot_10", "lydot_10", "lzdot_10", "phi_10",
+    "m_100", "mdot_100", "edot_100", "lxdot_100", "lydot_100", "lzdot_100", "phi_100",
     "Mdot",  "Mglb",  "M_in",  "Lx_in", "Ly_in", "Lz_in", "L_in",
     "Vcold", "Mcold", "Lx_c",  "Ly_c",  "Lz_c",  "L_c",
     "Vwarm", "Mwarm", "Lx_w",  "Ly_w",  "Lz_w",  "L_w",
@@ -1062,32 +1104,94 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     //"Lx0c",  "Ly0c",  "Lz0c",  "L0c",
   };
   for (int n=0; n<nuser; ++n) {
-    pdata->label[n0+n] = data_label[n];
+    pdata->label[n] = data_label[n];
   }
 
-  Real &rin = acc->r_in;
-  Real &rbout = acc->rb_out;
-  Real &radentry = acc->rad_entry;
-  Real &k0 = acc->k0_entry;
-  Real &xi = acc->xi_entry;
-  auto &d_arr = acc->dens_arr;
-  Real gamma = acc->gamma;
-  Real gm1 = gamma - 1.0;
-  Real t_cold = acc->t_cold;
-  Real tf_hot = acc->tf_hot;
+  // go through angles at each radii:
+  DualArray2D<Real> interpolated_bcc;  // needed for MHD
+  for (int g=0; g<nradii; ++g) {
+    // zero fluxes at this radius
+    for (int i=0; i<nflux; ++i) {
+      pdata->hdata[nflux*g+i] = 0.0;
+    }
+    // interpolate primitives (and cell-centered magnetic fields iff mhd)
+    if (is_mhd) {
+      grids[g]->InterpolateToSphere(3, bcc0_);
+      Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
+      Kokkos::deep_copy(interpolated_bcc, grids[g]->interp_vals);
+      interpolated_bcc.template modify<DevExeSpace>();
+      interpolated_bcc.template sync<HostMemSpace>();
+    }
+    grids[g]->InterpolateToSphere(nvars, w0_);
+    // compute fluxes
+    for (int n=0; n<grids[g]->nangles; ++n) {
+      // extract coordinate data at this angle
+      Real r = grids[g]->radius;
+      Real x1 = grids[g]->interp_coord.h_view(n,0);
+      Real x2 = grids[g]->interp_coord.h_view(n,1);
+      Real x3 = grids[g]->interp_coord.h_view(n,2);
+      // extract interpolated primitives
+      Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+      Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+      Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+      Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+      Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+      // extract interpolated field components (iff is_mhd)
+      Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
+      if (is_mhd) {
+        int_bx = interpolated_bcc.h_view(n,IBX);
+        int_by = interpolated_bcc.h_view(n,IBY);
+        int_bz = interpolated_bcc.h_view(n,IBZ);
+      }
+
+      Real v1 = int_vx, v2 = int_vy, v3 = int_vz;
+      Real e_k = 0.5*int_dn*(v1*v1+v2*v2+v3*v3);
+      Real b1 = int_bx, b2 = int_by, b3 = int_bz;
+      Real b_sq = b1*b1 + b2*b2 + b3*b3;
+      Real r_sq = SQR(r);
+      Real drdx = x1/r;
+      Real drdy = x2/r;
+      Real drdz = x3/r;
+      // v_r
+      Real vr  = drdx*v1 + drdy*v2 + drdz*v3;
+      // b_r
+      Real br  = drdx*b1 + drdy*b2 + drdz*b3;
+      // integration params
+      Real &domega = grids[g]->solid_angles.h_view(n);
+      
+      // compute mass flux
+      pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
+
+      // compute mass flux
+      pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
+
+      // compute energy flux
+      // TODO(@mhguo): check whether this is correct!
+      Real t1_0 = (int_ie + 0.5*e_k + 0.5*b_sq)*vr;
+      pdata->hdata[nflux*g+2] += 1.0*t1_0*r_sq*domega;
+
+      // compute angular momentum flux
+      // TODO(@mhguo): check whether this is correct!
+      pdata->hdata[nflux*g+3] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+      pdata->hdata[nflux*g+4] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+      pdata->hdata[nflux*g+5] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
+
+      // compute magnetic flux
+      if (is_mhd) {
+        pdata->hdata[nflux*g+6] += 0.5*fabs(br)*r_sq*domega;
+      }
+    }
+  }
+
   // capture class variabels for kernel
-  auto &u0_ = (pm->pmb_pack->pmhd != nullptr) ?
-              pm->pmb_pack->pmhd->u0 : pm->pmb_pack->phydro->u0;
-  auto &w0_ = (pm->pmb_pack->pmhd != nullptr) ?
-              pm->pmb_pack->pmhd->w0 : pm->pmb_pack->phydro->w0;
-  auto &size = pm->pmb_pack->pmb->mb_size;
+  auto &size = pmbp->pmb->mb_size;
 
   // loop over all MeshBlocks in this pack
-  auto &indcs = pm->pmb_pack->pmesh->mb_indcs;
+  auto &indcs = pm->mb_indcs;
   int is = indcs.is; int nx1 = indcs.nx1;
   int js = indcs.js; int nx2 = indcs.nx2;
   int ks = indcs.ks; int nx3 = indcs.nx3;
-  const int nmkji = (pm->pmb_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
   array_sum::GlobalSum sum_this_mb0;
@@ -1099,7 +1203,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     sum_this_mb1.the_array[n] = 0.0;
     sum_this_mb2.the_array[n] = 0.0;
   }
-  Kokkos::parallel_reduce("UserHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  Kokkos::parallel_reduce("AccHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum0,
   array_sum::GlobalSum &mb_sum1, array_sum::GlobalSum &mb_sum2) {
     // compute n,k,j,i indices of thread
@@ -1125,10 +1229,10 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
     Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
 
-    Real &dens = u0_(m,IDN,k,j,i);
-    Real &mom1 = u0_(m,IM1,k,j,i);
-    Real &mom2 = u0_(m,IM2,k,j,i);
-    Real &mom3 = u0_(m,IM3,k,j,i);
+    Real &dens = w0_(m,IDN,k,j,i);
+    Real mom1 = dens*w0_(m,IVX,k,j,i);
+    Real mom2 = dens*w0_(m,IVY,k,j,i);
+    Real mom3 = dens*w0_(m,IVZ,k,j,i);
 
     Real temp = gm1 * w0_(m,IEN,k,j,i)/w0_(m,IDN,k,j,i);
 
@@ -1230,7 +1334,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real dm_r2w = dv_r2w*dens;
     Real dm_r2h = dv_r2h*dens;
 
-    Real vars[nuser] = {
+    Real vars[nreduce] = {
       mdot,    dm_glb,  dm_in,   lx_in,   ly_in,   lz_in,   l_in,
       dv_cold, dm_cold, lx_c,    ly_c,    lz_c,    l_c,
       dv_warm, dm_warm, lx_w,    ly_w,    lz_w,    l_w,
@@ -1250,12 +1354,12 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       hvars0.the_array[n] = vars[n];
       hvars1.the_array[n] = vars[n+NREDUCTION_VARIABLES];
     }
-    for (int n=0; n<nuser-2*NREDUCTION_VARIABLES; ++n) {
+    for (int n=0; n<nreduce-2*NREDUCTION_VARIABLES; ++n) {
       hvars2.the_array[n] = vars[n+2*NREDUCTION_VARIABLES];
     }
 
     // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
-    for (int n=nuser-2*NREDUCTION_VARIABLES; n<NREDUCTION_VARIABLES; ++n) {
+    for (int n=nreduce-2*NREDUCTION_VARIABLES; n<NREDUCTION_VARIABLES; ++n) {
       hvars2.the_array[n] = 0.0;
     }
 
@@ -1269,11 +1373,11 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 
   // store data into hdata array
   for (int n=0; n<NREDUCTION_VARIABLES; ++n) {
-    pdata->hdata[n0+n] = sum_this_mb0.the_array[n];
-    pdata->hdata[NREDUCTION_VARIABLES+n0+n] = sum_this_mb1.the_array[n];
+    pdata->hdata[nsph+n] = sum_this_mb0.the_array[n];
+    pdata->hdata[nsph+NREDUCTION_VARIABLES+n] = sum_this_mb1.the_array[n];
   }
-  for (int n=0; n<nuser-2*NREDUCTION_VARIABLES; ++n) {
-    pdata->hdata[2*NREDUCTION_VARIABLES+n0+n] = sum_this_mb2.the_array[n];
+  for (int n=0; n<nreduce-2*NREDUCTION_VARIABLES; ++n) {
+    pdata->hdata[nsph+2*NREDUCTION_VARIABLES+n] = sum_this_mb2.the_array[n];
   }
 
   return;
@@ -1284,13 +1388,12 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 //! \brief Add User Source Terms
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 void AddUserSrcs(Mesh *pm, const Real bdt) {
-  DvceArray5D<Real> &u0 = (pm->pmb_pack->pmhd != nullptr) ?
-                          pm->pmb_pack->pmhd->u0 : pm->pmb_pack->phydro->u0;
-  const DvceArray5D<Real> &w0 = (pm->pmb_pack->pmhd != nullptr) ?
-                                pm->pmb_pack->pmhd->w0 : pm->pmb_pack->phydro->w0;
-  const EOS_Data &eos_data = (pm->pmb_pack->pmhd != nullptr) ?
-                             pm->pmb_pack->pmhd->peos->eos_data :
-                             pm->pmb_pack->phydro->peos->eos_data;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  DvceArray5D<Real> &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  const DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ?
+                                pmbp->pmhd->w0 : pmbp->phydro->w0;
+  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
+                             pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
     Diagnostic(pm,bdt,u0,w0,eos_data);
   }
@@ -1339,11 +1442,11 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
       acc->r_in = acc->r_in_new;
     }
     // update problem-specific parameters
-    if (pm->pmb_pack->phydro != nullptr) {
-      pm->pmb_pack->phydro->peos->eos_data.r_in = acc->r_in;
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->peos->eos_data.r_in = acc->r_in;
     }
-    if (pm->pmb_pack->pmhd != nullptr) {
-      pm->pmb_pack->pmhd->peos->eos_data.r_in = acc->r_in;
+    if (pmbp->pmhd != nullptr) {
+      pmbp->pmhd->peos->eos_data.r_in = acc->r_in;
     }
     if (global_variable::my_rank == 0 && pm->ncycle%acc->ndiag==0) {
       std::cout << " r_in=" << acc->r_in << std::endl;

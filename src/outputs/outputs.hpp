@@ -16,7 +16,7 @@
 
 // TODO(@mhguo): make this better!
 //#define NHISTORY_VARIABLES 12
-#define NHISTORY_VARIABLES 80
+#define NHISTORY_VARIABLES 100
 //#if NHISTORY_VARIABLES > NREDUCTION_VARIABLES
 //    #error NHISTORY > NREDUCTION in outputs.hpp
 //#endif
