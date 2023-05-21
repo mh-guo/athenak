@@ -60,6 +60,7 @@ Real GetRadialVar(DualArray1D<Real> vararr, Real rad, Real logr0, Real logh, int
 
 struct pgenacc {
   Real grav;  // gravitational constant in code unit
+  Real r_refine; // mesh refinement radius
   Real tfloor;
   Real heat_tceiling;
   Real gamma;    // EOS parameters
@@ -119,6 +120,7 @@ pgenacc* acc = new pgenacc();
 // prototypes for user-defined BCs and source terms
 void RadialBoundary(Mesh *pm);
 void AddUserSrcs(Mesh *pm, const Real bdt);
+void AccRefine(MeshBlockPack* pmbp);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
 void AccFinalWork(ParameterInput *pin, Mesh *pm);
 
@@ -162,6 +164,7 @@ static Real Acceleration(const Real r, const Real m, const Real mc, const Real r
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = RadialBoundary;
   user_srcs_func = AddUserSrcs;
+  user_ref_func = AccRefine;
   user_hist_func = AccHistOutput;
   pgen_final_func = AccFinalWork;
   Kokkos::realloc(acc->dens_arr,NLEN_DENS_ARRAY);
@@ -209,6 +212,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Get parameters
   acc->grav = pmbp->punit->grav_constant();
+  acc->r_refine = pin->GetOrAddReal("problem","r_refine",0.0);
   acc->ndiag = pin->GetOrAddInteger("problem","ndiag",-1);
   acc->rho_0 = pin->GetOrAddReal("problem","dens",1.0);
   Real temp_kelvin = pin->GetOrAddReal("problem","temp",1.0);
@@ -997,6 +1001,41 @@ void RadialBoundary(Mesh *pm) {
   }
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn AccRefine
+//! \brief User-defined refinement condition(s)
+
+void AccRefine(MeshBlockPack* pmbp) {
+  // capture variables for kernels
+  Mesh *pmesh = pmbp->pmesh;
+  auto &size = pmbp->pmb->mb_size;
+
+  // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
+  auto refine_flag_ = pmesh->pmr->refine_flag;
+  auto &rad_thresh  = acc->r_refine;
+  int nmb = pmbp->nmb_thispack;
+  int mbs = pmesh->gids_eachrank[global_variable::my_rank];
+  if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
+    auto &u0 = (pmbp->phydro != nullptr)? pmbp->phydro->u0 : pmbp->pmhd->u0;
+    auto &w0 = (pmbp->phydro != nullptr)? pmbp->phydro->w0 : pmbp->pmhd->w0;
+    par_for_outer("AccRefineCond",DevExeSpace(), 0, 0, 0, (nmb-1),
+    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
+      Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
+      Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
+      Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
+      if (rad_min < rad_thresh) {refine_flag_.d_view(m+mbs) = 1;}
+      //if (rad_min > rad_thresh) {refine_flag_.d_view(m+mbs) = -1;}
+    });
+  }
 }
 
 //----------------------------------------------------------------------------------------
