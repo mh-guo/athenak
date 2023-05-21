@@ -967,7 +967,6 @@ void RadialBoundary(Mesh *pm) {
   });
 
   if (pm->pmb_pack->pmhd != nullptr) {
-    //TODO(@mhguo) Do nothing?
     auto b0 = pm->pmb_pack->pmhd->b0;
     par_for("bfield_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -1158,7 +1157,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       Real br  = drdx*b1 + drdy*b2 + drdz*b3;
       // integration params
       Real &domega = grids[g]->solid_angles.h_view(n);
-      
+
       // compute mass flux
       pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
 
@@ -1591,10 +1590,9 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
   MeshBlockPack *pmy_pack = pm->pmb_pack;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
-  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
-  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
-  int nmb1 = pmy_pack->nmb_thispack - 1;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
   const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
@@ -1602,7 +1600,6 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cfl_no = pm->cfl_no;
   auto &eos = eos_data;
   Real use_e = eos_data.use_e;
-  Real dfloor = eos_data.dfloor;
   Real tfloor = eos_data.tfloor;
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
@@ -1612,7 +1609,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cooling_unit = pmy_pack->punit->pressure_cgs()/pmy_pack->punit->time_cgs()
                       /n_unit/n_unit;
   Real heating_unit = pmy_pack->punit->pressure_cgs()/pmy_pack->punit->time_cgs()/n_unit;
-  Real gamma_heating = 2.0e-26/heating_unit;
+  Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
 
   bool is_hydro = true;
   DvceArray5D<Real> bcc;
@@ -1713,44 +1710,6 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       }
     }
   }
-  return;
-
-  par_for("cooling", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    // temperature in code unit
-    Real w_dens = w0(m,IDN,k,j,i);
-    Real w_temp = 1.0;
-    Real w_eint = 1.0;
-    if (use_e) {
-      w_temp = w0(m,IEN,k,j,i)/w_dens*gm1;
-      w_eint = w0(m,IEN,k,j,i);
-    } else {
-      w_temp = w0(m,ITM,k,j,i);
-      w_eint = w0(m,ITM,k,j,i)*w_dens/gm1;
-    }
-    Real u_d = fmax(u0(m,IDN,k,j,i), dfloor);
-    Real e_k = 0.5*(SQR(u0(m,IM1,k,j,i))+SQR(u0(m,IM2,k,j,i))+SQR(u0(m,IM3,k,j,i)))/u_d;
-    Real u_eint = u0(m,IEN,k,j,i) - e_k;
-    Real u_temp = gm1*u_eint/u_d;
-
-    Real lambda_cooling = ISMCoolFn(temp_unit*w_temp)/cooling_unit;
-    // soft function
-    lambda_cooling *= exp(-1.0e1*pow(tfloor/w_temp,4.0));
-    Real q_cooling = w_dens*w_dens*lambda_cooling;
-    Real bde = -q_cooling*bdt;
-
-    // make sure cooling is not too fast
-    //if (bde < -0.5*u_eint) {
-    //  bde = -0.5*u_eint;
-    //}
-    if (u_temp<=tfloor*1.001) {
-      bde = 0.0;
-    } else if (gm1*(u_eint+bde)/u_d<tfloor*1.001) {
-      bde = (u_d*tfloor/gm1-u_eint);
-    }
-
-    u0(m,IEN,k,j,i) += bde;
-  });
   return;
 }
 
@@ -1896,10 +1855,8 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
   Real use_e = eos_data.use_e;
-  Real dfloor = eos_data.dfloor;
   Real tfloor = eos_data.tfloor;
   Real gm1 = eos_data.gamma - 1.0;
-  Real efloor = eos_data.pfloor/gm1;
   Real temp_unit = pmbp->punit->temperature_cgs();
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;
@@ -1964,35 +1921,20 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
           w_temp = w0(m,ITM,k,j,i);
           w_eint = w0(m,ITM,k,j,i)*w_dens/gm1;
         }
-        Real u_d = fmax(u0(m,IDN,k,j,i), dfloor);
-        Real e_k = 0.5*(SQR(u0(m,IM1,k,j,i))+SQR(u0(m,IM2,k,j,i))+SQR(u0(m,IM3,k,j,i)))/u_d;
-        // TODO(@mhguo): remove e_m
-        Real u_eint = fmax(u0(m,IEN,k,j,i) - e_k, efloor);
-        Real u_temp = gm1*u_eint/u_d;
 
         Real lambda_cooling = ISMCoolFn(temp_unit*w_temp)/cooling_unit;
         // soft function
         lambda_cooling *= exp(-50.0*pow(tfloor/w_temp,4.0));
         Real q_cooling = w_dens*w_dens*lambda_cooling;
-        Real bde = -q_cooling*bdt;
-
-        // make sure cooling is not too fast
-        //if (bde < -0.5*u_eint) {
-        //  bde = -0.5*u_eint;
-        //}
-        //if (u_temp<=tfloor*2.0) {
         if (w_temp<=tfloor*10.0) {
-          bde = 0.0;
-        } else if (gm1*(u_eint+bde)/u_d<tfloor*1.001) {
-          bde = (u_d*tfloor/gm1-u_eint);
+          q_cooling = 0.0;
         }
-        q_cooling = -bde/bdt;
         q_cooling = fmax(q_cooling,0.0);
         //if (m==19 && k==4 && j==4 && i==4) {
         //  printf("sum_radial: i=%d rad=%0.6e vol=%0.6e dens=%0.6e temp=%0.6e \
         //        q_cooling=%0.6e\n", ipps,rad,vol,w0(m,IDN,k,j,i),temp,q_cooling);
         //}
-        // TODO(@mhguo): tmpcout!
+        // (@mhguo) tmpcout!
         Real dvar = (weight == 0)? vol : vol*w_dens;
         varr.the_array[ipps] += dvar;
         carr.the_array[ipps] += vol*q_cooling;
@@ -2004,8 +1946,10 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       tmpfac *= SQR(sin(0.5*M_PI*(pm->time-acc->heat_beg_time)/acc->heat_sof_time));
     }
     #if MPI_PARALLEL_ENABLED
-    MPI_Allreduce(MPI_IN_PLACE, &(v_arr.the_array[0]), bins, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, &(c_arr.the_array[0]), bins, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &(v_arr.the_array[0]), bins, MPI_ATHENA_REAL, MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &(c_arr.the_array[0]), bins, MPI_ATHENA_REAL, MPI_SUM,
+                  MPI_COMM_WORLD);
     #endif
     for ( int i = 0; i < bins; i++ ) {
       if (v_arr.the_array[i]>0.0) {
