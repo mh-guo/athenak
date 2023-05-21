@@ -364,7 +364,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
       ampt(2,5) = -kx*amp2_.h_view(n,1) - ky*amp1_.h_view(n,7);
       ampt(2,6) = -kx*amp2_.h_view(n,2) + ky*amp1_.h_view(n,4);
       ampt(2,7) = -kx*amp2_.h_view(n,3) + ky*amp1_.h_view(n,5);
-      
+
       for (int i=0; i<8; ++i) {
         amp1_.h_view(n,i) = (nk2*nk2+nk3*nk3)>0? ampt(0,i)/sqrt(ky*ky+kz*kz) : 0.0;
         amp2_.h_view(n,i) = (nk3*nk3+nk1*nk1)>0? ampt(1,i)/sqrt(kz*kz+kx*kx) : 0.0;

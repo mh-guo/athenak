@@ -369,7 +369,7 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
       ampt(2,5) = -kx*amp2_.h_view(n,1) - ky*amp1_.h_view(n,7);
       ampt(2,6) = -kx*amp2_.h_view(n,2) + ky*amp1_.h_view(n,4);
       ampt(2,7) = -kx*amp2_.h_view(n,3) + ky*amp1_.h_view(n,5);
-      
+
       for (int i=0; i<8; ++i) {
         amp1_.h_view(n,i) = (nk2*nk2+nk3*nk3)>0? ampt(0,i)/sqrt(ky*ky+kz*kz) : 0.0;
         amp2_.h_view(n,i) = (nk3*nk3+nk1*nk1)>0? ampt(1,i)/sqrt(kz*kz+kx*kx) : 0.0;
@@ -559,7 +559,7 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
 
   // Calculate normalization of new force array so that energy input rate ~ dedt
   DvceArray5D<Real> u;
-  
+
   if (pmy_pack->phydro != nullptr) u = (pmy_pack->phydro->u0);
   if (pmy_pack->pmhd != nullptr) u = (pmy_pack->pmhd->u0);
   if (pmy_pack->pionn != nullptr) u = (pmy_pack->phydro->u0); // assume neutral density
@@ -569,7 +569,7 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
   //if (pmy_pack->pmhd != nullptr) w = (pmy_pack->pmhd->w0);
   //if (pmy_pack->pionn != nullptr) w = (pmy_pack->phydro->w0); // assume neutral density
                                                               //     >> ionized density
-  
+
   // Normalization: a constant beta
   auto &eos = pmy_pack->pmhd->peos->eos_data;
   auto &mbsize = pmy_pack->pmb->mb_size;

@@ -12,6 +12,7 @@
 #include <limits>
 #include <algorithm>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -643,16 +644,10 @@ TaskStatus TurbulenceVel::InitializeModes(int stage) {
       // force_sum::GlobalSum fsum;
       // fsum.the_array[IDN] = (v1*v1+v2*v2+v3*v3);
       // fsum.the_array[IM1] = u1*v1 + u2*v2 + u3*v3;
-      
+
       Real u1 = u(m,IM1,k,j,i);
       Real u2 = u(m,IM2,k,j,i);
       Real u3 = u(m,IM3,k,j,i);
-
-      //if (m==0&&k==6&&j==6&&i==6) {
-      //  printf("normden: %.6e\n",u(m,IDN,k,j,i));
-      //  printf("normmom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
-      //  printf("normv: %.6e %.6e %.6e\n",v1,v2,v3);
-      //}
 
       array_sum::GlobalSum fsum;
       sum_m0 += vol*u(m,IDN,k,j,i)*(v1*v1+v2*v2+v3*v3);
@@ -714,7 +709,7 @@ TaskStatus TurbulenceVel::InitializeModes(int stage) {
 
 TaskStatus TurbulenceVel::AddForcing(int stage) {
   // turb_flag == 1 : decaying turbulence
-  // TODO: rm this!
+  // TODO(@mhguo): rm this!
   std::cout << "turb_count=" << turb_count << std::endl;
   if (turb_flag == 1) {
     if (turb_count == 0) {

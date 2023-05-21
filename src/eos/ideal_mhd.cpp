@@ -408,7 +408,6 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         prim(m,IEN,k,j,i) = w.e;
       }
     }
-
   }, Kokkos::Sum<int>(nfofc_d), Kokkos::Sum<int>(nfofc_p), Kokkos::Sum<int>(nfofc_g));
 
   // store appropriate counters

@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file acc.cpp
+//! \file acc->cpp
 //! \brief Attempt to build a model for Accretion of Black Holes in Elliptical Galaxies
 
 // Athena++ headers
@@ -112,7 +112,7 @@ struct pgenacc {
   //TurbulenceInit *pturb;
 };
 
-pgenacc acc;
+pgenacc* acc = new pgenacc();
 
 //DualArray1D<Real> dens_arr("dens_arr", 512);
 
@@ -120,6 +120,7 @@ pgenacc acc;
 void RadialBoundary(Mesh *pm);
 void AddUserSrcs(Mesh *pm, const Real bdt);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
+void AccFinalWork(ParameterInput *pin, Mesh *pm);
 
 void Diagnostic(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                 const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
@@ -152,7 +153,7 @@ static Real Acceleration(const Real r, const Real m, const Real mc, const Real r
   return -g*(m+NFWMass(r,mc,rc)+NFWMass(r,ms,rs))/SQR(r);
 }
 
-} // namespace pgen_acc
+} // namespace
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
@@ -162,8 +163,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = RadialBoundary;
   user_srcs_func = AddUserSrcs;
   user_hist_func = AccHistOutput;
-  Kokkos::realloc(acc.dens_arr,NLEN_DENS_ARRAY);
-  Kokkos::realloc(acc.logcooling_arr,NREDUCTION_RADIAL);
+  pgen_final_func = AccFinalWork;
+  Kokkos::realloc(acc->dens_arr,NLEN_DENS_ARRAY);
+  Kokkos::realloc(acc->logcooling_arr,NREDUCTION_RADIAL);
   //dens_arr("dens_arr", pp->nmb_thispack, 512),
 
   // capture variables for kernel
@@ -177,9 +179,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int nmb1 = (pmbp->nmb_thispack-1);
 
   // Check if turn on the problem
-  acc.potential = pin->GetOrAddBoolean("problem","potential",false);
+  acc->potential = pin->GetOrAddBoolean("problem","potential",false);
   bool profile = pin->GetOrAddBoolean("problem","profile",false);
-  if (!profile && !acc.potential) {
+  if (!profile && !acc->potential) {
     if (pmbp->phydro != nullptr) {
       auto &u0 = pmbp->phydro->u0;
       par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
@@ -206,107 +208,106 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // Get parameters
-  acc.grav = pmbp->punit->grav_constant();
-  acc.ndiag = pin->GetOrAddInteger("problem","ndiag",-1);
-  acc.rho_0 = pin->GetOrAddReal("problem","dens",1.0);
+  acc->grav = pmbp->punit->grav_constant();
+  acc->ndiag = pin->GetOrAddInteger("problem","ndiag",-1);
+  acc->rho_0 = pin->GetOrAddReal("problem","dens",1.0);
   Real temp_kelvin = pin->GetOrAddReal("problem","temp",1.0);
   bool rst_flag = pin->GetOrAddBoolean("problem","rst",false);
   std::string rst_file = pin->GetOrAddString("problem", "rst_file", "none");
   int old_level = pin->GetOrAddInteger("problem", "old_level", 0);
 
-  if (acc.potential) {
-    acc.m_bh = pin->GetReal("problem","m_bh");
-    acc.r_in = pin->GetReal("problem","r_in");
-    acc.r_in_old = pin->GetOrAddReal("problem","r_in_old",acc.r_in);
-    acc.r_in_new = pin->GetOrAddReal("problem","r_in_new",acc.r_in);
-    acc.r_in_beg_t = pin->GetOrAddReal("problem","r_in_beg_t",0.0);
-    acc.r_in_sof_t = pin->GetOrAddReal("problem","r_in_sof_t",0.0);
-    if (acc.r_in_new<acc.r_in_old) {
-      Real t_now = pmbp->pmesh->time-acc.r_in_beg_t;
+  if (acc->potential) {
+    acc->m_bh = pin->GetReal("problem","m_bh");
+    acc->r_in = pin->GetReal("problem","r_in");
+    acc->r_in_old = pin->GetOrAddReal("problem","r_in_old",acc->r_in);
+    acc->r_in_new = pin->GetOrAddReal("problem","r_in_new",acc->r_in);
+    acc->r_in_beg_t = pin->GetOrAddReal("problem","r_in_beg_t",0.0);
+    acc->r_in_sof_t = pin->GetOrAddReal("problem","r_in_sof_t",0.0);
+    if (acc->r_in_new<acc->r_in_old) {
+      Real t_now = pmbp->pmesh->time-acc->r_in_beg_t;
       if (t_now<=0.0) {
-        acc.r_in = acc.r_in_old;
-      }
-      else if (t_now<acc.r_in_sof_t) {
-        Real t_ratio = t_now/acc.r_in_sof_t;
-        //acc.r_in = std::pow(rinn,t_ratio)*std::pow(rino,(1.0-t_ratio));
-        acc.r_in = acc.r_in_new*t_ratio+acc.r_in_old*(1.0-t_ratio);
+        acc->r_in = acc->r_in_old;
+      } else if (t_now<acc->r_in_sof_t) {
+        Real t_ratio = t_now/acc->r_in_sof_t;
+        //acc->r_in = std::pow(rinn,t_ratio)*std::pow(rino,(1.0-t_ratio));
+        acc->r_in = acc->r_in_new*t_ratio+acc->r_in_old*(1.0-t_ratio);
       } else {
-        acc.r_in = acc.r_in_new;
+        acc->r_in = acc->r_in_new;
       }
     }
-    acc.m_star = pin->GetReal("problem","m_star");
-    acc.r_star = pin->GetReal("problem","r_star");
-    acc.m_dm = pin->GetReal("problem","m_dm");
-    acc.r_dm = pin->GetReal("problem","r_dm");
-    acc.sink_d = pin->GetReal("problem","sink_d");
-    acc.sink_t = pin->GetReal("problem","sink_t");
-    acc.rad_entry = pin->GetReal("problem","rad_entry");
-    acc.dens_entry = pin->GetReal("problem","dens_entry");
-    acc.k0_entry = pin->GetReal("problem","k0_entry");
-    acc.xi_entry = pin->GetReal("problem","xi_entry");
-    acc.rb_in = pin->GetOrAddReal("problem","rb_in",0.0);
-    acc.rb_out = pin->GetOrAddReal("problem","rb_out",100.0);
+    acc->m_star = pin->GetReal("problem","m_star");
+    acc->r_star = pin->GetReal("problem","r_star");
+    acc->m_dm = pin->GetReal("problem","m_dm");
+    acc->r_dm = pin->GetReal("problem","r_dm");
+    acc->sink_d = pin->GetReal("problem","sink_d");
+    acc->sink_t = pin->GetReal("problem","sink_t");
+    acc->rad_entry = pin->GetReal("problem","rad_entry");
+    acc->dens_entry = pin->GetReal("problem","dens_entry");
+    acc->k0_entry = pin->GetReal("problem","k0_entry");
+    acc->xi_entry = pin->GetReal("problem","xi_entry");
+    acc->rb_in = pin->GetOrAddReal("problem","rb_in",0.0);
+    acc->rb_out = pin->GetOrAddReal("problem","rb_out",100.0);
   } else {
     return;
   }
-  acc.turb = pin->GetOrAddBoolean("problem","turb",false);
-  if (acc.turb) {
-    acc.turb_amp = pin->GetOrAddReal("problem","turb_amp",0.0);
+  acc->turb = pin->GetOrAddBoolean("problem","turb",false);
+  if (acc->turb) {
+    acc->turb_amp = pin->GetOrAddReal("problem","turb_amp",0.0);
   }
-  acc.cooling = pin->GetOrAddBoolean("problem","cooling",false);
-  acc.heating_ini = pin->GetOrAddBoolean("problem","heating_ini",false);
-  acc.heating_ana = pin->GetOrAddBoolean("problem","heating_ana",false);
-  acc.heating_equ = pin->GetOrAddBoolean("problem","heating_equ",false);
-  acc.heating_pow = pin->GetOrAddBoolean("problem","heating_pow",false);
-  acc.heat_beg_time = pin->GetOrAddReal("problem","heat_beg_time",0.0);
-  acc.heat_sof_time = pin->GetOrAddReal("problem","heat_sof_time",0.0);
-  acc.heat_cycle = pin->GetOrAddInteger("problem","heat_cycle",10);
-  acc.fac_heat = pin->GetOrAddReal("problem","fac_heat",1.0);
-  if (acc.heating_ana) {
-    acc.radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-1.0);
+  acc->cooling = pin->GetOrAddBoolean("problem","cooling",false);
+  acc->heating_ini = pin->GetOrAddBoolean("problem","heating_ini",false);
+  acc->heating_ana = pin->GetOrAddBoolean("problem","heating_ana",false);
+  acc->heating_equ = pin->GetOrAddBoolean("problem","heating_equ",false);
+  acc->heating_pow = pin->GetOrAddBoolean("problem","heating_pow",false);
+  acc->heat_beg_time = pin->GetOrAddReal("problem","heat_beg_time",0.0);
+  acc->heat_sof_time = pin->GetOrAddReal("problem","heat_sof_time",0.0);
+  acc->heat_cycle = pin->GetOrAddInteger("problem","heat_cycle",10);
+  acc->fac_heat = pin->GetOrAddReal("problem","fac_heat",1.0);
+  if (acc->heating_ana) {
+    acc->radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-1.0);
   }
-  if (acc.heating_equ) {
-    acc.bins_heat = pin->GetOrAddInteger("problem","bins_heat",NREDUCTION_RADIAL);
-    acc.heat_weight = pin->GetOrAddInteger("problem","heat_weight",0);
-    acc.rmin_heat = pin->GetOrAddReal("problem","rmin_heat",1e-2);
-    acc.rmax_heat = pin->GetOrAddReal("problem","rmax_heat",1e2);
-    acc.logh_heat = std::log10(acc.rmax_heat/acc.rmin_heat)/acc.bins_heat;
-    acc.logr_heat = std::log10(acc.rmin_heat)+0.5*acc.logh_heat;
-    for ( int i = 0; i < acc.bins_heat; i++ ) {
-      acc.v_arr.the_array[i] = 0.0;
-      acc.c_arr.the_array[i] = 0.0;
-      acc.logcooling_arr.h_view(i) = 0.0;
-      acc.logcooling_arr.template modify<HostMemSpace>();
-      acc.logcooling_arr.template sync<DevExeSpace>();
+  if (acc->heating_equ) {
+    acc->bins_heat = pin->GetOrAddInteger("problem","bins_heat",NREDUCTION_RADIAL);
+    acc->heat_weight = pin->GetOrAddInteger("problem","heat_weight",0);
+    acc->rmin_heat = pin->GetOrAddReal("problem","rmin_heat",1e-2);
+    acc->rmax_heat = pin->GetOrAddReal("problem","rmax_heat",1e2);
+    acc->logh_heat = std::log10(acc->rmax_heat/acc->rmin_heat)/acc->bins_heat;
+    acc->logr_heat = std::log10(acc->rmin_heat)+0.5*acc->logh_heat;
+    for ( int i = 0; i < acc->bins_heat; i++ ) {
+      acc->v_arr.the_array[i] = 0.0;
+      acc->c_arr.the_array[i] = 0.0;
+      acc->logcooling_arr.h_view(i) = 0.0;
+      acc->logcooling_arr.template modify<HostMemSpace>();
+      acc->logcooling_arr.template sync<DevExeSpace>();
     }
   }
-  acc.heating_mdot = pin->GetOrAddBoolean("problem","heating_mdot",false);
-  if (acc.heating_mdot) {
-    acc.epsilon = pin->GetOrAddReal("problem","epsilon",1e-6);
-    acc.mdot_dr = pin->GetOrAddReal("problem","mdot_dr",0.2*acc.r_in);
-    acc.rad_heat = pin->GetOrAddReal("problem","rad_heat",0.0);
-    acc.radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-2.0);
+  acc->heating_mdot = pin->GetOrAddBoolean("problem","heating_mdot",false);
+  if (acc->heating_mdot) {
+    acc->epsilon = pin->GetOrAddReal("problem","epsilon",1e-6);
+    acc->mdot_dr = pin->GetOrAddReal("problem","mdot_dr",0.2*acc->r_in);
+    acc->rad_heat = pin->GetOrAddReal("problem","rad_heat",0.0);
+    acc->radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-2.0);
   }
-  if (acc.heating_pow) {
-    acc.rad_heat = pin->GetOrAddReal("problem","rad_heat",2.0);
-    acc.radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-1.5);
+  if (acc->heating_pow) {
+    acc->rad_heat = pin->GetOrAddReal("problem","rad_heat",2.0);
+    acc->radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-1.5);
   }
-  acc.heat_tceiling = pin->GetOrAddReal("problem","heat_tceiling",
+  acc->heat_tceiling = pin->GetOrAddReal("problem","heat_tceiling",
                         std::numeric_limits<float>::max());
-  acc.t_cold = pin->GetOrAddReal("problem","t_cold",0.03);
-  acc.tf_hot = pin->GetOrAddReal("problem","tf_hot",0.3);
+  acc->t_cold = pin->GetOrAddReal("problem","t_cold",0.03);
+  acc->tf_hot = pin->GetOrAddReal("problem","tf_hot",0.3);
   // End get parameters
 
-  Real &mbh = acc.m_bh;
-  Real &mstar = acc.m_star;
-  Real &rstar = acc.r_star;
-  Real &mdm = acc.m_dm;
-  Real &rdm = acc.r_dm;
-  Real &radentry = acc.rad_entry;
-  Real &k0 = acc.k0_entry;
-  Real &xi = acc.xi_entry;
-  Real grav = acc.grav;
-  //Real r_in_old = acc.r_in_old;
+  Real &mbh = acc->m_bh;
+  Real &mstar = acc->m_star;
+  Real &rstar = acc->r_star;
+  Real &mdm = acc->m_dm;
+  Real &rdm = acc->r_dm;
+  Real &radentry = acc->rad_entry;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  Real grav = acc->grav;
+  //Real r_in_old = acc->r_in_old;
 
   // Find the equilibrium point of the cooling curve by n*Lambda-Gamma=0
   // Real number_density=hrate/ISMCoolFn(temp);
@@ -320,31 +321,31 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                   pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
 
   // update problem-specific parameters
-  eos.r_in = acc.r_in;
-  acc.dt_floor = eos.dt_floor;
-  acc.tfloor = eos.tfloor;
-  acc.gamma = eos.gamma;
-  acc.temp_0 = cs_iso*cs_iso;
+  eos.r_in = acc->r_in;
+  acc->dt_floor = eos.dt_floor;
+  acc->tfloor = eos.tfloor;
+  acc->gamma = eos.gamma;
+  acc->temp_0 = cs_iso*cs_iso;
   Real gm1 = eos.gamma - 1.0;
-  Real &gamma=acc.gamma;
-  Real &rho0=acc.rho_0;
-  Real &temp0=acc.temp_0;
-  Real pgas_0 = acc.rho_0*cs_iso*cs_iso;
-  Real cs = std::sqrt(eos.gamma*pgas_0/acc.rho_0);
+  Real &gamma=acc->gamma;
+  Real &rho0=acc->rho_0;
+  Real &temp0=acc->temp_0;
+  Real pgas_0 = acc->rho_0*cs_iso*cs_iso;
+  Real cs = std::sqrt(eos.gamma*pgas_0/acc->rho_0);
 
-  auto &d_arr = acc.dens_arr;
+  auto &d_arr = acc->dens_arr;
   //auto &d_arr = pm->pgen->dens_arr;
   SolveDens(d_arr);
 
-  if (acc.heating_pow) {
+  if (acc->heating_pow) {
     Real temp_unit = pmbp->punit->temperature_cgs();
     Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                   /pmbp->punit->atomic_mass_unit_cgs;
     Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
                         /n_unit/n_unit;
-    Real &rbout = acc.rb_out;
-    Real radh = acc.rad_heat;
-    Real radpow = acc.radpow_heat;
+    Real &rbout = acc->rb_out;
+    Real radh = acc->rad_heat;
+    Real radpow = acc->radpow_heat;
     Real coolrate = 0.0;
     Real heatrate = 0.0;
     int n_sum = 32000;
@@ -360,9 +361,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       coolrate += SQR(rad)*SQR(rho)*ISMCoolFn(temp)/cooling_unit;
       heatrate += SQR(rad)*rho*pow(rad+radh,radpow);
     }
-    acc.heatnorm = acc.fac_heat*coolrate/heatrate;
+    acc->heatnorm = acc->fac_heat*coolrate/heatrate;
   }
-  
+
   // Print info
   if (global_variable::my_rank == 0) {
     std::cout << "============== Check Initialization ===============" << std::endl;
@@ -374,32 +375,32 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << "  cooling function (c.g.s) = " << ISMCoolFn(temp_kelvin) << std::endl;
     std::cout << "  grav const (code) = " << grav << std::endl;
     std::cout << "  user_bcs = " << user_bcs << std::endl;
-    std::cout << "  r_in = " << acc.r_in << std::endl;
-    std::cout << "  r_in_old = " << acc.r_in_old << std::endl;
-    std::cout << "  r_in_new = " << acc.r_in_new << std::endl;
-    std::cout << "  r_in_beg_t = " << acc.r_in_beg_t << std::endl;
-    std::cout << "  r_in_sof_t = " << acc.r_in_sof_t << std::endl;
-    std::cout << "  rb_in = " << acc.rb_in << std::endl;
-    std::cout << "  sink_d = " << acc.sink_d << std::endl;
-    std::cout << "  sink_t = " << acc.sink_t << std::endl;
+    std::cout << "  r_in = " << acc->r_in << std::endl;
+    std::cout << "  r_in_old = " << acc->r_in_old << std::endl;
+    std::cout << "  r_in_new = " << acc->r_in_new << std::endl;
+    std::cout << "  r_in_beg_t = " << acc->r_in_beg_t << std::endl;
+    std::cout << "  r_in_sof_t = " << acc->r_in_sof_t << std::endl;
+    std::cout << "  rb_in = " << acc->rb_in << std::endl;
+    std::cout << "  sink_d = " << acc->sink_d << std::endl;
+    std::cout << "  sink_t = " << acc->sink_t << std::endl;
     std::cout << "  user_srcs = " << user_srcs << std::endl;
-    std::cout << "  potential = " << acc.potential << std::endl;
-    std::cout << "  cooling = " << acc.cooling << std::endl;
-    std::cout << "  heating_ini = " << acc.heating_ini << std::endl;
-    std::cout << "  heating_ana = " << acc.heating_ana << std::endl;
-    std::cout << "  heating_equ = " << acc.heating_equ << std::endl;
-    std::cout << "  heating_pow = " << acc.heating_pow << std::endl;
-    std::cout << "  heating_mdot = " << acc.heating_mdot << std::endl;
-    std::cout << "  radpow_heat = " << acc.radpow_heat << std::endl;
-    std::cout << "  heat_beg_time = " << acc.heat_beg_time << std::endl;
-    std::cout << "  heat_sof_time = " << acc.heat_sof_time << std::endl;
-    std::cout << "  fac_heat = " << acc.fac_heat << std::endl;
-    if (acc.heating_pow) {
-      std::cout << "  rad_heat = " << acc.rad_heat << std::endl;
-      std::cout << "  heatnorm = " << acc.heatnorm << std::endl;
+    std::cout << "  potential = " << acc->potential << std::endl;
+    std::cout << "  cooling = " << acc->cooling << std::endl;
+    std::cout << "  heating_ini = " << acc->heating_ini << std::endl;
+    std::cout << "  heating_ana = " << acc->heating_ana << std::endl;
+    std::cout << "  heating_equ = " << acc->heating_equ << std::endl;
+    std::cout << "  heating_pow = " << acc->heating_pow << std::endl;
+    std::cout << "  heating_mdot = " << acc->heating_mdot << std::endl;
+    std::cout << "  radpow_heat = " << acc->radpow_heat << std::endl;
+    std::cout << "  heat_beg_time = " << acc->heat_beg_time << std::endl;
+    std::cout << "  heat_sof_time = " << acc->heat_sof_time << std::endl;
+    std::cout << "  fac_heat = " << acc->fac_heat << std::endl;
+    if (acc->heating_pow) {
+      std::cout << "  rad_heat = " << acc->rad_heat << std::endl;
+      std::cout << "  heatnorm = " << acc->heatnorm << std::endl;
     }
-    if (acc.heating_equ) {
-      std::cout << "  heat_weight = " << acc.heat_weight << std::endl;
+    if (acc->heating_equ) {
+      std::cout << "  heat_weight = " << acc->heat_weight << std::endl;
     }
     std::cout << "===================================================" << std::endl;
     for (int i=0; i<7; i++) {
@@ -497,7 +498,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       delete pturb;
     }
   }
-  
+
   // TODO(@mhguo): read and interpolate data
   // TODO(@mhguo): now only work for hydro!!!
   if (rst_flag) {
@@ -593,7 +594,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     int nmb_old = 8*oldpart;
     char *idlist = new char[listsize*nmb_old];
     if (global_variable::my_rank == 0) { // only the master process reads the ID list
-      if (resfile.Read_bytes(idlist,listsize,nmb_old) != static_cast<unsigned int>(nmb_old)) {
+      if (resfile.Read_bytes(idlist,listsize,nmb_old)
+          != static_cast<unsigned int>(nmb_old)) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "Incorrect number of MeshBlocks in restart file; "
                   << "restart file is broken." << std::endl;
@@ -607,7 +609,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (global_variable::my_rank == 0) { // the master process reads the variables data
       if (resfile.Read_bytes(variabledata, 1, variablesize) != variablesize) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << "Variable data size read from restart file is incorrect, "
+                  << std::endl
+                  << "Variable data size read from restart file is incorrect, "
                   << "restart file is broken." << std::endl;
         exit(EXIT_FAILURE);
       }
@@ -638,10 +641,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::memcpy(&fcdata_size, &(variabledata[hdos]), sizeof(IOWrapperSizeT));
 
     // allocate arrays for CC data
-    HostArray5D<Real> ccin("pgen-ccin", nmb, (nhydro_tot + nmhd_tot), nout3, nout2, nout1);
+    HostArray5D<Real> ccin("pgen-ccin", nmb, (nhydro_tot+nmhd_tot), nout3, nout2, nout1);
     if (ccin.size()*sizeof(Real) != ccdata_size) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << " ccin.size=" << ccin.size()*sizeof(Real) 
+                << std::endl << " ccin.size=" << ccin.size()*sizeof(Real)
                 << " ccdata_size=" << ccdata_size << " nmb=" << nmb
                 << " myrank=" << myrank << " m_old=" << m_old
                 << std::endl << "CC data size read from restart file not equal to size "
@@ -723,21 +726,21 @@ void RadialBoundary(Mesh *pm) {
              pm->pmb_pack->pmhd->u0 : pm->pmb_pack->phydro->u0;
   auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
 
-  auto &d_arr = acc.dens_arr;
+  auto &d_arr = acc->dens_arr;
 
-  Real &gamma=acc.gamma;
-  Real gm1=(acc.gamma-1.0);
-  Real &radentry = acc.rad_entry;
-  Real &k0 = acc.k0_entry;
-  Real &xi = acc.xi_entry;
-  Real &rbin = acc.rb_in;
-  Real &rbout = acc.rb_out;
-  Real &rin = acc.r_in;
-  Real &sinkd = acc.sink_d;
-  Real &sinkt = acc.sink_t;
+  Real &gamma=acc->gamma;
+  Real gm1=(acc->gamma-1.0);
+  Real &radentry = acc->rad_entry;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  Real &rbin = acc->rb_in;
+  Real &rbout = acc->rb_out;
+  Real &rin = acc->r_in;
+  Real &sinkd = acc->sink_d;
+  Real &sinkt = acc->sink_t;
   Real sinke = sinkd*sinkt/gm1;
-  Real dtfloor = acc.dt_floor;
-  //Real tfloor = acc.tfloor;
+  Real dtfloor = acc->dt_floor;
+  //Real tfloor = acc->tfloor;
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
   //std::cout << tmp << std::endl;
@@ -1007,32 +1010,32 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   const int nuser = 58;
   pdata->nhist = n0 + nuser;
   const char *data_label[nuser] = {
-    "Mdot",  "Mglb",  "M_in",  "Lx_in", "Ly_in", "Lz_in", "L_in",  
-    "Vcold", "Mcold", "Lx_c",  "Ly_c",  "Lz_c",  "L_c",   
-    "Vwarm", "Mwarm", "Lx_w",  "Ly_w",  "Lz_w",  "L_w",   
+    "Mdot",  "Mglb",  "M_in",  "Lx_in", "Ly_in", "Lz_in", "L_in",
+    "Vcold", "Mcold", "Lx_c",  "Ly_c",  "Lz_c",  "L_c",
+    "Vwarm", "Mwarm", "Lx_w",  "Ly_w",  "Lz_w",  "L_w",
     "Mdotc", "Vinc",  "Minc",  "Lx_ic", "Ly_ic", "Lz_ic", "L_ic",
     "Mdotw", "Vinw",  "Minw",  "Lx_iw", "Ly_iw", "Lz_iw", "L_iw",
     "Mdoth", "Vinh",  "Minh",  "Lx_ih", "Ly_ih", "Lz_ih", "L_ih",
     "V0c",   "M0c",   "V0w",   "M0w",   "V0h",   "M0h",
     "V1c",   "M1c",   "V1w",   "M1w",   "V1h",   "M1h",
     "V2c",   "M2c",   "V2w",   "M2w",   "V2h",   "M2h",
-    //"pr_in", "pr_ic", "pr_iw", "pr_ih", 
-    //"Lx0c",  "Ly0c",  "Lz0c",  "L0c",   
+    //"pr_in", "pr_ic", "pr_iw", "pr_ih",
+    //"Lx0c",  "Ly0c",  "Lz0c",  "L0c",
   };
   for (int n=0; n<nuser; ++n) {
     pdata->label[n0+n] = data_label[n];
   }
 
-  Real &rin = acc.r_in;
-  Real &rbout = acc.rb_out;
-  Real &radentry = acc.rad_entry;
-  Real &k0 = acc.k0_entry;
-  Real &xi = acc.xi_entry;
-  auto &d_arr = acc.dens_arr;
-  Real gamma = acc.gamma;
+  Real &rin = acc->r_in;
+  Real &rbout = acc->rb_out;
+  Real &radentry = acc->rad_entry;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  auto &d_arr = acc->dens_arr;
+  Real gamma = acc->gamma;
   Real gm1 = gamma - 1.0;
-  Real t_cold = acc.t_cold;
-  Real tf_hot = acc.tf_hot;
+  Real t_cold = acc->t_cold;
+  Real tf_hot = acc->tf_hot;
   // capture class variabels for kernel
   auto &u0_ = (pm->pmb_pack->pmhd != nullptr) ?
               pm->pmb_pack->pmhd->u0 : pm->pmb_pack->phydro->u0;
@@ -1088,7 +1091,6 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real &mom2 = u0_(m,IM2,k,j,i);
     Real &mom3 = u0_(m,IM3,k,j,i);
 
-    //Real temp = gm1 * (u0_(m,IEN,k,j,i) - 0.5*(SQR(mom1)+SQR(mom2)+SQR(mom3))/dens) / dens;
     Real temp = gm1 * w0_(m,IEN,k,j,i)/w0_(m,IDN,k,j,i);
 
     Real x = rad/radentry;
@@ -1096,7 +1098,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
     Real temp_ini = pgas_ini/rho_ini;
     Real t_hot = tf_hot*temp_ini;
-    
+
     //Real coldgas = (temp<1e-2)? vol*dens : 0.0;
 
     Real mdot = 0.0;
@@ -1140,7 +1142,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real dv_r2c = fmin(dv_r2,dv_cold);
     Real dv_r2w = fmin(dv_r2,dv_warm);
     Real dv_r2h = fmin(dv_r2,dv_hot);
-    
+
     Real dm_cold = dv_cold*dens;
     Real lx_c = dv_cold*(x2v*mom3 - x3v*mom2);
     Real ly_c = dv_cold*(x3v*mom1 - x1v*mom3);
@@ -1190,9 +1192,9 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real dm_r2h = dv_r2h*dens;
 
     Real vars[nuser] = {
-      mdot,    dm_glb,  dm_in,   lx_in,   ly_in,   lz_in,   l_in,  
-      dv_cold, dm_cold, lx_c,    ly_c,    lz_c,    l_c,   
-      dv_warm, dm_warm, lx_w,    ly_w,    lz_w,    l_w,   
+      mdot,    dm_glb,  dm_in,   lx_in,   ly_in,   lz_in,   l_in,
+      dv_cold, dm_cold, lx_c,    ly_c,    lz_c,    l_c,
+      dv_warm, dm_warm, lx_w,    ly_w,    lz_w,    l_w,
       mdot_c,  dv_inc,  dm_inc,  lx_inc,  ly_inc,  lz_inc,  l_inc,
       mdot_w,  dv_inw,  dm_inw,  lx_inw,  ly_inw,  lz_inw,  l_inw,
       mdot_h,  dv_inh,  dm_inh,  lx_inh,  ly_inh,  lz_inh,  l_inh,
@@ -1250,63 +1252,62 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   const EOS_Data &eos_data = (pm->pmb_pack->pmhd != nullptr) ?
                              pm->pmb_pack->pmhd->peos->eos_data :
                              pm->pmb_pack->phydro->peos->eos_data;
-  if (acc.ndiag>0 && pm->ncycle % acc.ndiag == 0) {
+  if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
     Diagnostic(pm,bdt,u0,w0,eos_data);
   }
-  if (acc.potential) {
+  if (acc->potential) {
     //std::cout << "AddAccel" << std::endl;
     AddAccel(pm,bdt,u0,w0,eos_data);
   }
-  if (acc.cooling) {
+  if (acc->cooling) {
     //std::cout << "AddISMCooling" << std::endl;
     AddISMCooling(pm,bdt,u0,w0,eos_data);
   }
-  if (pm->time >= acc.heat_beg_time) {
-    if (acc.heating_ini) {
+  if (pm->time >= acc->heat_beg_time) {
+    if (acc->heating_ini) {
       //std::cout << "AddHeating" << std::endl;
       AddHeating(pm,bdt,u0,w0,eos_data);
     }
-    if (acc.heating_ana) {
+    if (acc->heating_ana) {
       //std::cout << "AddAnaHeating" << std::endl;
       AddAnaHeating(pm,bdt,u0,w0,eos_data);
     }
-    if (acc.heating_equ) {
+    if (acc->heating_equ) {
       //std::cout << "AddEquHeating" << std::endl;
       AddEquHeating(pm,bdt,u0,w0,eos_data);
     }
-    if (acc.heating_mdot) {
+    if (acc->heating_mdot) {
       //std::cout << "AddMdotHeating" << std::endl;
       AddMdotHeating(pm,bdt,u0,w0,eos_data);
     }
-    if (acc.heating_pow) {
+    if (acc->heating_pow) {
       //std::cout << "AddPowHeating" << std::endl;
       AddPowHeating(pm,bdt,u0,w0,eos_data);
     }
   }
   // (@mhguo) change inner radius, if necessary
-  if (acc.r_in_new<acc.r_in_old) {
-    Real t_now = pm->time-acc.r_in_beg_t;
+  if (acc->r_in_new<acc->r_in_old) {
+    Real t_now = pm->time-acc->r_in_beg_t;
     if (t_now<=0.0) {
-      acc.r_in = acc.r_in_old;
-    }
-    else if (t_now<acc.r_in_sof_t) {
-      Real t_ratio = (pm->time-acc.r_in_beg_t)/acc.r_in_sof_t;
-      Real &rino = acc.r_in_old;
-      Real &rinn = acc.r_in_new;
-      //acc.r_in = std::pow(rinn,t_ratio)*std::pow(rino,(1.0-t_ratio));
-      acc.r_in = rinn*t_ratio+rino*(1.0-t_ratio);
+      acc->r_in = acc->r_in_old;
+    } else if (t_now<acc->r_in_sof_t) {
+      Real t_ratio = (pm->time-acc->r_in_beg_t)/acc->r_in_sof_t;
+      Real &rino = acc->r_in_old;
+      Real &rinn = acc->r_in_new;
+      //acc->r_in = std::pow(rinn,t_ratio)*std::pow(rino,(1.0-t_ratio));
+      acc->r_in = rinn*t_ratio+rino*(1.0-t_ratio);
     } else {
-      acc.r_in = acc.r_in_new;
+      acc->r_in = acc->r_in_new;
     }
     // update problem-specific parameters
     if (pm->pmb_pack->phydro != nullptr) {
-      pm->pmb_pack->phydro->peos->eos_data.r_in = acc.r_in;
+      pm->pmb_pack->phydro->peos->eos_data.r_in = acc->r_in;
     }
     if (pm->pmb_pack->pmhd != nullptr) {
-      pm->pmb_pack->pmhd->peos->eos_data.r_in = acc.r_in;
+      pm->pmb_pack->pmhd->peos->eos_data.r_in = acc->r_in;
     }
-    if (global_variable::my_rank == 0 && pm->ncycle%acc.ndiag==0) {
-      std::cout << " r_in=" << acc.r_in << std::endl;
+    if (global_variable::my_rank == 0 && pm->ncycle%acc->ndiag==0) {
+      std::cout << " r_in=" << acc->r_in << std::endl;
     }
   }
   return;
@@ -1327,12 +1328,12 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int ks = indcs.ks, ke = indcs.ke;
   int nmb1 = pmy_pack->nmb_thispack - 1;
   auto size = pmy_pack->pmb->mb_size;
-  Real &mbh = acc.m_bh;
-  Real &mstar = acc.m_star;
-  Real &rstar = acc.r_star;
-  Real &mdm = acc.m_dm;
-  Real &rdm = acc.r_dm;
-  Real &rin = acc.r_in;
+  Real &mbh = acc->m_bh;
+  Real &mstar = acc->m_star;
+  Real &rstar = acc->r_star;
+  Real &mdm = acc->m_dm;
+  Real &rdm = acc->r_dm;
+  Real &rin = acc->r_in;
   Real grav = pmy_pack->punit->grav_constant();
 
   par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
@@ -1397,13 +1398,13 @@ void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
                       /n_unit/n_unit;
 
-  Real &radentry = acc.rad_entry;
-  Real &k0 = acc.k0_entry;
-  Real &xi = acc.xi_entry;
-  auto &d_arr = acc.dens_arr;
-  Real fac_heat = acc.fac_heat;
-  if (pm->time-acc.heat_beg_time < acc.heat_sof_time) {
-    fac_heat *= SQR(sin(0.5*M_PI*(pm->time-acc.heat_beg_time)/acc.heat_sof_time));
+  Real &radentry = acc->rad_entry;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  auto &d_arr = acc->dens_arr;
+  Real fac_heat = acc->fac_heat;
+  if (pm->time-acc->heat_beg_time < acc->heat_sof_time) {
+    fac_heat *= SQR(sin(0.5*M_PI*(pm->time-acc->heat_beg_time)/acc->heat_sof_time));
   }
 
   par_for("add_heating", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
@@ -1540,7 +1541,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
           bool dfloor_used=false, efloor_used=false, tfloor_used=false;
           SingleC2P_IdealMHD(u, eos, w, dfloor_used, efloor_used, tfloor_used);
         }
-        
+
         dens = w.d;
         temp = gm1*w.e/w.d;
         eint = w.e;
@@ -1563,7 +1564,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   MPI_Allreduce(MPI_IN_PLACE, pnsubcycle_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 #endif
   if (global_variable::my_rank == 0) {
-    if (acc.ndiag>0 && pm->ncycle % acc.ndiag == 0) {
+    if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
       if (nsubcycle>0 || nsubcycle_count >0) {
         std::cout << " nsubcycle_cell=" << nsubcycle << std::endl
                   << " nsubcycle_count=" << nsubcycle_count << std::endl;
@@ -1595,17 +1596,14 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     lambda_cooling *= exp(-1.0e1*pow(tfloor/w_temp,4.0));
     Real q_cooling = w_dens*w_dens*lambda_cooling;
     Real bde = -q_cooling*bdt;
-    
+
     // make sure cooling is not too fast
     //if (bde < -0.5*u_eint) {
     //  bde = -0.5*u_eint;
     //}
     if (u_temp<=tfloor*1.001) {
       bde = 0.0;
-    }
-    else if (gm1*(u_eint+bde)/u_d<tfloor*1.001) {
-      //printf("q_cooling: m=%d %d %d %d dens=%0.4e temp=%0.4e etot=%0.4e q_cool=%0.4e q_new=%0.4e\n",
-      //       m,k,j,i,dens,temp,u0(m,IEN,k,j,i),q_cooling,(eint-dens*tfloor/gm1)/bdt);
+    } else if (gm1*(u_eint+bde)/u_d<tfloor*1.001) {
       bde = (u_d*tfloor/gm1-u_eint);
     }
 
@@ -1635,7 +1633,7 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real tfloor = eos_data.tfloor;
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
-  Real radpow = acc.radpow_heat;
+  Real radpow = acc->radpow_heat;
   Real temp_unit = pmbp->punit->temperature_cgs();
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;
@@ -1671,7 +1669,7 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
     Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
-    
+
     // temperature in cgs unit
     Real temp = 1.0;
     Real eint = 1.0;
@@ -1766,19 +1764,18 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
                       /n_unit/n_unit;
 
-  Real rin = acc.r_in;
-  Real rmin_heat = acc.rmin_heat;
-  Real rmax_heat = acc.rmax_heat;
-  int weight = acc.heat_weight;
-  int bins = acc.bins_heat;
-  Real logr0 = acc.logr_heat;
-  Real logh = acc.logh_heat;
-  auto &v_arr = acc.v_arr;
-  auto &c_arr = acc.c_arr;
-  auto &logcoolarr = acc.logcooling_arr;
-  if (pm->ncycle % acc.heat_cycle == 0) {
-
-    for ( int i = 0; i < acc.bins_heat; i++ ) {
+  Real rin = acc->r_in;
+  Real rmin_heat = acc->rmin_heat;
+  Real rmax_heat = acc->rmax_heat;
+  int weight = acc->heat_weight;
+  int bins = acc->bins_heat;
+  Real logr0 = acc->logr_heat;
+  Real logh = acc->logh_heat;
+  auto &v_arr = acc->v_arr;
+  auto &c_arr = acc->c_arr;
+  auto &logcoolarr = acc->logcooling_arr;
+  if (pm->ncycle % acc->heat_cycle == 0) {
+    for ( int i = 0; i < acc->bins_heat; i++ ) {
       v_arr.the_array[i] = 0.0;
       c_arr.the_array[i] = 0.0;
       logcoolarr.h_view(i) = 0.0;
@@ -1836,7 +1833,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         lambda_cooling *= exp(-50.0*pow(tfloor/w_temp,4.0));
         Real q_cooling = w_dens*w_dens*lambda_cooling;
         Real bde = -q_cooling*bdt;
-        
+
         // make sure cooling is not too fast
         //if (bde < -0.5*u_eint) {
         //  bde = -0.5*u_eint;
@@ -1844,10 +1841,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         //if (u_temp<=tfloor*2.0) {
         if (w_temp<=tfloor*10.0) {
           bde = 0.0;
-        }
-        else if (gm1*(u_eint+bde)/u_d<tfloor*1.001) {
-          //printf("q_cooling: m=%d %d %d %d dens=%0.4e temp=%0.4e etot=%0.4e q_cool=%0.4e q_new=%0.4e\n",
-          //       m,k,j,i,dens,temp,u0(m,IEN,k,j,i),q_cooling,(eint-dens*tfloor/gm1)/bdt);
+        } else if (gm1*(u_eint+bde)/u_d<tfloor*1.001) {
           bde = (u_d*tfloor/gm1-u_eint);
         }
         q_cooling = -bde/bdt;
@@ -1857,20 +1851,16 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         //        q_cooling=%0.6e\n", ipps,rad,vol,w0(m,IDN,k,j,i),temp,q_cooling);
         //}
         // TODO(@mhguo): tmpcout!
-        //if (q_cooling<0.0) {
-        //  printf("q_cooling: m=%d %d %d %d dens=%0.4e temp=%0.4e etot=%0.4e q_cool=%0.4e q_new=%0.4e\n",
-        //         m,k,j,i,w_dens,w_temp,u0(m,IEN,k,j,i),q_cooling,(u_eint-w_dens*tfloor/gm1)/bdt);
-        //}
         Real dvar = (weight == 0)? vol : vol*w_dens;
         varr.the_array[ipps] += dvar;
         carr.the_array[ipps] += vol*q_cooling;
       }
     }, Kokkos::Sum<array_acc::RadSum>(v_arr), Kokkos::Sum<array_acc::RadSum>(c_arr));
 
-    Real tmpfac = acc.fac_heat;
-    if (pm->time-acc.heat_beg_time < acc.heat_sof_time) {
-      tmpfac *= SQR(sin(0.5*M_PI*(pm->time-acc.heat_beg_time)/acc.heat_sof_time));
-    } 
+    Real tmpfac = acc->fac_heat;
+    if (pm->time-acc->heat_beg_time < acc->heat_sof_time) {
+      tmpfac *= SQR(sin(0.5*M_PI*(pm->time-acc->heat_beg_time)/acc->heat_sof_time));
+    }
     #if MPI_PARALLEL_ENABLED
     MPI_Allreduce(MPI_IN_PLACE, &(v_arr.the_array[0]), bins, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &(c_arr.the_array[0]), bins, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
@@ -1893,13 +1883,12 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
     logcoolarr.template modify<HostMemSpace>();
     logcoolarr.template sync<DevExeSpace>();
-
   }
 
   //if (global_variable::my_rank == 0){
   //  for ( int i = 0; i < bins; i++ ) {
   //    std::cout << "i=" << i << "  r="
-  //    << std::pow(10.0,i*acc.logh_heat+acc.logr_heat)
+  //    << std::pow(10.0,i*acc->logh_heat+acc->logr_heat)
   //    << "  cool=" << c_arr.the_array[i] << std::endl;
   //  }
   //}
@@ -1935,7 +1924,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         w_temp = w0(m,ITM,k,j,i);
       }
       // add soft radius
-      if (rad < 3.0*rmin_heat){
+      if (rad < 3.0*rmin_heat) {
         q_heating *= SQR(sin(0.25*M_PI*(rad/rmin_heat-1.0)));
       }
       // add soft ceiling
@@ -1965,9 +1954,9 @@ void AddPowHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int ks = indcs.ks, ke = indcs.ke;
   auto &size = pmbp->pmb->mb_size;
   int nmb1 = pmbp->nmb_thispack - 1;
-  Real radh = acc.rad_heat;
-  Real radpow = acc.radpow_heat;
-  Real hnorm = acc.heatnorm;
+  Real radh = acc->rad_heat;
+  Real radpow = acc->radpow_heat;
+  Real hnorm = acc->heatnorm;
 
   par_for("add_pow_heating", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -2013,13 +2002,13 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   const int nmkji = (pm->pmb_pack->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
-  
-  Real &rin = acc.r_in;
-  Real dr = acc.mdot_dr;
+
+  Real &rin = acc->r_in;
+  Real dr = acc->mdot_dr;
   Real use_e = eos_data.use_e;
-  Real heat_tceiling = acc.heat_tceiling;
-  Real radh = acc.rad_heat;
-  Real radpow = acc.radpow_heat;
+  Real heat_tceiling = acc->heat_tceiling;
+  Real radh = acc->rad_heat;
+  Real radpow = acc->radpow_heat;
   Real gm1 = eos_data.gamma - 1.0;
 
   Real s0 = 0.0, s1 = 0.0;
@@ -2070,7 +2059,7 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
   s1 = std::max(s1, 0.0);
   Real mdot = s1/dr;
-  Real epsilon = acc.epsilon;
+  Real epsilon = acc->epsilon;
   Real hnorm = epsilon * mdot * SQR(pmbp->punit->speed_of_light());
 
   if (global_variable::my_rank == 0 && pmbp->pmesh->ncycle % 10 == 0) {
@@ -2183,7 +2172,6 @@ void Diagnostic(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     max_v = fmax(vtot,max_v);
     max_t = fmax(temp, max_t);
     max_e = fmax(eint, max_e);
-    
   }, Kokkos::Min<Real>(dtnew),
      Kokkos::Min<Real>(min_dens),
      Kokkos::Min<Real>(min_vtot),
@@ -2244,16 +2232,16 @@ static Real RK4(RK4FnPtr func, Real x, Real y, Real h) {
 //! \brief calculates the gradient of the density to be used in the RK4
 
 static Real DrhoDr(Real x, Real rho) {
-  Real &gamma = acc.gamma;
-  Real &grav = acc.grav;
-  Real &mbh = acc.m_bh;
-  Real &mstar = acc.m_star;
-  Real &rstar = acc.r_star;
-  Real &mdm = acc.m_dm;
-  Real &rdm = acc.r_dm;
-  Real &k0 = acc.k0_entry;
-  Real &xi = acc.xi_entry;
-  Real &radentry = acc.rad_entry;
+  Real &gamma = acc->gamma;
+  Real &grav = acc->grav;
+  Real &mbh = acc->m_bh;
+  Real &mstar = acc->m_star;
+  Real &rstar = acc->r_star;
+  Real &mdm = acc->m_dm;
+  Real &rdm = acc->r_dm;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  Real &radentry = acc->rad_entry;
   Real r = x*radentry;
 
   Real accel = radentry*Acceleration(r,mbh,mstar,rstar,mdm,rdm,grav);
@@ -2273,7 +2261,7 @@ void SolveDens(DualArray1D<Real> &d_arr) {
   int linner = lntot/2, louter = lntot/2-1;
   Real logh = 0.005;
   Real x,h,dentry;
-  Real &densentry = acc.dens_entry;
+  Real &densentry = acc->dens_entry;
   d_arr.h_view(static_cast<int>(linner))=densentry;
 
   //solve inward from boundary
@@ -2346,4 +2334,8 @@ Real GetRadialVar(DualArray1D<Real> vararr, Real rad, Real logr0, Real logh, int
   return pow(10.0,var);
 }
 
-} // namespace pgen_acc
+void AccFinalWork(ParameterInput *pin, Mesh *pm) {
+  delete acc;
+}
+
+} // namespace
