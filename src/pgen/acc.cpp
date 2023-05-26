@@ -32,7 +32,7 @@ using RK4FnPtr = Real (*)(Real x, Real y);
 
 #define NLEN_DENS_ARRAY 2048
 //#define NREDUCTION_RADIAL 64
-#define NREDUCTION_RADIAL 16
+#define NREDUCTION_RADIAL 24
 namespace array_acc {  // namespace helps with name resolution in reduction identity
 typedef array_sum::array_type<Real,(NREDUCTION_RADIAL)> RadSum;  // simplifies code below
 } // namespace array_acc
@@ -61,6 +61,7 @@ Real GetRadialVar(DualArray1D<Real> vararr, Real rad, Real logr0, Real logh, int
 struct pgenacc {
   Real grav;  // gravitational constant in code unit
   Real r_refine; // mesh refinement radius
+  Real dens_refine;
   Real tfloor;
   Real heat_tceiling;
   Real gamma;    // EOS parameters
@@ -80,6 +81,7 @@ struct pgenacc {
   Real rb_in; // Inner boundary radius
   Real rb_out; // Outer boundary radius
   Real dt_floor; // floor of timestep
+  Real sink_dt_floor; // floor of timestep
   bool turb; // turbulence
   Real turb_amp; // amplitude of the perturbations
   bool cooling;
@@ -212,7 +214,19 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Get parameters
   acc->grav = pmbp->punit->grav_constant();
+  // Reset time
+  if (pin->GetOrAddBoolean("problem","reset",false)) {
+    pmy_mesh_->ncycle = 0;
+    pmy_mesh_->time = 0.0;
+    for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+      if (it->block_name.compare(0, 6, "output") == 0) {
+        pin->SetInteger(it->block_name,"file_number", 0);
+        pin->SetReal(it->block_name,"last_time", -1.0);
+      }
+    }
+  }
   acc->r_refine = pin->GetOrAddReal("problem","r_refine",0.0);
+  acc->dens_refine = pin->GetOrAddReal("problem","dens_refine",0.0);
   acc->ndiag = pin->GetOrAddInteger("problem","ndiag",-1);
   acc->rho_0 = pin->GetOrAddReal("problem","dens",1.0);
   Real temp_kelvin = pin->GetOrAddReal("problem","temp",1.0);
@@ -271,7 +285,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     acc->radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-1.0);
   }
   if (acc->heating_equ) {
-    acc->bins_heat = pin->GetOrAddInteger("problem","bins_heat",NREDUCTION_RADIAL);
+    acc->bins_heat = NREDUCTION_RADIAL;
     acc->heat_weight = pin->GetOrAddInteger("problem","heat_weight",0);
     acc->rmin_heat = pin->GetOrAddReal("problem","rmin_heat",1e-2);
     acc->rmax_heat = pin->GetOrAddReal("problem","rmax_heat",1e2);
@@ -327,6 +341,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // update problem-specific parameters
   eos.r_in = acc->r_in;
   acc->dt_floor = eos.dt_floor;
+  acc->sink_dt_floor = pin->GetOrAddReal("problem","sink_dt",eos.dt_floor);
   acc->tfloor = eos.tfloor;
   acc->gamma = eos.gamma;
   acc->temp_0 = cs_iso*cs_iso;
@@ -370,11 +385,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, 1.1*acc->r_in));
+  Real hist_r1 = pin->GetOrAddReal("problem","hist_r1",1.1);
+  Real hist_r2 = pin->GetOrAddReal("problem","hist_r2",10.0);
+  Real hist_r3 = pin->GetOrAddReal("problem","hist_r3",100.0);
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, hist_r1*acc->r_in));
   // Enroll additional radii for flux analysis by
   // pushing back the grids vector with additional SphericalGrid instances
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 10.0*acc->r_in));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 100.0*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r2*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r3*acc->r_in));
 
   // Print info
   if (global_variable::my_rank == 0) {
@@ -751,7 +769,7 @@ void RadialBoundary(Mesh *pm) {
   Real &sinkd = acc->sink_d;
   Real &sinkt = acc->sink_t;
   Real sinke = sinkd*sinkt/gm1;
-  Real dtfloor = acc->dt_floor;
+  Real dtfloor = acc->sink_dt_floor;
   //Real tfloor = acc->tfloor;
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
@@ -1018,13 +1036,22 @@ void AccRefine(MeshBlockPack* pmbp) {
   // capture variables for kernels
   Mesh *pmesh = pmbp->pmesh;
   auto &size = pmbp->pmb->mb_size;
+  auto &indcs = pmesh->mb_indcs;
+  int &is = indcs.is, nx1 = indcs.nx1;
+  int &js = indcs.js, nx2 = indcs.nx2;
+  int &ks = indcs.ks, nx3 = indcs.nx3;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
 
   // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
   auto refine_flag_ = pmesh->pmr->refine_flag;
-  auto &rad_thresh  = acc->r_refine;
+  Real &rad_thresh  = acc->r_refine;
+  Real &dens_thresh = acc->dens_refine;
   int nmb = pmbp->nmb_thispack;
   int mbs = pmesh->gids_eachrank[global_variable::my_rank];
   if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
+    printf("AccRefine\n");
+    auto &w0 = (pmbp->phydro != nullptr)? pmbp->phydro->w0 : pmbp->pmhd->w0;
     par_for_outer("AccRefineCond",DevExeSpace(), 0, 0, 0, (nmb-1),
     KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
       Real &x1min = size.d_view(m).x1min;
@@ -1037,6 +1064,32 @@ void AccRefine(MeshBlockPack* pmbp) {
       Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
       Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
       Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
+      Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+      // density threshold
+      if (dens_thresh!= 0.0) {
+        Real team_dmax=0.0;
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+        [=](const int idx, Real& dmax) {
+          int k = (idx)/nji;
+          int j = (idx - k*nji)/nx1;
+          int i = (idx - k*nji - j*nx1) + is;
+          j += js;
+          k += ks;
+          Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+          Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+          Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+          Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+          dmax = fmax(w0(m,IDN,k,j,i)*vol/SQR(rad), dmax);
+        },Kokkos::Max<Real>(team_dmax));
+        if (team_dmax > dens_thresh) {
+          //printf("dens refine: m=%d r_min=%.6e vol=%.6e team_dmax=%0.6e\n",
+          //m+mbs, rad_min, vol, team_dmax);
+          refine_flag_.d_view(m+mbs) = 1;
+        }
+        if (team_dmax < 0.1 * dens_thresh) {
+          refine_flag_.d_view(m+mbs) = -1;
+        }
+      }
       if (rad_min < rad_thresh) {refine_flag_.d_view(m+mbs) = 1;}
       //if (rad_min > rad_thresh) {refine_flag_.d_view(m+mbs) = -1;}
     });
@@ -1087,18 +1140,19 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   const int nuser = nsph + nreduce;
   pdata->nhist = nuser;
   const char *data_label[nuser] = {
-    "m_1", "mdot_1", "edot_1", "lxdot_1", "lydot_1", "lzdot_1", "phi_1",
-    "m_10", "mdot_10", "edot_10", "lxdot_10", "lydot_10", "lzdot_10", "phi_10",
-    "m_100", "mdot_100", "edot_100", "lxdot_100", "lydot_100", "lzdot_100", "phi_100",
-    "Mdot",  "Mglb",  "M_in",  "Lx_in", "Ly_in", "Lz_in", "L_in",
-    "Vcold", "Mcold", "Lx_c",  "Ly_c",  "Lz_c",  "L_c",
-    "Vwarm", "Mwarm", "Lx_w",  "Ly_w",  "Lz_w",  "L_w",
-    "Mdotc", "Vinc",  "Minc",  "Lx_ic", "Ly_ic", "Lz_ic", "L_ic",
-    "Mdotw", "Vinw",  "Minw",  "Lx_iw", "Ly_iw", "Lz_iw", "L_iw",
-    "Mdoth", "Vinh",  "Minh",  "Lx_ih", "Ly_ih", "Lz_ih", "L_ih",
-    "V0c",   "M0c",   "V0w",   "M0w",   "V0h",   "M0h",
-    "V1c",   "M1c",   "V1w",   "M1w",   "V1h",   "M1h",
-    "V2c",   "M2c",   "V2w",   "M2w",   "V2h",   "M2h",
+    // 6 letters the for first row, 5 for the rest
+    "m_1   ", "mdot1 ", "edot1 ", "lx_1  ", "ly_1  ", "lz_1  ", "phi_1 ",
+    "m_2  ",  "mdot2",  "edot2",  "lx_2 ",  "ly_2 ",  "lz_2 ",  "phi_2",
+    "m_3  ",  "mdot3",  "edot3",  "lx_3 ",  "ly_3 ",  "lz_3 ",  "phi_3",
+    "Mdot ",  "Mglb ",  "M_in ",  "Lx_in",  "Ly_in",  "Lz_in",  "L_in ",
+    "Vcold",  "Mcold",  "Lx_c ",  "Ly_c ",  "Lz_c ",  "L_c  ",
+    "Vwarm",  "Mwarm",  "Lx_w ",  "Ly_w ",  "Lz_w ",  "L_w  ",
+    "Mdotc",  "Vinc ",  "Minc ",  "Lx_ic",  "Ly_ic",  "Lz_ic",  "L_ic ",
+    "Mdotw",  "Vinw ",  "Minw ",  "Lx_iw",  "Ly_iw",  "Lz_iw",  "L_iw ",
+    "Mdoth",  "Vinh ",  "Minh ",  "Lx_ih",  "Ly_ih",  "Lz_ih",  "L_ih ",
+    "V0c  ",  "M0c  ",  "V0w  ",  "M0w  ",  "V0h  ",  "M0h  ",
+    "V1c  ",  "M1c  ",  "V1w  ",  "M1w  ",  "V1h  ",  "M1h  ",
+    "V2c  ",  "M2c  ",  "V2w  ",  "M2w  ",  "V2h  ",  "M2h  ",
     //"pr_in", "pr_ic", "pr_iw", "pr_ih",
     //"Lx0c",  "Ly0c",  "Lz0c",  "L0c",
   };

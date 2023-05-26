@@ -36,18 +36,6 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   int &nhyd  = pmy_pack->phydro->nhydro;
   int &nscal = pmy_pack->phydro->nscalars;
   int &nmb = pmy_pack->nmb_thispack;
-  auto &indcs = pmy_pack->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
-  auto &size = pmy_pack->pmb->mb_size;
-  Real r_in = eos_data.r_in;
-  Real gm1 = (eos_data.gamma - 1.0);
-
-  Real efloor = eos_data.pfloor/gm1;
-  Real &tfloor = eos_data.tfloor;
-  Real &daverage = eos_data.daverage;
-  Real &rdfloor = eos_data.rdfloor;
   auto &eos = eos_data;
   auto &fofc_ = pmy_pack->phydro->fofc;
 
@@ -56,11 +44,22 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   const int nkji = (ku - kl + 1)*nji;
   const int nmkji = nmb*nkji;
 
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  int ng = indcs.ng;
+  Real gm1 = (eos.gamma - 1.0);
+  Real r_in = eos.r_in;
+  Real efloor = eos.pfloor/gm1;
+  Real &tfloor = eos.tfloor;
+  Real &daverage = eos.daverage;
+  Real &rdfloor = eos.rdfloor;
+
   int nfloord_=0, nfloore_=0, nfloort_=0;
-  int nfofc_d=0, nfofc_p=0, nfofc_g=0;
   Kokkos::parallel_reduce("hyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, int &sumd, int &sume, int &sumt,
-  int &sum0, int &sum1, int &sum2) {
+  KOKKOS_LAMBDA(const int &idx, int &sumd, int &sume, int &sumt) {
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
     int j = (idx - m*nkji - k*nji)/ni;
@@ -82,160 +81,9 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
     bool dfloor_used=false, efloor_used=false, tfloor_used=false;
     SingleC2P_IdealHyd(u, eos, w, dfloor_used, efloor_used, tfloor_used);
 
-    // (@mhguo): beg fofc criteria
-    bool fofc_flag = false;
-    if (only_testfloors) {
-      if (rdfloor>0.0) {
-        Real &x1min = size.d_view(m).x1min;
-        Real &x1max = size.d_view(m).x1max;
-        int nx1 = indcs.nx1;
-        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-        Real &x2min = size.d_view(m).x2min;
-        Real &x2max = size.d_view(m).x2max;
-        int nx2 = indcs.nx2;
-        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-        Real &x3min = size.d_view(m).x3min;
-        Real &x3max = size.d_view(m).x3max;
-        int nx3 = indcs.nx3;
-        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        //int *psum_0 = &sum0;
-        //int *psum_1 = &sum1;
-        //int *psum_2 = &sum2;
-        //if (FofcCrit(u,eos,psum_0,psum_1,psum_2,r_in,rad)) {
-        //  fofc_flag = true;
-        //}
-
-        if (u.d < rdfloor/rad && rad>1.1*r_in) {
-          sum1++;
-          fofc_flag = true;
-        }
-        if (w.d <= 1e3*eos.rdfloor/rad && rad>1.1*r_in) {
-          Real dfl = eos.dfloor;
-          Real w_dkm = fmax(cons(m,IDN,k-1,j,i),dfl);
-          Real w_dkp = fmax(cons(m,IDN,k+1,j,i),dfl);
-          Real w_djm = fmax(cons(m,IDN,k,j-1,i),dfl);
-          Real w_djp = fmax(cons(m,IDN,k,j+1,i),dfl);
-          Real w_dim = fmax(cons(m,IDN,k,j,i-1),dfl);
-          Real w_dip = fmax(cons(m,IDN,k,j,i+1),dfl);
-          if (k<=ks) { w_dkm  = prim(m,IDN,k-1,j,i); }
-          if (k>=ke) { w_dkp  = prim(m,IDN,k+1,j,i); }
-          if (j<=js) { w_djm  = prim(m,IDN,k,j-1,i); }
-          if (j>=je) { w_djp  = prim(m,IDN,k,j+1,i); }
-          if (i<=is) { w_dim  = prim(m,IDN,k,j,i-1); }
-          if (i>=ie) { w_dip  = prim(m,IDN,k,j,i+1); }
-          if (w.d/w_dkm + w_dkm/w.d > 1e2 || w.d/w_dkp + w_dkp/w.d > 1e2 ||
-              w.d/w_djm + w_djm/w.d > 1e2 || w.d/w_djp + w_djp/w.d > 1e2 ||
-              w.d/w_dim + w_dim/w.d > 1e2 || w.d/w_dip + w_dip/w.d > 1e2) {
-            sum2++;
-            fofc_flag = true;
-          }
-        }
-      }
-    } else {
-      // (@mhguo): beg of old floor
-      Real dave = daverage;
-      // (@mhguo) r-dependent floor
-      if (rdfloor>0.0) {
-        Real &x1min = size.d_view(m).x1min;
-        Real &x1max = size.d_view(m).x1max;
-        int nx1 = indcs.nx1;
-        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-        Real &x2min = size.d_view(m).x2min;
-        Real &x2max = size.d_view(m).x2max;
-        int nx2 = indcs.nx2;
-        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-        Real &x3min = size.d_view(m).x3min;
-        Real &x3max = size.d_view(m).x3max;
-        int nx3 = indcs.nx3;
-        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-
-        if (u.d < rdfloor/rad && rad>1.1*r_in) {
-          u.d = rdfloor/rad;
-          dave = rdfloor/rad;
-        }
-      }
-      // apply cell averaging
-      if (u.d <= dave && k>kl && k<ku && j>jl && j<ju && i>il && i<iu) {
-        Real u_dkm  = fmax(cons(m,IDN,k-1,j,i),dave);
-        Real u_dkp  = fmax(cons(m,IDN,k+1,j,i),dave);
-        Real u_djm  = fmax(cons(m,IDN,k,j-1,i),dave);
-        Real u_djp  = fmax(cons(m,IDN,k,j+1,i),dave);
-        Real u_dim  = fmax(cons(m,IDN,k,j,i-1),dave);
-        Real u_dip  = fmax(cons(m,IDN,k,j,i+1),dave);
-        //u_d = 6.0/(1.0/u_dkm+1.0/u_dkp+1.0/u_djm+1.0/u_djp+1.0/u_dim+1.0/u_dip);
-        u.d = (u_dkm+u_dkp+u_djm+u_djp+u_dim+u_dip)/6.0;
-        Real& u_m1km = cons(m,IM1,k-1,j,i);
-        Real& u_m1kp = cons(m,IM1,k+1,j,i);
-        Real& u_m1jm = cons(m,IM1,k,j-1,i);
-        Real& u_m1jp = cons(m,IM1,k,j+1,i);
-        Real& u_m1im = cons(m,IM1,k,j,i-1);
-        Real& u_m1ip = cons(m,IM1,k,j,i+1);
-        u.mx = (u_m1km+u_m1kp+u_m1jm+u_m1jp+u_m1im+u_m1ip)/6.0;
-        Real& u_m2km = cons(m,IM2,k-1,j,i);
-        Real& u_m2kp = cons(m,IM2,k+1,j,i);
-        Real& u_m2jm = cons(m,IM2,k,j-1,i);
-        Real& u_m2jp = cons(m,IM2,k,j+1,i);
-        Real& u_m2im = cons(m,IM2,k,j,i-1);
-        Real& u_m2ip = cons(m,IM2,k,j,i+1);
-        u.my = (u_m2km+u_m2kp+u_m2jm+u_m2jp+u_m2im+u_m2ip)/6.0;
-        Real& u_m3km = cons(m,IM3,k-1,j,i);
-        Real& u_m3kp = cons(m,IM3,k+1,j,i);
-        Real& u_m3jm = cons(m,IM3,k,j-1,i);
-        Real& u_m3jp = cons(m,IM3,k,j+1,i);
-        Real& u_m3im = cons(m,IM3,k,j,i-1);
-        Real& u_m3ip = cons(m,IM3,k,j,i+1);
-        u.mz = (u_m3km+u_m3kp+u_m3jm+u_m3jp+u_m3im+u_m3ip)/6.0;
-        Real e_kkm  = 0.5*(u_m1km*u_m1km + u_m2km*u_m2km + u_m3km*u_m3km)/u_dkm;
-        Real e_kkp  = 0.5*(u_m1kp*u_m1kp + u_m2kp*u_m2kp + u_m3kp*u_m3kp)/u_dkp;
-        Real e_kjm  = 0.5*(u_m1jm*u_m1jm + u_m2jm*u_m2jm + u_m3jm*u_m3jm)/u_djm;
-        Real e_kjp  = 0.5*(u_m1jp*u_m1jp + u_m2jp*u_m2jp + u_m3jp*u_m3jp)/u_djp;
-        Real e_kim  = 0.5*(u_m1im*u_m1im + u_m2im*u_m2im + u_m3im*u_m3im)/u_dim;
-        Real e_kip  = 0.5*(u_m1ip*u_m1ip + u_m2ip*u_m2ip + u_m3ip*u_m3ip)/u_dip;
-        Real u_ekm  = fmax(cons(m,IEN,k-1,j,i) - e_kkm, fmax(efloor, u_dkm*tfloor/gm1));
-        Real u_ekp  = fmax(cons(m,IEN,k+1,j,i) - e_kkp, fmax(efloor, u_dkp*tfloor/gm1));
-        Real u_ejm  = fmax(cons(m,IEN,k,j-1,i) - e_kjm, fmax(efloor, u_djm*tfloor/gm1));
-        Real u_ejp  = fmax(cons(m,IEN,k,j+1,i) - e_kjp, fmax(efloor, u_djp*tfloor/gm1));
-        Real u_eim  = fmax(cons(m,IEN,k,j,i-1) - e_kim, fmax(efloor, u_dim*tfloor/gm1));
-        Real u_eip  = fmax(cons(m,IEN,k,j,i+1) - e_kip, fmax(efloor, u_dip*tfloor/gm1));
-        Real e_k = 0.5*(u.mx*u.mx + u.my*u.my + u.mz*u.mz)/u.d;
-        u.e = e_k+(u_ekm+u_ekp+u_ejm+u_ejp+u_eim+u_eip)/6.0;
-      }
-      w.d = u.d;
-
-      Real di = 1.0/u.d;
-      w.vx = u.mx*di;
-      w.vy = u.my*di;
-      w.vz = u.mz*di;
-
-      // set internal energy, apply floor, correcting total energy
-      Real e_k = 0.5*di*(u.mx*u.mx + u.my*u.my + u.mz*u.mz);
-      w.e = (u.e - e_k);
-      if (w.e < efloor) {
-        w.e = efloor;
-        u.e = efloor + e_k;
-        sume++;
-      }
-
-      // apply temperature floor
-      Real tmp = gm1*w.e*di;
-      if (tmp < tfloor) {
-        w.e = w.d*tfloor/gm1;
-        u.e = w.e + e_k;
-      }
-      // (@mhguo): end of old floor
-    }
     // set FOFC flag and quit loop if this function called only to check floors
     if (only_testfloors) {
-      if (dfloor_used || fofc_flag) {
-      //if (dfloor_used || efloor_used || tfloor_used) {
+      if (dfloor_used || efloor_used || tfloor_used) {
         fofc_(m,k,j,i) = true;
         sumd++;  // use dfloor as counter for when either is true
       }
@@ -254,11 +102,6 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
         sumt++;
       }
       // store primitive state in 3D array
-      cons(m,IDN,k,j,i) = u.d;
-      cons(m,IM1,k,j,i) = u.mx;
-      cons(m,IM2,k,j,i) = u.my;
-      cons(m,IM3,k,j,i) = u.mz;
-      cons(m,IEN,k,j,i) = u.e;
       prim(m,IDN,k,j,i) = w.d;
       prim(m,IVX,k,j,i) = w.vx;
       prim(m,IVY,k,j,i) = w.vy;
@@ -273,19 +116,253 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
         prim(m,n,k,j,i) = cons(m,n,k,j,i)/u.d;
       }
     }
-  }, Kokkos::Sum<int>(nfloord_), Kokkos::Sum<int>(nfloore_), Kokkos::Sum<int>(nfloort_),
-  Kokkos::Sum<int>(nfofc_d), Kokkos::Sum<int>(nfofc_p), Kokkos::Sum<int>(nfofc_g));
+  }, Kokkos::Sum<int>(nfloord_), Kokkos::Sum<int>(nfloore_), Kokkos::Sum<int>(nfloort_));
+
+  int sum_0=0, sum_1=0, sum_2=0;
+  Kokkos::parallel_reduce("hyd_c2p_fix",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, int &sum0, int &sum1, int &sum2) {
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/ni;
+    int i = (idx - m*nkji - k*nji - j*ni) + il;
+    j += jl;
+    k += kl;
+
+    // load single state conserved variables
+    HydCons1D u;
+    u.d  = cons(m,IDN,k,j,i);
+    u.mx = cons(m,IM1,k,j,i);
+    u.my = cons(m,IM2,k,j,i);
+    u.mz = cons(m,IM3,k,j,i);
+    u.e  = cons(m,IEN,k,j,i);
+
+    HydPrim1D w;
+    w.d  = prim(m,IDN,k,j,i);
+    w.vx = prim(m,IVX,k,j,i);
+    w.vy = prim(m,IVY,k,j,i);
+    w.vz = prim(m,IVZ,k,j,i);
+    w.e  = prim(m,IEN,k,j,i);
+
+    // (@mhguo): beg fofc criteria
+    bool fofc_flag = false;
+    bool rdf_flag = false, ave_flag = false, ceil_flag = false;
+    if (only_testfloors) {
+      if (rdfloor>0.0) {
+        Real &x1min = size.d_view(m).x1min;
+        Real &x1max = size.d_view(m).x1max;
+        int nx1 = indcs.nx1;
+        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+        Real &x2min = size.d_view(m).x2min;
+        Real &x2max = size.d_view(m).x2max;
+        int nx2 = indcs.nx2;
+        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+        Real &x3min = size.d_view(m).x3min;
+        Real &x3max = size.d_view(m).x3max;
+        int nx3 = indcs.nx3;
+        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+        if (rad < 2.0*r_in) {
+          sum0++;
+          fofc_flag = true;
+        }
+
+        if (u.d < rdfloor/rad && rad>1.1*r_in) {
+          sum1++;
+          fofc_flag = true;
+        }
+        if (w.d <= 1e3*eos.rdfloor/rad && rad>1.1*r_in) {
+          Real w_dkm = (k>ks-ng)? prim(m,IDN,k-1,j,i) : w.d;
+          Real w_dkp = (k<ke+ng)? prim(m,IDN,k+1,j,i) : w.d;
+          Real w_djm = (j>js-ng)? prim(m,IDN,k,j-1,i) : w.d;
+          Real w_djp = (j<je+ng)? prim(m,IDN,k,j+1,i) : w.d;
+          Real w_dim = (i>is-ng)? prim(m,IDN,k,j,i-1) : w.d;
+          Real w_dip = (i<ie+ng)? prim(m,IDN,k,j,i+1) : w.d;
+          if (w.d/w_dkm + w_dkm/w.d > 1e2 || w.d/w_dkp + w_dkp/w.d > 1e2 ||
+              w.d/w_djm + w_djm/w.d > 1e2 || w.d/w_djp + w_djp/w.d > 1e2 ||
+              w.d/w_dim + w_dim/w.d > 1e2 || w.d/w_dip + w_dip/w.d > 1e2) {
+            sum2++;
+            fofc_flag = true;
+          }
+        }
+      }
+      if (fofc_flag) {
+        fofc_(m,k,j,i) = true;
+      }
+    } else {
+      Real dave = daverage;
+      // (@mhguo) r-dependent floor
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      int nx2 = indcs.nx2;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      int nx3 = indcs.nx3;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (rdfloor>0.0) {
+        if (u.d < rdfloor/rad && rad>1.1*r_in) {
+          u.d = rdfloor/rad;
+          w.d = rdfloor/rad;
+          dave = rdfloor/rad;
+          rdf_flag = true;
+          sum0++;
+        }
+      }
+      // apply cell averaging
+      if (u.d <= dave && rad>1.1*r_in && k>kl && k<ku && j>jl && j<ju && i>il && i<iu) {
+        MHDCons1D ukm, ukp, ujm, ujp, uim, uip;
+        ukm.d  = cons(m,IDN,k-1,j,i);
+        ukm.mx = cons(m,IM1,k-1,j,i);
+        ukm.my = cons(m,IM2,k-1,j,i);
+        ukm.mz = cons(m,IM3,k-1,j,i);
+        ukm.e  = cons(m,IEN,k-1,j,i);
+
+        ukp.d  = cons(m,IDN,k+1,j,i);
+        ukp.mx = cons(m,IM1,k+1,j,i);
+        ukp.my = cons(m,IM2,k+1,j,i);
+        ukp.mz = cons(m,IM3,k+1,j,i);
+        ukp.e  = cons(m,IEN,k+1,j,i);
+
+        ujm.d  = cons(m,IDN,k,j-1,i);
+        ujm.mx = cons(m,IM1,k,j-1,i);
+        ujm.my = cons(m,IM2,k,j-1,i);
+        ujm.mz = cons(m,IM3,k,j-1,i);
+        ujm.e  = cons(m,IEN,k,j-1,i);
+
+        ujp.d  = cons(m,IDN,k,j+1,i);
+        ujp.mx = cons(m,IM1,k,j+1,i);
+        ujp.my = cons(m,IM2,k,j+1,i);
+        ujp.mz = cons(m,IM3,k,j+1,i);
+        ujp.e  = cons(m,IEN,k,j+1,i);
+
+        uim.d  = cons(m,IDN,k,j,i-1);
+        uim.mx = cons(m,IM1,k,j,i-1);
+        uim.my = cons(m,IM2,k,j,i-1);
+        uim.mz = cons(m,IM3,k,j,i-1);
+        uim.e  = cons(m,IEN,k,j,i-1);
+
+        uip.d  = cons(m,IDN,k,j,i+1);
+        uip.mx = cons(m,IM1,k,j,i+1);
+        uip.my = cons(m,IM2,k,j,i+1);
+        uip.mz = cons(m,IM3,k,j,i+1);
+        uip.e  = cons(m,IEN,k,j,i+1);
+
+        u.d = (ukm.d+ukp.d+ujm.d+ujp.d+uim.d+uip.d)/6.0;
+        u.mx = (ukm.mx+ukp.mx+ujm.mx+ujp.mx+uim.mx+uip.mx)/6.0;
+        u.my = (ukm.my+ukp.my+ujm.my+ujp.my+uim.my+uip.my)/6.0;
+        u.mz = (ukm.mz+ukp.mz+ujm.mz+ujp.mz+uim.mz+uip.mz)/6.0;
+        Real e_kkm  = 0.5*(SQR(ukm.mx) + SQR(ukm.my) + SQR(ukm.mz))/ukm.d;
+        Real e_kkp  = 0.5*(SQR(ukp.mx) + SQR(ukp.my) + SQR(ukp.mz))/ukp.d;
+        Real e_kjm  = 0.5*(SQR(ujm.mx) + SQR(ujm.my) + SQR(ujm.mz))/ujm.d;
+        Real e_kjp  = 0.5*(SQR(ujp.mx) + SQR(ujp.my) + SQR(ujp.mz))/ujp.d;
+        Real e_kim  = 0.5*(SQR(uim.mx) + SQR(uim.my) + SQR(uim.mz))/uim.d;
+        Real e_kip  = 0.5*(SQR(uip.mx) + SQR(uip.my) + SQR(uip.mz))/uip.d;
+        Real u_ekm  = ukm.e - e_kkm;
+        Real u_ekp  = ukp.e - e_kkp;
+        Real u_ejm  = ujm.e - e_kjm;
+        Real u_ejp  = ujp.e - e_kjp;
+        Real u_eim  = uim.e - e_kim;
+        Real u_eip  = uip.e - e_kip;
+        Real e_k = 0.5*(u.mx*u.mx + u.my*u.my + u.mz*u.mz)/u.d;
+        u.e = e_k+(u_ekm+u_ekp+u_ejm+u_ejp+u_eim+u_eip)/6.0;
+        sum1++;
+        ave_flag = true;
+        w.d = u.d;
+        w.vx = u.mx/u.d;
+        w.vy = u.my/u.d;
+        w.vz = u.mz/u.d;
+
+        // set internal energy, apply floor, correcting total energy
+        w.e = (u.e - e_k);
+        if (w.e < efloor) {
+          w.e = efloor;
+          u.e = efloor + e_k;
+        }
+
+        // apply temperature floor
+        Real tmp = gm1*w.e/w.d;
+        if (tmp < tfloor) {
+          w.e = w.d*tfloor/gm1;
+          u.e = w.e + e_k;
+        }
+      }
+
+      // apply ceiling
+      Real vx1 = size.d_view(m).dx1/eos.dt_floor;
+      Real vx2 = size.d_view(m).dx2/eos.dt_floor;
+      Real vx3 = size.d_view(m).dx3/eos.dt_floor;
+      Real vceil = fmin(fmin(vx1,vx2),vx3);
+      if (rad < 2.0*r_in) {
+        if (fabs(w.vx)>vx1) {
+          w.vx = (w.vx>0.0)*vx1;
+          ceil_flag = true;
+        }
+        if (fabs(w.vy)>vx2) {
+          w.vy = (w.vy>0.0)*vx2;
+          ceil_flag = true;
+        }
+        if (fabs(w.vz)>vx3) {
+          w.vz = (w.vz>0.0)*vx3;
+          ceil_flag = true;
+        }
+        if (w.e/w.d*gm1>SQR(vceil)) {
+          w.e = w.d*SQR(vceil)/gm1;
+          ceil_flag = true;
+        }
+        if (ceil_flag) {
+          u.d = w.d;
+          u.mx = w.vx*w.d;
+          u.my = w.vy*w.d;
+          u.mz = w.vz*w.d;
+          Real e_k = 0.5*(w.vx*w.vx + w.vy*w.vy + w.vz*w.vz)*w.d;
+          u.e = w.e + e_k;
+          sum2++;
+        }
+      }
+
+      // apply all the fixes
+      if (rdf_flag || ave_flag || ceil_flag) {
+        // store primitive state in 3D array
+        cons(m,IDN,k,j,i) = u.d;
+        cons(m,IM1,k,j,i) = u.mx;
+        cons(m,IM2,k,j,i) = u.my;
+        cons(m,IM3,k,j,i) = u.mz;
+        cons(m,IEN,k,j,i) = u.e;
+        prim(m,IDN,k,j,i) = w.d;
+        prim(m,IVX,k,j,i) = w.vx;
+        prim(m,IVY,k,j,i) = w.vy;
+        prim(m,IVZ,k,j,i) = w.vz;
+        prim(m,IEN,k,j,i) = w.e;
+      }
+    }
+  }, Kokkos::Sum<int>(sum_0), Kokkos::Sum<int>(sum_1), Kokkos::Sum<int>(sum_2));
 
   // store appropriate counters
   if (only_testfloors) {
     pmy_pack->pmesh->ecounter.nfofc += nfloord_;
-    pmy_pack->pmesh->ecounter.nfofc_d += nfofc_d;
-    pmy_pack->pmesh->ecounter.nfofc_p += nfofc_p;
-    pmy_pack->pmesh->ecounter.nfofc_g += nfofc_g;
+    pmy_pack->pmesh->ecounter.nfofc_d += sum_0;
+    pmy_pack->pmesh->ecounter.nfofc_p += sum_1;
+    pmy_pack->pmesh->ecounter.nfofc_g += sum_2;
   } else {
     pmy_pack->pmesh->ecounter.neos_dfloor += nfloord_;
     pmy_pack->pmesh->ecounter.neos_efloor += nfloore_;
     pmy_pack->pmesh->ecounter.neos_tfloor += nfloort_;
+    pmy_pack->pmesh->ecounter.neos_rdfloor += sum_0;
+    pmy_pack->pmesh->ecounter.neos_avfloor += sum_1;
+    pmy_pack->pmesh->ecounter.neos_dtfloor += sum_2;
   }
 
   return;

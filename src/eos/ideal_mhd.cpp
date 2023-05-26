@@ -53,10 +53,10 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
   int ng = indcs.ng;
   Real gm1 = (eos.gamma - 1.0);
   Real r_in = eos.r_in;
-  Real &daverage = eos.daverage;
-  Real &rdfloor = eos.rdfloor;
   Real efloor = eos.pfloor/gm1;
   Real &tfloor = eos.tfloor;
+  Real &daverage = eos.daverage;
+  Real &rdfloor = eos.rdfloor;
 
   int nfloord_=0, nfloore_=0, nfloort_=0;
   Kokkos::parallel_reduce("mhd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
@@ -136,8 +136,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     }
   }, Kokkos::Sum<int>(nfloord_), Kokkos::Sum<int>(nfloore_), Kokkos::Sum<int>(nfloort_));
 
-  // TODO(@mhguo): use nfofc_p to count number of dt floor used now, should make it clear
-  int nfofc_d=0, nfofc_p=0, nfofc_g=0;
+  int sum_0=0, sum_1=0, sum_2=0;
   Kokkos::parallel_reduce("mhd_c2p_fix",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, int &sum0, int &sum1, int &sum2) {
     int m = (idx)/nkji;
@@ -196,12 +195,14 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        //int *psum_0 = &sum0;
-        //int *psum_1 = &sum1;
-        //int *psum_2 = &sum2;
+
+        if (rad < 2.0*r_in) {
+          sum0++;
+          fofc_flag = true;
+        }
 
         if (u.d < rdfloor/rad && rad>1.1*r_in) {
-          sum0++;
+          sum1++;
           fofc_flag = true;
         }
         if (w.d <= 1e3*eos.rdfloor/rad && rad>1.1*r_in) {
@@ -223,7 +224,6 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         fofc_(m,k,j,i) = true;
       }
     } else {
-      // (@mhguo): beg of old floor
       Real dave = daverage;
       // (@mhguo) r-dependent floor
       Real &x1min = size.d_view(m).x1min;
@@ -249,7 +249,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
           w.d = rdfloor/rad;
           dave = rdfloor/rad;
           rdf_flag = true;
-          sum1++;
+          sum0++;
         }
       }
       // apply cell averaging
@@ -334,12 +334,12 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         Real e_k = 0.5*(u.mx*u.mx + u.my*u.my + u.mz*u.mz)/u.d;
         Real e_m = 0.5*(u.bx*u.bx + u.by*u.by + u.bz*u.bz);
         u.e = e_k+e_m+(u_ekm+u_ekp+u_ejm+u_ejp+u_eim+u_eip)/6.0;
+        sum1++;
         ave_flag = true;
         w.d = u.d;
-        Real di = 1.0/u.d;
-        w.vx = u.mx*di;
-        w.vy = u.my*di;
-        w.vz = u.mz*di;
+        w.vx = u.mx/u.d;
+        w.vy = u.my/u.d;
+        w.vz = u.mz/u.d;
 
         // set internal energy, apply floor, correcting total energy
         w.e = (u.e - e_k - e_m);
@@ -349,7 +349,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         }
 
         // apply temperature floor
-        Real tmp = gm1*w.e*di;
+        Real tmp = gm1*w.e/w.d;
         if (tmp < tfloor) {
           w.e = w.d*tfloor/gm1;
           u.e = w.e + e_k + e_m;
@@ -362,35 +362,37 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
       Real vx3 = size.d_view(m).dx3/eos.dt_floor;
       Real vceil = fmin(fmin(vx1,vx2),vx3);
       Real dfloor_va = fmax(fmax(SQR(u.bx/vx1),SQR(u.by/vx2)),SQR(u.bz/vx3));
-      if (w.d<dfloor_va) {
-        w.d = dfloor_va;
-        ceil_flag = true;
-      }
-      if (fabs(w.vx)>vx1) {
-        w.vx = (w.vx>0.0)*vx1;
-        ceil_flag = true;
-      }
-      if (fabs(w.vy)>vx2) {
-        w.vy = (w.vy>0.0)*vx2;
-        ceil_flag = true;
-      }
-      if (fabs(w.vz)>vx3) {
-        w.vz = (w.vz>0.0)*vx3;
-        ceil_flag = true;
-      }
-      if (w.e/w.d*gm1>SQR(vceil)) {
-        w.e = w.d*SQR(vceil)/gm1;
-        ceil_flag = true;
-      }
-      if (ceil_flag) {
-        u.d = w.d;
-        u.mx = w.vx*w.d;
-        u.my = w.vy*w.d;
-        u.mz = w.vz*w.d;
-        Real e_k = 0.5*(w.vx*w.vx + w.vy*w.vy + w.vz*w.vz)*w.d;
-        Real e_m = 0.5*(u.bx*u.bx + u.by*u.by + u.bz*u.bz);
-        u.e = w.e + e_k + e_m;
-        sum1++;
+      if (rad < 2.0*r_in) {
+        if (w.d<dfloor_va) {
+          w.d = dfloor_va;
+          ceil_flag = true;
+        }
+        if (fabs(w.vx)>vx1) {
+          w.vx = (w.vx>0.0)*vx1;
+          ceil_flag = true;
+        }
+        if (fabs(w.vy)>vx2) {
+          w.vy = (w.vy>0.0)*vx2;
+          ceil_flag = true;
+        }
+        if (fabs(w.vz)>vx3) {
+          w.vz = (w.vz>0.0)*vx3;
+          ceil_flag = true;
+        }
+        if (w.e/w.d*gm1>SQR(vceil)) {
+          w.e = w.d*SQR(vceil)/gm1;
+          ceil_flag = true;
+        }
+        if (ceil_flag) {
+          u.d = w.d;
+          u.mx = w.vx*w.d;
+          u.my = w.vy*w.d;
+          u.mz = w.vz*w.d;
+          Real e_k = 0.5*(w.vx*w.vx + w.vy*w.vy + w.vz*w.vz)*w.d;
+          Real e_m = 0.5*(u.bx*u.bx + u.by*u.by + u.bz*u.bz);
+          u.e = w.e + e_k + e_m;
+          sum2++;
+        }
       }
 
       // apply all the fixes
@@ -408,21 +410,21 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         prim(m,IEN,k,j,i) = w.e;
       }
     }
-  }, Kokkos::Sum<int>(nfofc_d), Kokkos::Sum<int>(nfofc_p), Kokkos::Sum<int>(nfofc_g));
+  }, Kokkos::Sum<int>(sum_0), Kokkos::Sum<int>(sum_1), Kokkos::Sum<int>(sum_2));
 
   // store appropriate counters
   if (only_testfloors) {
     pmy_pack->pmesh->ecounter.nfofc += nfloord_;
-    pmy_pack->pmesh->ecounter.nfofc_d += nfofc_d;
-    pmy_pack->pmesh->ecounter.nfofc_p += nfofc_p;
-    pmy_pack->pmesh->ecounter.nfofc_g += nfofc_g;
+    pmy_pack->pmesh->ecounter.nfofc_d += sum_0;
+    pmy_pack->pmesh->ecounter.nfofc_p += sum_1;
+    pmy_pack->pmesh->ecounter.nfofc_g += sum_2;
   } else {
     pmy_pack->pmesh->ecounter.neos_dfloor += nfloord_;
     pmy_pack->pmesh->ecounter.neos_efloor += nfloore_;
     pmy_pack->pmesh->ecounter.neos_tfloor += nfloort_;
-    pmy_pack->pmesh->ecounter.nfofc_d += nfofc_d;
-    pmy_pack->pmesh->ecounter.nfofc_p += nfofc_p;
-    pmy_pack->pmesh->ecounter.nfofc_g += nfofc_g;
+    pmy_pack->pmesh->ecounter.neos_rdfloor += sum_0;
+    pmy_pack->pmesh->ecounter.neos_avfloor += sum_1;
+    pmy_pack->pmesh->ecounter.neos_dtfloor += sum_2;
   }
 
   return;

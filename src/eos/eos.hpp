@@ -30,9 +30,9 @@ struct EOS_Data {
   bool use_e, use_t; // use internal energy density (e) or temperature (t) as primitive
   Real dfloor, pfloor, tfloor, sfloor;  // density, pressure, temperature, entropy floors
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
-  Real daverage;
+  Real daverage;     // density floor for averaging
   Real rdfloor;      // r-dependent dfloor
-  Real r_in;
+  Real r_in;         // inner radius
   Real dt_floor;     // floor of timestep
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
