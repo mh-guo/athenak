@@ -109,7 +109,7 @@ void EventLogOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       std::fprintf(pfile,"# Athena event counter data\n");
       std::fprintf(pfile,"#  cycle eos_dfloor eos_efloor eos_tfloor eos_vceil");
       std::fprintf(pfile," eos_fail c2p_it fofc");
-      std::fprintf(pfile," fofc_d fofc_p fofc_g rdfloor avfloor dtfloor");
+      std::fprintf(pfile," fofc_d fofc_p fofc_g eos_rdfloor eos_avfloor eos_dtfloor");
       std::fprintf(pfile,"\n");  // terminate line
       header_written = true;
     }
