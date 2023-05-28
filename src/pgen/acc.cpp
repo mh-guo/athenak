@@ -386,13 +386,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
   Real hist_r1 = pin->GetOrAddReal("problem","hist_r1",1.1);
-  Real hist_r2 = pin->GetOrAddReal("problem","hist_r2",10.0);
-  Real hist_r3 = pin->GetOrAddReal("problem","hist_r3",100.0);
+  Real hist_r2 = pin->GetOrAddReal("problem","hist_r2",3.0);
+  Real hist_r3 = pin->GetOrAddReal("problem","hist_r3",10.0);
+  Real hist_r4 = pin->GetOrAddReal("problem","hist_r4",100.0);
   grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, hist_r1*acc->r_in));
   // Enroll additional radii for flux analysis by
   // pushing back the grids vector with additional SphericalGrid instances
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r2*acc->r_in));
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r3*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r4*acc->r_in));
 
   // Print info
   if (global_variable::my_rank == 0) {
@@ -1050,7 +1052,7 @@ void AccRefine(MeshBlockPack* pmbp) {
   int nmb = pmbp->nmb_thispack;
   int mbs = pmesh->gids_eachrank[global_variable::my_rank];
   if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
-    printf("AccRefine\n");
+    if (global_variable::my_rank == 0) {printf("AccRefine\n");}
     auto &w0 = (pmbp->phydro != nullptr)? pmbp->phydro->w0 : pmbp->pmhd->w0;
     par_for_outer("AccRefineCond",DevExeSpace(), 0, 0, 0, (nmb-1),
     KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
@@ -1127,7 +1129,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   //const int nflux = (is_mhd) ? 7 : 6;
-  const int nflux = 7;
+  const int nflux = 8;
   // TODO(@mhguo): check what is necessary!
   // set number of and names of history variables for hydro or mhd
   //  (0) mass
@@ -1135,15 +1137,16 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   //  (2) energy flux
   //  (3) angular momentum flux * 3
   //  (4) magnetic flux (iff MHD)
-  const int nsph = 3 * nflux;
+  const int nsph = 4 * nflux;
   const int nreduce = 58;
   const int nuser = nsph + nreduce;
   pdata->nhist = nuser;
   const char *data_label[nuser] = {
-    // 6 letters the for first row, 5 for the rest
-    "m_1   ", "mdot1 ", "edot1 ", "lx_1  ", "ly_1  ", "lz_1  ", "phi_1 ",
-    "m_2  ",  "mdot2",  "edot2",  "lx_2 ",  "ly_2 ",  "lz_2 ",  "phi_2",
-    "m_3  ",  "mdot3",  "edot3",  "lx_3 ",  "ly_3 ",  "lz_3 ",  "phi_3",
+    // 6 letters for the first 7 labels, 5 for the rest
+    "m_1   ", "mdot1 ", "mdh1  ", "edot1 ", "lx_1  ", "ly_1  ", "lz_1  ", "phi_1",
+    "m_2  ",  "mdot2",  "mdh2 ",  "edot2",  "lx_2 ",  "ly_2 ",  "lz_2 ",  "phi_2",
+    "m_3  ",  "mdot3",  "mdh3 ",  "edot3",  "lx_3 ",  "ly_3 ",  "lz_3 ",  "phi_3",
+    "m_4  ",  "mdot4",  "mdh4 ",  "edot4",  "lx_4 ",  "ly_4 ",  "lz_4 ",  "phi_4",
     "Mdot ",  "Mglb ",  "M_in ",  "Lx_in",  "Ly_in",  "Lz_in",  "L_in ",
     "Vcold",  "Mcold",  "Lx_c ",  "Ly_c ",  "Lz_c ",  "L_c  ",
     "Vwarm",  "Mwarm",  "Lx_w ",  "Ly_w ",  "Lz_w ",  "L_w  ",
@@ -1189,6 +1192,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
       Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
       Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+      Real int_temp = gm1*int_ie/int_dn;
       // extract interpolated field components (iff is_mhd)
       Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
       if (is_mhd) {
@@ -1211,27 +1215,34 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       Real br  = drdx*b1 + drdy*b2 + drdz*b3;
       // integration params
       Real &domega = grids[g]->solid_angles.h_view(n);
+      Real x = r/radentry;
+      Real rho_ini = DensFn(x,d_arr);
+      Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
+      Real temp_ini = pgas_ini/rho_ini;
+      Real t_hot = tf_hot*temp_ini;
+      Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
 
-      // compute mass flux
+      // compute mass density
       pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
 
       // compute mass flux
       pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
+      pdata->hdata[nflux*g+2] += is_hot*int_dn*vr*r_sq*domega;
 
       // compute energy flux
       // TODO(@mhguo): check whether this is correct!
       Real t1_0 = (int_ie + 0.5*e_k + 0.5*b_sq)*vr;
-      pdata->hdata[nflux*g+2] += 1.0*t1_0*r_sq*domega;
+      pdata->hdata[nflux*g+3] += 1.0*t1_0*r_sq*domega;
 
       // compute angular momentum flux
       // TODO(@mhguo): check whether this is correct!
-      pdata->hdata[nflux*g+3] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
-      pdata->hdata[nflux*g+4] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
-      pdata->hdata[nflux*g+5] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
+      pdata->hdata[nflux*g+4] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+      pdata->hdata[nflux*g+5] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+      pdata->hdata[nflux*g+6] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
 
       // compute magnetic flux
       if (is_mhd) {
-        pdata->hdata[nflux*g+6] += 0.5*fabs(br)*r_sq*domega;
+        pdata->hdata[nflux*g+7] += 0.5*fabs(br)*r_sq*domega;
       }
     }
   }
