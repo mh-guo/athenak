@@ -32,8 +32,9 @@ struct EOS_Data {
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
   Real daverage;     // density floor for averaging
   Real rdfloor;      // r-dependent dfloor
-  Real r_in;         // inner radius
   Real dt_floor;     // floor of timestep
+  Real r_in;         // inner radius
+  Real a_excise;     // excision radius relative to r_in
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
   // or temperature e/d) into pressure.

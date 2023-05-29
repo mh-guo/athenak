@@ -385,16 +385,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  Real hist_r1 = pin->GetOrAddReal("problem","hist_r1",1.1);
-  Real hist_r2 = pin->GetOrAddReal("problem","hist_r2",3.0);
-  Real hist_r3 = pin->GetOrAddReal("problem","hist_r3",10.0);
-  Real hist_r4 = pin->GetOrAddReal("problem","hist_r4",100.0);
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, hist_r1*acc->r_in));
+  Real hist_a1 = pin->GetOrAddReal("problem","hist_a1",1.1);
+  Real hist_a2 = pin->GetOrAddReal("problem","hist_a2",3.0);
+  Real hist_a3 = pin->GetOrAddReal("problem","hist_a3",10.0);
+  Real hist_a4 = pin->GetOrAddReal("problem","hist_a4",100.0);
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, hist_a1*acc->r_in));
   // Enroll additional radii for flux analysis by
   // pushing back the grids vector with additional SphericalGrid instances
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r2*acc->r_in));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r3*acc->r_in));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r4*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a2*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a3*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a4*acc->r_in));
 
   // Print info
   if (global_variable::my_rank == 0) {

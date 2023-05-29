@@ -53,6 +53,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
   int ng = indcs.ng;
   Real gm1 = (eos.gamma - 1.0);
   Real r_in = eos.r_in;
+  Real a_excise = eos.a_excise;
   Real efloor = eos.pfloor/gm1;
   Real &tfloor = eos.tfloor;
   Real &daverage = eos.daverage;
@@ -196,7 +197,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
 
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-        if (rad < 2.0*r_in) {
+        if (rad < a_excise*r_in) {
           fofc_flag = true;
         }
         if (u.d < rdfloor/rad && rad>1.1*r_in) {
@@ -360,7 +361,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
       Real vx3 = size.d_view(m).dx3/eos.dt_floor;
       Real vceil = fmin(fmin(vx1,vx2),vx3);
       Real dfloor_va = fmax(fmax(SQR(u.bx/vx1),SQR(u.by/vx2)),SQR(u.bz/vx3));
-      if (rad < 2.0*r_in) {
+      if (rad < a_excise*r_in) {
         if (w.d<dfloor_va) {
           w.d = dfloor_va;
           ceil_flag = true;
