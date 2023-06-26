@@ -555,10 +555,14 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   });
 
   // Calculate normalization of new force array so that energy input rate ~ dedt
-  DvceArray5D<Real> u;
+  DvceArray5D<Real> u,w;
   if (pmy_pack->phydro != nullptr) u = (pmy_pack->phydro->u0);
   if (pmy_pack->pmhd != nullptr) u = (pmy_pack->pmhd->u0);
   if (pmy_pack->pionn != nullptr) u = (pmy_pack->phydro->u0); // assume neutral density
+                                                              //     >> ionized density
+  if (pmy_pack->phydro != nullptr) w = (pmy_pack->phydro->w0);
+  if (pmy_pack->pmhd != nullptr) w = (pmy_pack->pmhd->w0);
+  if (pmy_pack->pionn != nullptr) w = (pmy_pack->phydro->w0); // assume neutral density
                                                               //     >> ionized density
   // Normalization: a constant Mach number
   EOS_Data &eos = (pmy_pack->pmhd != nullptr) ?
@@ -566,7 +570,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   auto &mbsize = pmy_pack->pmb->mb_size;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real v_turb = sqrt(u(m,IEN,k,j,i)/u(m,IDN,k,j,i));
+    Real v_turb = sqrt(w(m,IEN,k,j,i)/w(m,IDN,k,j,i));
     force_new_(m,0,k,j,i) *= v_turb;
     force_new_(m,1,k,j,i) *= v_turb;
     force_new_(m,2,k,j,i) *= v_turb;
@@ -657,7 +661,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
 
       //if (m==0&&k==6&&j==6&&i==6) {
       //  printf("normden: %.6e\n",u(m,IDN,k,j,i));
-      //printf("normmom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      //  printf("normmom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
       //  printf("normv: %.6e %.6e %.6e\n",v1,v2,v3);
       //}
 
@@ -667,6 +671,8 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
     }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1));
     m0 = std::max(m0, static_cast<Real>(std::numeric_limits<float>::min()) );
   }
+  // TODO(@mhguo): rm this cout!
+  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
 
 #if MPI_PARALLEL_ENABLED
     Real m_sum2[2] = {m0,m1};
@@ -708,7 +714,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   }
 
   // TODO(@mhguo): rm this cout!
-  //std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<"  s="<<s<<std::endl;
+  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<"  s="<<s<<std::endl;
 
   // Now normalize new force array
   par_for("OU_process", DevExeSpace(),0,nmb-1,0,2,0,ncells3-1,0,ncells2-1,0,ncells1-1,

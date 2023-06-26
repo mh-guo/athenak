@@ -187,28 +187,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc->potential = pin->GetOrAddBoolean("problem","potential",false);
   bool profile = pin->GetOrAddBoolean("problem","profile",false);
   if (!profile && !acc->potential) {
-    if (pmbp->phydro != nullptr) {
-      auto &u0 = pmbp->phydro->u0;
-      par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        u0(m,IDN,k,j,i) = 1.0;
-        u0(m,IM1,k,j,i) = 0.0;
-        u0(m,IM2,k,j,i) = 0.0;
-        u0(m,IM3,k,j,i) = 0.0;
-        u0(m,IEN,k,j,i) = 1.0;
-      });
-    }
-    if (pmbp->pmhd != nullptr) {
-      auto &u0 = pmbp->pmhd->u0;
-      par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        u0(m,IDN,k,j,i) = 1.0;
-        u0(m,IM1,k,j,i) = 0.0;
-        u0(m,IM2,k,j,i) = 0.0;
-        u0(m,IM3,k,j,i) = 0.0;
-        u0(m,IEN,k,j,i) = 1.0;
-      });
-    }
+    auto &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+    par_for("pgen_accretion", DevExeSpace(),0,nmb1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      u0(m,IDN,k,j,i) = 1.0;
+      u0(m,IM1,k,j,i) = 0.0;
+      u0(m,IM2,k,j,i) = 0.0;
+      u0(m,IM3,k,j,i) = 0.0;
+      u0(m,IEN,k,j,i) = 1.0;
+    });
     return;
   }
 
@@ -334,6 +321,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real cs_iso = std::sqrt(temp_kelvin/pmbp->punit->temperature_cgs());
 
   // Initialize Hydro/MHD variables -------------------------------
+  auto &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
   auto &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
   EOS_Data &eos = (pmbp->pmhd != nullptr) ?
                   pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
@@ -341,7 +329,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // update problem-specific parameters
   eos.r_in = acc->r_in;
   acc->dt_floor = eos.dt_floor;
-  acc->sink_dt_floor = pin->GetOrAddReal("problem","sink_dt",eos.dt_floor);
+  acc->sink_dt_floor = pin->GetOrAddReal("problem","sink_dt",0.0);
+  if (acc->sink_dt_floor < acc->dt_floor) {acc->sink_dt_floor = acc->dt_floor;}
   acc->tfloor = eos.tfloor;
   acc->gamma = eos.gamma;
   acc->temp_0 = cs_iso*cs_iso;
@@ -492,14 +481,21 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real rho = DensFnDevice(x,d_arr);
     Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
 
-    u0(m,IDN,k,j,i) = rho;
-    u0(m,IM1,k,j,i) = 0.0;
-    u0(m,IM2,k,j,i) = 0.0;
-    u0(m,IM3,k,j,i) = 0.0;
+    w0(m,IDN,k,j,i) = rho;
+    w0(m,IVX,k,j,i) = 0.0;
+    w0(m,IVY,k,j,i) = 0.0;
+    w0(m,IVZ,k,j,i) = 0.0;
     if (eos.is_ideal) {
-      u0(m,IEN,k,j,i) = pgas/gm1;
+      w0(m,IEN,k,j,i) = pgas/gm1;
     }
   });
+  // Convert primitives to conserved
+  if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->PrimToCons(w0, u0, is-ng, ie+ng, js-ng, je+ng, ks-ng, ke+ng);
+  } else if (pmbp->pmhd != nullptr) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    pmbp->pmhd->peos->PrimToCons(w0, bcc0_, u0, is-ng, ie+ng, js-ng, je+ng, ks-ng, ke+ng);
+  }
   for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
     if (it->block_name.compare(0, 9, "turb_dens") == 0) {
       TurbulenceDens *pturb;
@@ -939,7 +935,7 @@ void RadialBoundary(Mesh *pm) {
     }
   });
 
-  par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
+  par_for("fixed_x3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x3 boundary
     Real &x1min = size.d_view(m).x1min;
@@ -1023,6 +1019,58 @@ void RadialBoundary(Mesh *pm) {
         b0.x1f(m,k,j,i+1) = 0.0;
         b0.x2f(m,k,j+1,i) = 0.0;
         b0.x3f(m,k+1,j,i) = 0.0;*/
+      }
+    });
+    // noinflow condition
+    par_for("noinflow_field_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
+        b0.x1f(m,k,j,is-i-1) = b0.x1f(m,k,j,is);
+        b0.x2f(m,k,j,is-i-1) = b0.x2f(m,k,j,is);
+        if (j == n2-1) {b0.x2f(m,k,j+1,is-i-1) = b0.x2f(m,k,j+1,is);}
+        b0.x3f(m,k,j,is-i-1) = b0.x3f(m,k,j,is);
+        if (k == n3-1) {b0.x3f(m,k+1,j,is-i-1) = b0.x3f(m,k+1,j,is);}
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
+        b0.x1f(m,k,j,ie+i+2) = b0.x1f(m,k,j,ie+1);
+        b0.x2f(m,k,j,ie+i+1) = b0.x2f(m,k,j,ie);
+        if (j == n2-1) {b0.x2f(m,k,j+1,ie+i+1) = b0.x2f(m,k,j+1,ie);}
+        b0.x3f(m,k,j,ie+i+1) = b0.x3f(m,k,j,ie);
+        if (k == n3-1) {b0.x3f(m,k+1,j,ie+i+1) = b0.x3f(m,k+1,j,ie);}
+      }
+    });
+    par_for("noinflow_field_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
+        b0.x1f(m,k,js-j-1,i) = b0.x1f(m,k,js,i);
+        if (i == n1-1) {b0.x1f(m,k,js-j-1,i+1) = b0.x1f(m,k,js,i+1);}
+        b0.x2f(m,k,js-j-1,i) = b0.x2f(m,k,js,i);
+        b0.x3f(m,k,js-j-1,i) = b0.x3f(m,k,js,i);
+        if (k == n3-1) {b0.x3f(m,k+1,js-j-1,i) = b0.x3f(m,k+1,js,i);}
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
+        b0.x1f(m,k,je+j+1,i) = b0.x1f(m,k,je,i);
+        if (i == n1-1) {b0.x1f(m,k,je+j+1,i+1) = b0.x1f(m,k,je,i+1);}
+        b0.x2f(m,k,je+j+2,i) = b0.x2f(m,k,je+1,i);
+        b0.x3f(m,k,je+j+1,i) = b0.x3f(m,k,je,i);
+        if (k == n3-1) {b0.x3f(m,k+1,je+j+1,i) = b0.x3f(m,k+1,je,i);}
+      }
+    });
+    par_for("noinflow_field_x3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+        b0.x1f(m,ks-k-1,j,i) = b0.x1f(m,ks,j,i);
+        if (i == n1-1) {b0.x1f(m,ks-k-1,j,i+1) = b0.x1f(m,ks,j,i+1);}
+        b0.x2f(m,ks-k-1,j,i) = b0.x2f(m,ks,j,i);
+        if (j == n2-1) {b0.x2f(m,ks-k-1,j+1,i) = b0.x2f(m,ks,j+1,i);}
+        b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i);
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
+        b0.x1f(m,ke+k+1,j,i) = b0.x1f(m,ke,j,i);
+        if (i == n1-1) {b0.x1f(m,ke+k+1,j,i+1) = b0.x1f(m,ke,j,i+1);}
+        b0.x2f(m,ke+k+1,j,i) = b0.x2f(m,ke,j,i);
+        if (j == n2-1) {b0.x2f(m,ke+k+1,j+1,i) = b0.x2f(m,ke,j+1,i);}
+        b0.x3f(m,ke+k+2,j,i) = b0.x3f(m,ke+1,j,i);
       }
     });
   }
@@ -1131,6 +1179,10 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   //const int nflux = (is_mhd) ? 7 : 6;
   const int nflux = 8;
   // TODO(@mhguo): check what is necessary!
+  // TODO(@mhguo): In the long run, it would be great if we can directly plot radial
+  // TODO(@mhguo): profiles using history variables. We may need around 10 points and 
+  // TODO(@mhguo): span roughly 2 orders of magnitude: 1,2,3,5,10,20,30,50,100,200,300
+  // TODO(@mhguo): or 1,1.5,2,3,5,7,10,15,20,30,50,70,100
   // set number of and names of history variables for hydro or mhd
   //  (0) mass
   //  (1) mass accretion rate
