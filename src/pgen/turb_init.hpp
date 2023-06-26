@@ -661,7 +661,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
 
       //if (m==0&&k==6&&j==6&&i==6) {
       //  printf("normden: %.6e\n",u(m,IDN,k,j,i));
-      //  printf("normmom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      //  printf("normmom: %.6e %.6e %.6e\n",u1,u2,u3);
       //  printf("normv: %.6e %.6e %.6e\n",v1,v2,v3);
       //}
 
