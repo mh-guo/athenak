@@ -21,8 +21,6 @@
 #include "globals.hpp"
 #include "units/units.hpp"
 
-#include "pgen/turb_dens.hpp"
-#include "pgen/turb_vel.hpp"
 #include "pgen/turb_init.hpp"
 #include "pgen/turb_mhd.hpp"
 
@@ -127,10 +125,9 @@ void AccRefine(MeshBlockPack* pmbp);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
 void AccFinalWork(ParameterInput *pin, Mesh *pm);
 
-void Diagnostic(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
-                const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
+void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
-              const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
+              const DvceArray5D<Real> &w0);
 void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
@@ -140,7 +137,7 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddPowHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
-                   const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
+                   const DvceArray5D<Real> &w0);
 void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                     const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 
@@ -505,20 +502,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     pmbp->pmhd->peos->PrimToCons(w0, bcc0_, u0, is-ng, ie+ng, js-ng, je+ng, ks-ng, ke+ng);
   }
   for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
-    if (it->block_name.compare(0, 9, "turb_dens") == 0) {
-      TurbulenceDens *pturb;
-      pturb = new TurbulenceDens(it->block_name,pmbp, pin);
-      pturb->InitializeModes(1);
-      pturb->AddTurbing(1);
-      delete pturb;
-    }
-    if (it->block_name.compare(0, 8, "turb_vel") == 0) {
-      TurbulenceVel *pturb;
-      pturb = new TurbulenceVel(it->block_name,pmbp, pin);
-      pturb->InitializeModes(1);
-      pturb->AddForcing(1);
-      delete pturb;
-    }
     if (it->block_name.compare(0, 9, "turb_init") == 0) {
       TurbulenceInit *pturb;
       pturb = new TurbulenceInit(it->block_name,pmbp, pin);
@@ -1131,7 +1114,7 @@ void RadialBoundary(Mesh *pm) {
     KOKKOS_LAMBDA(int m, int n, int j, int i) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
         for (int k=0; k<ng; ++k) {
-          w0_(m,n,ks-k-1,j,i) = fmin(0.0,w0_(m,n,ks,j,i));
+          w0_(m,n,ks-k-1,j,i) = w0_(m,n,ks,j,i);
         }
       }
       if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
@@ -1595,11 +1578,11 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
                              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
-    Diagnostic(pm,bdt,u0,w0,eos_data);
+    Diagnostic(pm,w0,eos_data);
   }
   if (acc->potential) {
     //std::cout << "AddAccel" << std::endl;
-    AddAccel(pm,bdt,u0,w0,eos_data);
+    AddAccel(pm,bdt,u0,w0);
   }
   if (acc->cooling) {
     //std::cout << "AddISMCooling" << std::endl;
@@ -1624,7 +1607,7 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
     }
     if (acc->heating_pow) {
       //std::cout << "AddPowHeating" << std::endl;
-      AddPowHeating(pm,bdt,u0,w0,eos_data);
+      AddPowHeating(pm,bdt,u0,w0);
     }
   }
   // (@mhguo) change inner radius, if necessary
@@ -1660,23 +1643,23 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
 //! \brief Add Acceleration
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
-              const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+              const DvceArray5D<Real> &w0) {
               // const DvceArray5D<Real> &bcc, const AthenaArray<Real> &rad_arr,
               // const AthenaArray<Real> &press_arr, const AthenaArray<Real> &mom_arr)
-  MeshBlockPack *pmy_pack = pm->pmb_pack;
-  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
   int js = indcs.js, je = indcs.je;
   int ks = indcs.ks, ke = indcs.ke;
-  int nmb1 = pmy_pack->nmb_thispack - 1;
-  auto size = pmy_pack->pmb->mb_size;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  auto size = pmbp->pmb->mb_size;
   Real &mbh = acc->m_bh;
   Real &mstar = acc->m_star;
   Real &rstar = acc->r_star;
   Real &mdm = acc->m_dm;
   Real &rdm = acc->r_dm;
   Real &rin = acc->r_in;
-  Real grav = pmy_pack->punit->grav_constant();
+  Real grav = pmbp->punit->grav_constant();
 
   par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -1789,12 +1772,12 @@ void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
 void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
-  MeshBlockPack *pmy_pack = pm->pmb_pack;
-  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
   int js = indcs.js, nx2 = indcs.nx2;
   int ks = indcs.ks, nx3 = indcs.nx3;
-  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
   Real beta = bdt/pm->dt;
@@ -1804,20 +1787,19 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real tfloor = eos_data.tfloor;
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
-  Real temp_unit = pmy_pack->punit->temperature_cgs();
-  Real n_unit = pmy_pack->punit->density_cgs()/pmy_pack->punit->mu()
-                /pmy_pack->punit->atomic_mass_unit_cgs;
-  Real cooling_unit = pmy_pack->punit->pressure_cgs()/pmy_pack->punit->time_cgs()
-                      /n_unit/n_unit;
-  Real heating_unit = pmy_pack->punit->pressure_cgs()/pmy_pack->punit->time_cgs()/n_unit;
+  Real temp_unit = pmbp->punit->temperature_cgs();
+  Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
+                /pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/n_unit/n_unit;
+  Real heating_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/n_unit;
   Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
 
   bool is_hydro = true;
   DvceArray5D<Real> bcc;
-  if (pmy_pack->pmhd != nullptr) {
+  if (pmbp->pmhd != nullptr) {
     is_hydro = false;
     // using bcc is ok here because b0 is not updated yet
-    bcc = pmy_pack->pmhd->bcc0;
+    bcc = pmbp->pmhd->bcc0;
   }
 
   int nsubcycle=0, nsubcycle_count=0;
@@ -2233,7 +2215,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 
 void AddPowHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
-                   const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+                   const DvceArray5D<Real> &w0) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pmbp->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
@@ -2397,8 +2379,7 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 //! \brief Compute new time step for ISM cooling.
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 
-void Diagnostic(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
-                const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pmbp->pmesh->mb_indcs;
   int is = indcs.is; int nx1 = indcs.nx1;

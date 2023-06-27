@@ -680,8 +680,8 @@ TaskStatus TurbulenceDens::InitializeModes(int stage) {
 
   Real dvol = 1.0/(nx1*nx2*nx3); // old: Lx*Ly*Lz/nx1/nx2/nx3;
   if (!(pmy_pack->pmesh->multilevel)) {
-  m0 = m0*dvol*(1.0);
-  m1 = m1*dvol;
+    m0 = m0*dvol*(1.0);
+    m1 = m1*dvol;
   } else {
     m0 = m0*(1.0)/m00;
     m1 = m1/m00;

@@ -50,6 +50,7 @@ class TurbulenceInit {
   int n0;
   int turb_flag;
   int turb_count;
+  std::string turb_type;
   Real tcorr,dedt;
   Real expo;
   Real last_dt;
@@ -106,6 +107,7 @@ TurbulenceInit::TurbulenceInit(std::string bk, MeshBlockPack *pp, ParameterInput
   n0 = pin->GetOrAddInteger(bk,"n0",1);
   turb_flag = pin->GetOrAddInteger(bk,"turb_flag",0);
   turb_count = pin->GetOrAddInteger(bk,"turb_count",0);
+  turb_type = pin->GetOrAddString(bk,"turb_type","none");
   seed = pin->GetOrAddInteger(bk,"seed",-1);
   if (ncells3>1) { // 3D
     ntot = (nhigh+1)*(nhigh+1)*(nhigh+1);
@@ -176,6 +178,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   if (turb_flag == 1 && turb_count == 0) {
     return TaskStatus::complete;
   }
+  bool turb_dens = (turb_type == "dens");
   // On first call to this function, initialize seeds, sin/cos arrays
   if (first_time) {
     // initialize force to zero
@@ -666,8 +669,13 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
       //}
 
       array_sum::GlobalSum fsum;
-      sum_m0 += vol*u(m,IDN,k,j,i)*(v1*v1+v2*v2+v3*v3);
-      sum_m1 += vol*(u1*v1 + u2*v2 + u3*v3);
+      if (turb_dens) {
+        sum_m0 += vol;
+        sum_m1 += vol*(v1*v1);
+      } else {
+        sum_m0 += vol*u(m,IDN,k,j,i)*(v1*v1+v2*v2+v3*v3);
+        sum_m1 += vol*(u1*v1 + u2*v2 + u3*v3);
+      }
     }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1));
     m0 = std::max(m0, static_cast<Real>(std::numeric_limits<float>::min()) );
   }
@@ -699,18 +707,22 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   auto &mesh_indcs = pmy_pack->pmesh->mesh_indcs;
   dvol = 1.0/(mesh_indcs.nx1*mesh_indcs.nx2*mesh_indcs.nx3);
   if (!(pmy_pack->pmesh->multilevel)) {
-  m0 = m0*dvol*(1.0);
-  m1 = m1*dvol;
+    m0 = m0*dvol*(1.0);
+    m1 = m1*dvol;
   } else {
     m0 = m0*(1.0)/m00;
     m1 = m1/m00;
   }
 
   Real s;
-  if (m1 >= 0) {
-    s = -m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
+  if (turb_dens) {
+    s = sqrt(dedt/(m1/m0));
   } else {
-    s = m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
+    if (m1 >= 0) {
+      s = -m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
+    } else {
+      s = m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
+    }
   }
 
   // TODO(@mhguo): rm this cout!
@@ -742,6 +754,7 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
       //}
     }
   }
+  bool turb_dens = (turb_type == "dens");
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
   int js = indcs.js, je = indcs.je;
@@ -786,10 +799,18 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
 
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.5*den*(v1*v1+v2*v2+v3*v3);
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.25*den*(v1*v1+v2*v2+v3*v3);
-      u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
-      u(m,IM1,k,j,i) += den*v1;
-      u(m,IM2,k,j,i) += den*v2;
-      u(m,IM3,k,j,i) += den*v3;
+      if (m==0&&k==6&&j==6&&i==6) {
+        printf("den_old: %.6e\n",u(m,IDN,k,j,i));
+        printf("mom_old: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      }
+      if (turb_dens) {
+        u(m,IDN,k,j,i) += den*(v1+v2+v3);
+      } else {
+        u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
+        u(m,IM1,k,j,i) += den*v1;
+        u(m,IM2,k,j,i) += den*v2;
+        u(m,IM3,k,j,i) += den*v3;
+      }
       if (m==0&&k==6&&j==6&&i==6) {
         printf("den_new: %.6e\n",u(m,IDN,k,j,i));
         printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
