@@ -10,6 +10,7 @@
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
 #include "eos/ideal_c2p_hyd.hpp"
@@ -177,9 +178,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
   int &ng = indcs.ng;
+  int n1m1 = indcs.nx1 + 2*ng - 1;
+  int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
+  int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   auto &size = pmbp->pmb->mb_size;
   int nmb1 = (pmbp->nmb_thispack-1);
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
 
   // Check if turn on the problem
   acc->potential = pin->GetOrAddBoolean("problem","potential",false);
@@ -206,7 +211,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
       if (it->block_name.compare(0, 6, "output") == 0) {
         pin->SetInteger(it->block_name,"file_number", 0);
-        pin->SetReal(it->block_name,"last_time", -1.0);
+        pin->SetReal(it->block_name,"last_time", -1.0e+100);
       }
     }
   }
@@ -286,7 +291,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     for ( int i = 0; i < acc->bins_heat; i++ ) {
       acc->v_arr.the_array[i] = 0.0;
       acc->c_arr.the_array[i] = 0.0;
-      acc->logcooling_arr.h_view(i) = 0.0;
+      acc->logcooling_arr.h_view(i) = -100.0; //1e-100
       acc->logcooling_arr.template modify<HostMemSpace>();
       acc->logcooling_arr.template sync<DevExeSpace>();
     }
@@ -383,7 +388,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real hist_a2 = pin->GetOrAddReal("problem","hist_a2",3.0);
   Real hist_a3 = pin->GetOrAddReal("problem","hist_a3",10.0);
   Real hist_a4 = pin->GetOrAddReal("problem","hist_a4",100.0);
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp,5, hist_a1*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a1*acc->r_in));
   // Enroll additional radii for flux analysis by
   // pushing back the grids vector with additional SphericalGrid instances
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a2*acc->r_in));
@@ -435,8 +440,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                 << Acceleration(r,mbh,mstar,rstar,mdm,rdm,grav) << std::endl;
     }
     for (int i=0; i<41; i++) {
-      Real r = pow(10,0.1*i-2.);
-      Real x =  r / radentry;
+      Real x = pow(10,0.1*i-2.);
+      Real r = x * radentry;
       Real rho = DensFn(x,d_arr);
       Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
       Real r_l = r*0.9;
@@ -454,6 +459,29 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
   }
   // End print info
+
+  // Reset the BH mass to 0.0, note that radial profile is solved in Newtonian already
+  if (is_gr) {
+    acc->m_bh = 0.0;
+  }
+  // Convert Newtonian to GR
+  bool newton_to_gr = pin->GetOrAddBoolean("problem","newton_to_gr",false);
+  if (newton_to_gr) {
+    // Convert primitives to conserved
+    if (pmbp->phydro != nullptr) {
+      EquationOfState *peos = new IdealHydro(pmbp, pin);
+      peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
+      pmbp->phydro->peos->PrimToCons(w0, u0, 0, n1m1, 0, n2m1, 0, n3m1);
+      delete peos;
+    } else if (pmbp->pmhd != nullptr) {
+      EquationOfState *peos = new IdealMHD(pmbp, pin);
+      auto &bcc0_ = pmbp->pmhd->bcc0;
+      auto &b0_ = pmbp->pmhd->b0;
+      peos->ConsToPrim(u0, b0_, w0, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+      pmbp->pmhd->peos->PrimToCons(w0, bcc0_, u0, 0, n1m1, 0, n2m1, 0, n3m1);
+      delete peos;
+    }
+  }
 
   if (restart) return;
 
@@ -762,6 +790,7 @@ void RadialBoundary(Mesh *pm) {
   Real sinke = sinkd*sinkt/gm1;
   Real dtfloor = acc->sink_dt_floor;
   //Real tfloor = acc->tfloor;
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
   //std::cout << tmp << std::endl;
@@ -967,43 +996,45 @@ void RadialBoundary(Mesh *pm) {
 
   if (pmbp->pmhd != nullptr) {
     auto b0 = pmbp->pmhd->b0;
-    par_for("bfield_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    if (!is_gr) {
+      par_for("bfield_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        Real &x1min = size.d_view(m).x1min;
+        Real &x1max = size.d_view(m).x1max;
+        Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+        Real &x2min = size.d_view(m).x2min;
+        Real &x2max = size.d_view(m).x2max;
+        Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+        Real &x3min = size.d_view(m).x3min;
+        Real &x3max = size.d_view(m).x3max;
+        Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (rad < rin) {
-        Real va1_ceil = size.d_view(m).dx1/dtfloor;
-        Real va2_ceil = size.d_view(m).dx2/dtfloor;
-        Real va3_ceil = size.d_view(m).dx3/dtfloor;
-        Real bx = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
-        Real by = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
-        Real bz = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
-        u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bx/va1_ceil));
-        u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(by/va2_ceil));
-        u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bz/va3_ceil));
-        Real dens = u0_(m,IDN,k,j,i);
-        Real etot = dens*sinkt/gm1 + 0.5*(SQR(bx) + SQR(by) + SQR(bz));
-        u0_(m,IEN,k,j,i) = etot;
-        /*b0.x1f(m,k,j,i) = 0.0;
-        b0.x2f(m,k,j,i) = 0.0;
-        b0.x3f(m,k,j,i) = 0.0;
-        b0.x1f(m,k,j,i+1) = 0.0;
-        b0.x2f(m,k,j+1,i) = 0.0;
-        b0.x3f(m,k+1,j,i) = 0.0;*/
-      }
-    });
+        if (rad < rin) {
+          Real va1_ceil = size.d_view(m).dx1/dtfloor;
+          Real va2_ceil = size.d_view(m).dx2/dtfloor;
+          Real va3_ceil = size.d_view(m).dx3/dtfloor;
+          Real bx = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
+          Real by = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
+          Real bz = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
+          u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bx/va1_ceil));
+          u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(by/va2_ceil));
+          u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bz/va3_ceil));
+          Real dens = u0_(m,IDN,k,j,i);
+          Real etot = dens*sinkt/gm1 + 0.5*(SQR(bx) + SQR(by) + SQR(bz));
+          u0_(m,IEN,k,j,i) = etot;
+          /*b0.x1f(m,k,j,i) = 0.0;
+          b0.x2f(m,k,j,i) = 0.0;
+          b0.x3f(m,k,j,i) = 0.0;
+          b0.x1f(m,k,j,i+1) = 0.0;
+          b0.x2f(m,k,j+1,i) = 0.0;
+          b0.x3f(m,k+1,j,i) = 0.0;*/
+        }
+      });
+    }
 
     // outflow condition
     par_for("outflow_field_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
@@ -1298,70 +1329,191 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       interpolated_bcc.template sync<HostMemSpace>();
     }
     grids[g]->InterpolateToSphere(nvars, w0_);
+
     // compute fluxes
-    for (int n=0; n<grids[g]->nangles; ++n) {
-      // extract coordinate data at this angle
-      Real r = grids[g]->radius;
-      Real x1 = grids[g]->interp_coord.h_view(n,0);
-      Real x2 = grids[g]->interp_coord.h_view(n,1);
-      Real x3 = grids[g]->interp_coord.h_view(n,2);
-      // extract interpolated primitives
-      Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
-      Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
-      Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
-      Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
-      Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
-      Real int_temp = gm1*int_ie/int_dn;
-      // extract interpolated field components (iff is_mhd)
-      Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
-      if (is_mhd) {
-        int_bx = interpolated_bcc.h_view(n,IBX);
-        int_by = interpolated_bcc.h_view(n,IBY);
-        int_bz = interpolated_bcc.h_view(n,IBZ);
+    bool is_gr =  pmbp->pcoord->is_general_relativistic;
+    if (is_gr) {
+      // extract BH parameters
+      bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+      Real &spin = pmbp->pcoord->coord_data.bh_spin;
+      for (int n=0; n<grids[g]->nangles; ++n) {
+        // extract coordinate data at this angle
+        Real r = grids[g]->radius;
+        Real theta = grids[g]->polar_pos.h_view(n,0);
+        Real phi = grids[g]->polar_pos.h_view(n,1);
+        Real x1 = grids[g]->interp_coord.h_view(n,0);
+        Real x2 = grids[g]->interp_coord.h_view(n,1);
+        Real x3 = grids[g]->interp_coord.h_view(n,2);
+        Real glower[4][4], gupper[4][4];
+        ComputeMetricAndInverse(x1,x2,x3,flat,spin,glower,gupper);
+
+        // extract interpolated primitives
+        Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+        Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+        Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+        Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+        Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+
+        // extract interpolated field components (iff is_mhd)
+        Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
+        if (is_mhd) {
+          int_bx = interpolated_bcc.h_view(n,IBX);
+          int_by = interpolated_bcc.h_view(n,IBY);
+          int_bz = interpolated_bcc.h_view(n,IBZ);
+        }
+
+        // Compute interpolated u^\mu in CKS
+        Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
+                 2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
+                 2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
+        Real alpha = sqrt(-1.0/gupper[0][0]);
+        Real lor = sqrt(1.0 + q);
+        Real u0 = lor/alpha;
+        Real u1 = int_vx - alpha * lor * gupper[0][1];
+        Real u2 = int_vy - alpha * lor * gupper[0][2];
+        Real u3 = int_vz - alpha * lor * gupper[0][3];
+
+        // Lower vector indices
+        Real u_0 = glower[0][0]*u0 + glower[0][1]*u1 + glower[0][2]*u2 + glower[0][3]*u3;
+        Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
+        Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
+        Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
+
+        // Calculate 4-magnetic field (returns zero if not MHD)
+        Real b0 = u_1*int_bx + u_2*int_by + u_3*int_bz;
+        Real b1 = (int_bx + b0 * u1) / u0;
+        Real b2 = (int_by + b0 * u2) / u0;
+        Real b3 = (int_bz + b0 * u3) / u0;
+
+        // compute b_\mu in CKS and b_sq (returns zero if not MHD)
+        Real b_0 = glower[0][0]*b0 + glower[0][1]*b1 + glower[0][2]*b2 + glower[0][3]*b3;
+        Real b_1 = glower[1][0]*b0 + glower[1][1]*b1 + glower[1][2]*b2 + glower[1][3]*b3;
+        Real b_2 = glower[2][0]*b0 + glower[2][1]*b1 + glower[2][2]*b2 + glower[2][3]*b3;
+        Real b_3 = glower[3][0]*b0 + glower[3][1]*b1 + glower[3][2]*b2 + glower[3][3]*b3;
+        Real b_sq = b0*b_0 + b1*b_1 + b2*b_2 + b3*b_3;
+
+        // Transform CKS 4-velocity and 4-magnetic field to spherical KS
+        Real a2 = SQR(spin);
+        Real rad2 = SQR(x1)+SQR(x2)+SQR(x3);
+        Real r2 = SQR(r);
+        Real sth = sin(theta);
+        Real sph = sin(phi);
+        Real cph = cos(phi);
+        Real drdx = r*x1/(2.0*r2 - rad2 + a2);
+        Real drdy = r*x2/(2.0*r2 - rad2 + a2);
+        Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
+        // contravariant r component of 4-velocity
+        Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
+        // contravariant r component of 4-magnetic field (returns zero if not MHD)
+        Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+        // covariant phi component of 4-velocity
+        Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
+        // covariant phi component of 4-magnetic field (returns zero if not MHD)
+        Real b_ph = (-r*sph-spin*cph)*sth*b_1 + (r*cph-spin*sph)*sth*b_2;
+
+        // integration params
+        Real &domega = grids[g]->solid_angles.h_view(n);
+        Real sqrtmdet = (r2+SQR(spin*cos(theta)));
+
+        // compute temperature and compare with hot/cold threshold
+        Real int_temp = gm1*int_ie/int_dn;
+        Real x = r/radentry;
+        Real rho_ini = DensFn(x,d_arr);
+        Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
+        Real temp_ini = pgas_ini/rho_ini;
+        Real t_hot = tf_hot*temp_ini;
+        Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
+
+        // compute mass density
+        pdata->hdata[nflux*g+0] += int_dn*sqrtmdet*domega;
+
+        // compute mass flux
+        pdata->hdata[nflux*g+1] += 1.0*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+2] += is_hot*int_dn*ur*sqrtmdet*domega;
+
+        // compute energy flux
+        Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
+        pdata->hdata[nflux*g+3] += 1.0*t1_0*sqrtmdet*domega;
+
+        // compute angular momentum flux
+        // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
+        Real t1_1 = 0.0;
+        Real t1_2 = 0.0;
+        Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
+        pdata->hdata[nflux*g+4] += t1_1*sqrtmdet*domega;
+        pdata->hdata[nflux*g+5] += t1_2*sqrtmdet*domega;
+        pdata->hdata[nflux*g+6] += t1_3*sqrtmdet*domega;
+
+        // compute magnetic flux
+        if (is_mhd) {
+          pdata->hdata[nflux*g+7] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+        }
       }
+    } else {
+      for (int n=0; n<grids[g]->nangles; ++n) {
+        // extract coordinate data at this angle
+        Real r = grids[g]->radius;
+        Real x1 = grids[g]->interp_coord.h_view(n,0);
+        Real x2 = grids[g]->interp_coord.h_view(n,1);
+        Real x3 = grids[g]->interp_coord.h_view(n,2);
+        // extract interpolated primitives
+        Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+        Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+        Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+        Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+        Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+        Real int_temp = gm1*int_ie/int_dn;
+        // extract interpolated field components (iff is_mhd)
+        Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
+        if (is_mhd) {
+          int_bx = interpolated_bcc.h_view(n,IBX);
+          int_by = interpolated_bcc.h_view(n,IBY);
+          int_bz = interpolated_bcc.h_view(n,IBZ);
+        }
 
-      Real v1 = int_vx, v2 = int_vy, v3 = int_vz;
-      Real e_k = 0.5*int_dn*(v1*v1+v2*v2+v3*v3);
-      Real b1 = int_bx, b2 = int_by, b3 = int_bz;
-      Real b_sq = b1*b1 + b2*b2 + b3*b3;
-      Real r_sq = SQR(r);
-      Real drdx = x1/r;
-      Real drdy = x2/r;
-      Real drdz = x3/r;
-      // v_r
-      Real vr  = drdx*v1 + drdy*v2 + drdz*v3;
-      // b_r
-      Real br  = drdx*b1 + drdy*b2 + drdz*b3;
-      // integration params
-      Real &domega = grids[g]->solid_angles.h_view(n);
-      Real x = r/radentry;
-      Real rho_ini = DensFn(x,d_arr);
-      Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
-      Real temp_ini = pgas_ini/rho_ini;
-      Real t_hot = tf_hot*temp_ini;
-      Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
+        Real v1 = int_vx, v2 = int_vy, v3 = int_vz;
+        Real e_k = 0.5*int_dn*(v1*v1+v2*v2+v3*v3);
+        Real b1 = int_bx, b2 = int_by, b3 = int_bz;
+        Real b_sq = b1*b1 + b2*b2 + b3*b3;
+        Real r_sq = SQR(r);
+        Real drdx = x1/r;
+        Real drdy = x2/r;
+        Real drdz = x3/r;
+        // v_r
+        Real vr  = drdx*v1 + drdy*v2 + drdz*v3;
+        // b_r
+        Real br  = drdx*b1 + drdy*b2 + drdz*b3;
+        // integration params
+        Real &domega = grids[g]->solid_angles.h_view(n);
+        Real x = r/radentry;
+        Real rho_ini = DensFn(x,d_arr);
+        Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
+        Real temp_ini = pgas_ini/rho_ini;
+        Real t_hot = tf_hot*temp_ini;
+        Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
 
-      // compute mass density
-      pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
+        // compute mass density
+        pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
 
-      // compute mass flux
-      pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
-      pdata->hdata[nflux*g+2] += is_hot*int_dn*vr*r_sq*domega;
+        // compute mass flux
+        pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+2] += is_hot*int_dn*vr*r_sq*domega;
 
-      // compute energy flux
-      // TODO(@mhguo): check whether this is correct!
-      Real t1_0 = (int_ie + 0.5*e_k + 0.5*b_sq)*vr;
-      pdata->hdata[nflux*g+3] += 1.0*t1_0*r_sq*domega;
+        // compute energy flux
+        // TODO(@mhguo): check whether this is correct!
+        Real t1_0 = (int_ie + 0.5*e_k + 0.5*b_sq)*vr;
+        pdata->hdata[nflux*g+3] += 1.0*t1_0*r_sq*domega;
 
-      // compute angular momentum flux
-      // TODO(@mhguo): check whether this is correct!
-      pdata->hdata[nflux*g+4] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
-      pdata->hdata[nflux*g+5] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
-      pdata->hdata[nflux*g+6] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
+        // compute angular momentum flux
+        // TODO(@mhguo): check whether this is correct!
+        pdata->hdata[nflux*g+4] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+        pdata->hdata[nflux*g+5] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+        pdata->hdata[nflux*g+6] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
 
-      // compute magnetic flux
-      if (is_mhd) {
-        pdata->hdata[nflux*g+7] += 0.5*fabs(br)*r_sq*domega;
+        // compute magnetic flux
+        if (is_mhd) {
+          pdata->hdata[nflux*g+7] += 0.5*fabs(br)*r_sq*domega;
+        }
       }
     }
   }
@@ -1793,6 +1945,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/n_unit/n_unit;
   Real heating_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/n_unit;
   Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
+  bool is_gr =  pmbp->pcoord->is_general_relativistic;
 
   bool is_hydro = true;
   DvceArray5D<Real> bcc;
@@ -1824,7 +1977,8 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     bool sub_cycling = true;
     bool sub_cycling_used = false;
     Real bdt_now = 0.0;
-    while (sub_cycling) {
+    if (is_gr) sub_cycling = false;
+    do {
       Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
       // soft function
       lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
@@ -1874,7 +2028,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         sub_cycling = false;
       }
       bdt_now += bdt_cool;
-    }
+    } while (sub_cycling);
     if (sub_cycling_used) {
       sum0++;
     }
@@ -2541,7 +2695,7 @@ void SolveDens(DualArray1D<Real> &d_arr) {
     d_arr.h_view(static_cast<int>(linner)-ent-1)=dentry;
   }
 
-  //solve outward from bounday
+  //solve outward from boundary
   dentry = densentry;
   for (int ent=0; ent<louter; ent++) {
     x = pow(10.0,ent*logh);

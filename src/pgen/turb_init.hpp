@@ -573,10 +573,12 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   auto &mbsize = pmy_pack->pmb->mb_size;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real v_turb = sqrt(w(m,IEN,k,j,i)/w(m,IDN,k,j,i));
-    force_new_(m,0,k,j,i) *= v_turb;
-    force_new_(m,1,k,j,i) *= v_turb;
-    force_new_(m,2,k,j,i) *= v_turb;
+    if (!(turb_dens)) {
+      Real v_turb = sqrt(w(m,IEN,k,j,i)/w(m,IDN,k,j,i));
+      force_new_(m,0,k,j,i) *= v_turb;
+      force_new_(m,1,k,j,i) *= v_turb;
+      force_new_(m,2,k,j,i) *= v_turb;
+    }
 
     Real x1v = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
     Real x2v = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
