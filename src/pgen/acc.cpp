@@ -759,8 +759,6 @@ void RadialBoundary(Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
-  auto &eos = (pmbp->pmhd != nullptr) ?
-              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   int &ng = indcs.ng;
   int n1 = indcs.nx1 + 2*ng;
   int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
@@ -772,6 +770,13 @@ void RadialBoundary(Mesh *pm) {
   int nmb = pmbp->nmb_thispack;
   auto u0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
   auto w0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  bool is_mhd = false;
+  DvceArray5D<Real> bcc;
+  if (pmbp->pmhd != nullptr) {
+    is_mhd = true;
+    // TODO(@mhguo) using bcc is not good here because b0 is already updated
+    bcc = pmbp->pmhd->bcc0;
+  }
   auto &mb_bcs = pmbp->pmb->mb_bcs;
   int nvar = u0_.extent_int(1);
 
@@ -791,6 +796,8 @@ void RadialBoundary(Mesh *pm) {
   Real dtfloor = acc->sink_dt_floor;
   //Real tfloor = acc->tfloor;
   bool is_gr = pmbp->pcoord->is_general_relativistic;
+  bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+  Real &spin = pmbp->pcoord->coord_data.bh_spin;
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
   //std::cout << tmp << std::endl;
@@ -822,177 +829,62 @@ void RadialBoundary(Mesh *pm) {
       u0_(m,IM3,k,j,i) = 0.0;
     }
 
-    if (rad < rbin) {
+    // apply initial conditions to boundary cells
+    if (rad < rbin || rad > rbout) {
       Real x = rad/radentry;
       Real rho = DensFnDevice(x,d_arr);
-      Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
+      Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
 
-      u0_(m,IDN,k,j,i) = rho;
-      u0_(m,IM1,k,j,i) = 0.0;
-      u0_(m,IM2,k,j,i) = 0.0;
-      u0_(m,IM3,k,j,i) = 0.0;
-      if (eos.is_ideal) {
-        u0_(m,IEN,k,j,i) = pgas/gm1;
-      }
-    }
+      if (is_gr) {
+        Real glower[4][4], gupper[4][4];
+        ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
 
-    if (rad > rbout) {
-      Real x = rad/radentry;
-      Real rho = DensFnDevice(x,d_arr);
-      Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
+        HydCons1D u;
+        if (is_mhd) {
+          MHDPrim1D w;
+          w.d  = rho;
+          w.vx = 0.0;
+          w.vy = 0.0;
+          w.vz = 0.0;
+          w.e  = eint;
+          // load cell-centered fields into primitive state
+          w.bx = bcc(m,IBX,k,j,i);
+          w.by = bcc(m,IBY,k,j,i);
+          w.bz = bcc(m,IBZ,k,j,i);
 
-      u0_(m,IDN,k,j,i) = rho;
-      u0_(m,IM1,k,j,i) = 0.0;
-      u0_(m,IM2,k,j,i) = 0.0;
-      u0_(m,IM3,k,j,i) = 0.0;
-      if (eos.is_ideal) {
-        u0_(m,IEN,k,j,i) = pgas/gm1;
+          // call p2c function
+          SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+        } else {
+          HydPrim1D w;
+          w.d  = rho;
+          w.vx = 0.0;
+          w.vy = 0.0;
+          w.vz = 0.0;
+          w.e  = eint;
+
+          // call p2c function
+          SingleP2C_IdealGRHyd(glower, gupper, w, gamma, u);
+        }
+        // store conserved quantities in 3D array
+        u0_(m,IDN,k,j,i) = u.d;
+        u0_(m,IM1,k,j,i) = u.mx;
+        u0_(m,IM2,k,j,i) = u.my;
+        u0_(m,IM3,k,j,i) = u.mz;
+        u0_(m,IEN,k,j,i) = u.e;
+      } else {
+        u0_(m,IDN,k,j,i) = rho;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
+        if (is_mhd) {
+          u0_(m,IEN,k,j,i) = eint + 0.5*(SQR(bcc(m,IBX,k,j,i)) + SQR(bcc(m,IBY,k,j,i))
+                                        + SQR(bcc(m,IBZ,k,j,i)));
+        } else {
+          u0_(m,IEN,k,j,i) = eint;
+        }
       }
     }
   });
-
-  if (bc_flag == "fixed") {
-    par_for("fixed_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      // inner x1 boundary
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
-
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
-
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-
-      if (mb_bcs.d_view(m,BoundaryFace::inner_x1)==BoundaryFlag::user) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        Real x = rad/radentry;
-        Real rho = DensFnDevice(x,d_arr);
-        Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
-        u0_(m,IDN,k,j,i) = rho;
-        if (eos.is_ideal) {
-            u0_(m,IEN,k,j,i) = pgas/gm1;
-        }
-        u0_(m,IM1,k,j,i) = 0.0;
-        u0_(m,IM2,k,j,i) = 0.0;
-        u0_(m,IM3,k,j,i) = 0.0;
-      }
-
-      // outer x1 boundary
-      x1v = CellCenterX((ie+i+1)-is, indcs.nx1, x1min, x1max);
-
-      if (mb_bcs.d_view(m,BoundaryFace::outer_x1)==BoundaryFlag::user) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        Real x = rad/radentry;
-        Real rho = DensFnDevice(x,d_arr);
-        Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
-        u0_(m,IDN,k,j,(ie+i+1)) = rho;
-        if (eos.is_ideal) {
-            u0_(m,IEN,k,j,(ie+i+1)) = pgas/gm1;
-        }
-        u0_(m,IM1,k,j,(ie+i+1)) = 0.0;
-        u0_(m,IM2,k,j,(ie+i+1)) = 0.0;
-        u0_(m,IM3,k,j,(ie+i+1)) = 0.0;
-      }
-    });
-
-    par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      // inner x2 boundary
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
-
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
-
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-
-      if (mb_bcs.d_view(m,BoundaryFace::inner_x2)==BoundaryFlag::user) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        Real x = rad/radentry;
-        Real rho = DensFnDevice(x,d_arr);
-        Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
-        u0_(m,IDN,k,j,i) = rho;
-        if (eos.is_ideal) {
-            u0_(m,IEN,k,j,i) = pgas/gm1;
-        }
-        u0_(m,IM1,k,j,i) = 0.0;
-        u0_(m,IM2,k,j,i) = 0.0;
-        u0_(m,IM3,k,j,i) = 0.0;
-      }
-
-      // outer x2 boundary
-      x2v = CellCenterX((je+j+1)-js, indcs.nx2, x2min, x2max);
-
-      if (mb_bcs.d_view(m,BoundaryFace::outer_x2)==BoundaryFlag::user) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        Real x = rad/radentry;
-        Real rho = DensFnDevice(x,d_arr);
-        Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
-        u0_(m,IDN,k,(je+j+1),i) = rho;
-        if (eos.is_ideal) {
-            u0_(m,IEN,k,(je+j+1),i) = pgas/gm1;
-        }
-        u0_(m,IM1,k,(je+j+1),i) = 0.0;
-        u0_(m,IM2,k,(je+j+1),i) = 0.0;
-        u0_(m,IM3,k,(je+j+1),i) = 0.0;
-      }
-    });
-
-    par_for("fixed_x3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      // inner x3 boundary
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
-
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
-
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-
-      if (mb_bcs.d_view(m,BoundaryFace::inner_x3)==BoundaryFlag::user) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        Real x = rad/radentry;
-        Real rho = DensFnDevice(x,d_arr);
-        Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
-        u0_(m,IDN,k,j,i) = rho;
-        if (eos.is_ideal) {
-            u0_(m,IEN,k,j,i) = pgas/gm1;
-        }
-        u0_(m,IM1,k,j,i) = 0.0;
-        u0_(m,IM2,k,j,i) = 0.0;
-        u0_(m,IM3,k,j,i) = 0.0;
-      }
-
-      // outer x3 boundary
-      x3v = CellCenterX((ke+k+1)-ks, indcs.nx3, x3min, x3max);
-
-      if (mb_bcs.d_view(m,BoundaryFace::outer_x3)==BoundaryFlag::user) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        Real x = rad/radentry;
-        Real rho = DensFnDevice(x,d_arr);
-        Real pgas = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma);
-        u0_(m,IDN,(ke+k+1),j,i) = rho;
-        if (eos.is_ideal) {
-            u0_(m,IEN,(ke+k+1),j,i) = pgas/gm1;
-        }
-        u0_(m,IM1,(ke+k+1),j,i) = 0.0;
-        u0_(m,IM2,(ke+k+1),j,i) = 0.0;
-        u0_(m,IM3,(ke+k+1),j,i) = 0.0;
-      }
-    });
-  }
 
   if (pmbp->pmhd != nullptr) {
     auto b0 = pmbp->pmhd->b0;
@@ -1037,7 +929,7 @@ void RadialBoundary(Mesh *pm) {
     }
 
     // outflow condition
-    par_for("outflow_field_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
+    par_for("outflow_bfield_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
         b0.x1f(m,k,j,is-i-1) = b0.x1f(m,k,j,is);
@@ -1055,7 +947,7 @@ void RadialBoundary(Mesh *pm) {
       }
     });
 
-    par_for("outflow_field_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
+    par_for("outflow_bfield_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
         b0.x1f(m,k,js-j-1,i) = b0.x1f(m,k,js,i);
@@ -1073,7 +965,7 @@ void RadialBoundary(Mesh *pm) {
       }
     });
 
-    par_for("outflow_field_x3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
+    par_for("outflow_bfield_x3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
         b0.x1f(m,ks-k-1,j,i) = b0.x1f(m,ks,j,i);
@@ -1092,8 +984,11 @@ void RadialBoundary(Mesh *pm) {
     });
   }
 
+  // fixed condition: do nothing
+  // if (bc_flag == "fixed") {}
+  // outlfow condition
   if (bc_flag == "outflow") {
-    // ConsToPrim over all X1 ghost zones *and* at the innermost/outermost X1-active zones
+    // ConsToPrim over all ghost zones *and* at the innermost/outermost X1-active zones
     // of Meshblocks, even if Meshblock face is not at the edge of computational domain
     if (pmbp->phydro != nullptr) {
       pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is,0,(n2-1),0,(n3-1));
@@ -1154,7 +1049,7 @@ void RadialBoundary(Mesh *pm) {
         }
       }
     });
-    // PrimToCons on X1 ghost zones
+    // PrimToCons on X1, X2, X3 ghost zones
     if (pmbp->phydro != nullptr) {
       pmbp->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
       pmbp->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
