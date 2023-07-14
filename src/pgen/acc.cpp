@@ -84,6 +84,7 @@ struct pgenacc {
   Real sink_dt_floor; // floor of timestep
   bool turb; // turbulence
   Real turb_amp; // amplitude of the perturbations
+  Real n_t_h_ratio; // ratio of total number density to hydrogen nuclei number density
   bool cooling;
   bool heating_ini;
   bool heating_ana;
@@ -131,7 +132,7 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
               const DvceArray5D<Real> &w0);
 void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
-void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+void AddIniHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                 const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
@@ -269,6 +270,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (acc->turb) {
     acc->turb_amp = pin->GetOrAddReal("problem","turb_amp",0.0);
   }
+  acc->n_t_h_ratio = pin->GetOrAddReal("problem","n_t_h_ratio",2.3);
   acc->cooling = pin->GetOrAddBoolean("problem","cooling",false);
   acc->heating_ini = pin->GetOrAddBoolean("problem","heating_ini",false);
   acc->heating_ana = pin->GetOrAddBoolean("problem","heating_ana",false);
@@ -324,10 +326,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real grav = acc->grav;
   //Real r_in_old = acc->r_in_old;
 
-  // Find the equilibrium point of the cooling curve by n*Lambda-Gamma=0
-  // Real number_density=hrate/ISMCoolFn(temp);
-  // Real rho_0 = number_density*pmbp->punit->mu()*
-  //             pmbp->punit->atomic_mass_unit_cgs/pmbp->punit->density_cgs();
   Real cs_iso = std::sqrt(temp_kelvin/pmbp->punit->temperature_cgs());
 
   // Initialize Hydro/MHD variables -------------------------------
@@ -360,7 +358,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                   /pmbp->punit->atomic_mass_unit_cgs;
     Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                        /n_unit/n_unit;
+                        /SQR(n_unit/acc->n_t_h_ratio);
     Real &rbout = acc->rb_out;
     Real radh = acc->rad_heat;
     Real radpow = acc->radpow_heat;
@@ -763,9 +761,9 @@ void RadialBoundary(Mesh *pm) {
   int n1 = indcs.nx1 + 2*ng;
   int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
-  int &is = indcs.is;  int &ie  = indcs.ie;
-  int &js = indcs.js;  int &je  = indcs.je;
-  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
 
   int nmb = pmbp->nmb_thispack;
   auto u0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
@@ -1226,7 +1224,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     grids[g]->InterpolateToSphere(nvars, w0_);
 
     // compute fluxes
-    bool is_gr =  pmbp->pcoord->is_general_relativistic;
+    bool is_gr = pmbp->pcoord->is_general_relativistic;
     if (is_gr) {
       // extract BH parameters
       bool &flat = pmbp->pcoord->coord_data.is_minkowski;
@@ -1298,9 +1296,9 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         Real drdy = r*x2/(2.0*r2 - rad2 + a2);
         Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
         // contravariant r component of 4-velocity
-        Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
+        Real ur = drdx *u1 + drdy *u2 + drdz *u3;
         // contravariant r component of 4-magnetic field (returns zero if not MHD)
-        Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+        Real br = drdx *b1 + drdy *b2 + drdz *b3;
         // covariant phi component of 4-velocity
         Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
         // covariant phi component of 4-magnetic field (returns zero if not MHD)
@@ -1375,9 +1373,9 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         Real drdy = x2/r;
         Real drdz = x3/r;
         // v_r
-        Real vr  = drdx*v1 + drdy*v2 + drdz*v3;
+        Real vr = drdx*v1 + drdy*v2 + drdz*v3;
         // b_r
-        Real br  = drdx*b1 + drdy*b2 + drdz*b3;
+        Real br = drdx*b1 + drdy*b2 + drdz*b3;
         // integration params
         Real &domega = grids[g]->solid_angles.h_view(n);
         Real x = r/radentry;
@@ -1423,7 +1421,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   int ks = indcs.ks; int nx3 = indcs.nx3;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  const int nji = nx2*nx1;
   array_sum::GlobalSum sum_this_mb0;
   array_sum::GlobalSum sum_this_mb1;
   array_sum::GlobalSum sum_this_mb2;
@@ -1637,8 +1635,8 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   }
   if (pm->time >= acc->heat_beg_time) {
     if (acc->heating_ini) {
-      //std::cout << "AddHeating" << std::endl;
-      AddHeating(pm,bdt,u0,w0,eos_data);
+      //std::cout << "AddIniHeating" << std::endl;
+      AddIniHeating(pm,bdt,u0,w0,eos_data);
     }
     if (acc->heating_ana) {
       //std::cout << "AddAnaHeating" << std::endl;
@@ -1750,11 +1748,11 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void SourceTerms::AddHeating()
+//! \fn void SourceTerms::AddIniHeating()
 //! \brief Add heating source terms in the energy equations.
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 
-void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+void AddIniHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                 const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pmbp->pmesh->mb_indcs;
@@ -1768,7 +1766,7 @@ void AddHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /n_unit/n_unit;
+                      /SQR(n_unit/acc->n_t_h_ratio);
 
   Real &radentry = acc->rad_entry;
   Real &k0 = acc->k0_entry;
@@ -1826,7 +1824,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int ks = indcs.ks, nx3 = indcs.nx3;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  const int nji = nx2*nx1;
   Real beta = bdt/pm->dt;
   Real cfl_no = pm->cfl_no;
   auto &eos = eos_data;
@@ -1837,10 +1835,10 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real temp_unit = pmbp->punit->temperature_cgs();
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;
-  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/n_unit/n_unit;
-  Real heating_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/n_unit;
-  Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
-  bool is_gr =  pmbp->pcoord->is_general_relativistic;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
+                      /SQR(n_unit/acc->n_t_h_ratio);
+  // Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
 
   bool is_hydro = true;
   DvceArray5D<Real> bcc;
@@ -1877,7 +1875,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
       // soft function
       lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
-      Real cooling_heating =  dens * (dens * lambda_cooling - gamma_heating);
+      Real cooling_heating = dens * dens * lambda_cooling;
       Real dt_cool = (eint/(FLT_MIN + fabs(cooling_heating)));
       // half of the timestep
       Real bdt_cool = 0.5*beta*cfl_no*dt_cool;
@@ -1961,7 +1959,7 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int nmb1 = pmbp->nmb_thispack - 1;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  const int nji = nx2*nx1;
   Real use_e = eos_data.use_e;
   Real tfloor = eos_data.tfloor;
   Real gamma = eos_data.gamma;
@@ -1971,7 +1969,7 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /n_unit/n_unit;
+                      /SQR(n_unit/acc->n_t_h_ratio);
 
   Real s0 = 0.0, s1 = 0.0;
   Kokkos::parallel_reduce("sum_cooling", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
@@ -2085,7 +2083,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int nmb1 = pmbp->nmb_thispack - 1;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  const int nji = nx2*nx1;
   Real use_e = eos_data.use_e;
   Real tfloor = eos_data.tfloor;
   Real gm1 = eos_data.gamma - 1.0;
@@ -2093,7 +2091,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
                 /pmbp->punit->atomic_mass_unit_cgs;
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /n_unit/n_unit;
+                      /SQR(n_unit/acc->n_t_h_ratio);
 
   Real rin = acc->r_in;
   Real rmin_heat = acc->rmin_heat;
@@ -2145,13 +2143,10 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         // temperature in code unit
         Real w_dens = w0(m,IDN,k,j,i);
         Real w_temp = 1.0;
-        Real w_eint = 1.0;
         if (use_e) {
           w_temp = w0(m,IEN,k,j,i)/w_dens*gm1;
-          w_eint = w0(m,IEN,k,j,i);
         } else {
           w_temp = w0(m,ITM,k,j,i);
-          w_eint = w0(m,ITM,k,j,i)*w_dens/gm1;
         }
 
         Real lambda_cooling = ISMCoolFn(temp_unit*w_temp)/cooling_unit;
@@ -2319,7 +2314,7 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int nmb1 = pmbp->nmb_thispack - 1;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  const int nji = nx2*nx1;
 
   Real &rin = acc->r_in;
   Real dr = acc->mdot_dr;
@@ -2437,7 +2432,7 @@ void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data)
   auto &size = pmbp->pmb->mb_size;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  const int nji = nx2*nx1;
 
   Real use_e = eos_data.use_e;
   Real gamma = eos_data.gamma;
