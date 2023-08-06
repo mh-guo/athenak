@@ -33,6 +33,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm) :
     user_bcs(false),
     user_srcs(false),
     user_hist(false),
+    user_work_in_cycle(false),
     pmy_mesh_(pm) {
   // check for user-defined boundary conditions
   for (int dir=0; dir<6; ++dir) {
@@ -43,6 +44,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm) :
 
   user_srcs = pin->GetOrAddBoolean("problem","user_srcs",false);
   user_hist = pin->GetOrAddBoolean("problem","user_hist",false);
+  user_work_in_cycle = pin->GetOrAddBoolean("problem","user_work_in_cycle",false);
 
 #if USER_PROBLEM_ENABLED
   // call user-defined problem generator
@@ -129,6 +131,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     user_bcs(false),
     user_srcs(false),
     user_hist(false),
+    user_work_in_cycle(false),
     pmy_mesh_(pm) {
   // check for user-defined boundary conditions
   for (int dir=0; dir<6; ++dir) {
@@ -138,6 +141,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   }
   user_srcs = pin->GetOrAddBoolean("problem","user_srcs",false);
   user_hist = pin->GetOrAddBoolean("problem","user_hist",false);
+  user_work_in_cycle = pin->GetOrAddBoolean("problem","user_work_in_cycle",false);
 
   // get spatial dimensions of arrays, including ghost zones
   auto &indcs = pm->pmb_pack->pmesh->mb_indcs;

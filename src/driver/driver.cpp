@@ -421,6 +421,12 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
 
       // AMR
       if (pmesh->adaptive) {pmesh->pmr->AdaptiveMeshRefinement(this, pin);}
+
+      // Add user work in cycle
+      if (pmesh->pgen->user_work_in_cycle) {
+        (pmesh->pgen->user_work_in_cycle_func)(this, pmesh);
+      }
+
       // compute new timestep AFTER all Meshblocks refined/derefined
       pmesh->NewTimeStep(tlim);
 
