@@ -84,7 +84,7 @@ struct pgenacc {
   Real sink_dt_floor; // floor of timestep
   bool turb; // turbulence
   Real turb_amp; // amplitude of the perturbations
-  Real n_t_h_ratio; // ratio of total number density to hydrogen nuclei number density
+  Real mu_h; // ratio of total number density to hydrogen nuclei number density
   bool cooling;
   bool heating_ini;
   bool heating_ana;
@@ -270,7 +270,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (acc->turb) {
     acc->turb_amp = pin->GetOrAddReal("problem","turb_amp",0.0);
   }
-  acc->n_t_h_ratio = pin->GetOrAddReal("problem","n_t_h_ratio",2.3);
+  acc->mu_h = pin->GetOrAddReal("problem","mu_h",1.4);
   acc->cooling = pin->GetOrAddBoolean("problem","cooling",false);
   acc->heating_ini = pin->GetOrAddBoolean("problem","heating_ini",false);
   acc->heating_ana = pin->GetOrAddBoolean("problem","heating_ana",false);
@@ -355,10 +355,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   if (acc->heating_pow) {
     Real temp_unit = pmbp->punit->temperature_cgs();
-    Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
+    Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h
                   /pmbp->punit->atomic_mass_unit_cgs;
-    Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                        /SQR(n_unit/acc->n_t_h_ratio);
+    Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
     Real &rbout = acc->rb_out;
     Real radh = acc->rad_heat;
     Real radpow = acc->radpow_heat;
@@ -1763,10 +1762,8 @@ void AddIniHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   int nmb1 = pmbp->nmb_thispack - 1;
   Real gamma = eos_data.gamma;
   Real temp_unit = pmbp->punit->temperature_cgs();
-  Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
-                /pmbp->punit->atomic_mass_unit_cgs;
-  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /SQR(n_unit/acc->n_t_h_ratio);
+  Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
 
   Real &radentry = acc->rad_entry;
   Real &k0 = acc->k0_entry;
@@ -1833,10 +1830,8 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
   Real temp_unit = pmbp->punit->temperature_cgs();
-  Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
-                /pmbp->punit->atomic_mass_unit_cgs;
-  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /SQR(n_unit/acc->n_t_h_ratio);
+  Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
   // Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
   bool is_gr = pmbp->pcoord->is_general_relativistic;
 
@@ -1966,10 +1961,8 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real gm1 = gamma - 1.0;
   Real radpow = acc->radpow_heat;
   Real temp_unit = pmbp->punit->temperature_cgs();
-  Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
-                /pmbp->punit->atomic_mass_unit_cgs;
-  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /SQR(n_unit/acc->n_t_h_ratio);
+  Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
 
   Real s0 = 0.0, s1 = 0.0;
   Kokkos::parallel_reduce("sum_cooling", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
@@ -2088,10 +2081,8 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real tfloor = eos_data.tfloor;
   Real gm1 = eos_data.gamma - 1.0;
   Real temp_unit = pmbp->punit->temperature_cgs();
-  Real n_unit = pmbp->punit->density_cgs()/pmbp->punit->mu()
-                /pmbp->punit->atomic_mass_unit_cgs;
-  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()
-                      /SQR(n_unit/acc->n_t_h_ratio);
+  Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
 
   Real rin = acc->r_in;
   Real rmin_heat = acc->rmin_heat;
