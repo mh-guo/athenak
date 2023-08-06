@@ -53,6 +53,7 @@ class SourceTerms {
 
   // heating rate used with ISM cooling
   Real hrate;
+  Real mu_h;
 
   // cooling rate used with relativistic cooling
   Real crate_rel;
