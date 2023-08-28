@@ -628,9 +628,9 @@ void Diagnostic(Mesh *pm, const Real bdt) {
 //! \brief Sets user-defined history output
 
 void UserHistOutput(HistoryData *pdata, Mesh *pm) {
-  int n0 = pdata->nhist;
+  int n0 = 0;
   const int nuser = 75;
-  pdata->nhist += nuser;
+  pdata->nhist = nuser;
   const char *data_label[nuser] = {
     "Vcnm",  "Vunm",  "Vwnm",  "Vhot",  "Vsh",
     "Mcnm",  "Munm",  "Mwnm",  "Mhot",  "Msh",

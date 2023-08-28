@@ -300,9 +300,9 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
 //! \brief Sets user-defined history output
 
 void UserHistOutput(HistoryData *pdata, Mesh *pm) {
-  int n0 = pdata->nhist;
+  int n0 = 0;
   int nuser = 9;
-  pdata->nhist += nuser;
+  pdata->nhist = nuser;
   pdata->label[n0+0] = "E-int";
   pdata->label[n0+1] = "Vcnm ";
   pdata->label[n0+2] = "Vunm ";
