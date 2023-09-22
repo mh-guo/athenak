@@ -126,7 +126,6 @@ void AddUserSrcs(Mesh *pm, const Real bdt);
 void AccRefine(MeshBlockPack* pmbp);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
 void AccFinalWork(ParameterInput *pin, Mesh *pm);
-void ExtendFromRestart(Mesh *pm, ParameterInput *pin);
 void ReadFromRestart(Mesh *pm, ParameterInput *pin);
 int GIDConvert(int id, Mesh *pm, ParameterInput *pin);
 
@@ -225,8 +224,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc->rho_0 = pin->GetOrAddReal("problem","dens",1.0);
   Real temp_kelvin = pin->GetOrAddReal("problem","temp",1.0);
   bool rst_flag = pin->GetOrAddBoolean("problem","rst",false);
-  std::string rst_file = pin->GetOrAddString("problem", "rst_file", "none");
-  int old_level = pin->GetOrAddInteger("problem", "old_level", 0);
 
   if (acc->potential) {
     acc->m_bh = pin->GetReal("problem","m_bh");
@@ -550,22 +547,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // TODO(@mhguo): now only work for hydro!!!
   if (rst_flag) {
     ReadFromRestart(pmy_mesh_,pin);
-  }
-
-  // Convert conserved to primitives
-  if (pmbp->phydro != nullptr) {
-    pmbp->phydro->peos->ConsToPrim(u0, w0, false, is, ie, js, je, ks, ke);
-  } else if (pmbp->pmhd != nullptr) {
-    auto &bcc0_ = pmbp->pmhd->bcc0;
-    auto &b0_ = pmbp->pmhd->b0;
-    pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, is, ie, js, je, ks, ke);
+    // Convert conserved to primitives
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->peos->ConsToPrim(u0, w0, false, is, ie, js, je, ks, ke);
+    } else if (pmbp->pmhd != nullptr) {
+      auto &bcc0_ = pmbp->pmhd->bcc0;
+      auto &b0_ = pmbp->pmhd->b0;
+      pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, is, ie, js, je, ks, ke);
+    }
   }
 
   // Add more variables
   bool add_scalar = pin->GetOrAddBoolean("problem","add_scalar",false);
   int nvar = (pmbp->pmhd != nullptr)? pmbp->pmhd->nmhd : pmbp->phydro->nhydro;
   int nvar_tot = u0.extent_int(1);
-  if (add_scalar && nvar_tot > nvar) {
+  if (add_scalar) {
+    if (nvar_tot < nvar+1) {
+      std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__  << std::endl
+                << "Not enough variables for passive scalar!" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     Real t_cold = acc->t_cold;
     par_for("pgen_accretion", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -2805,207 +2806,6 @@ Real GetRadialVar(DualArray1D<Real> vararr, Real rad, Real logr0, Real logh, int
 
 void AccFinalWork(ParameterInput *pin, Mesh *pm) {
   delete acc;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn ExtendFromRestart
-//! \brief Read data from restart file
-
-void ExtendFromRestart(Mesh *pm, ParameterInput *pin) {
-  MeshBlockPack *pmbp = pm->pmb_pack;
-  ParameterInput* pinrst = new ParameterInput;
-  IOWrapper resfile;
-  // read parameters from restart file
-  std::string rst_file = pin->GetString("problem", "rst_file");
-  int old_level = pin->GetOrAddInteger("problem", "old_level", 0);
-  resfile.Open(rst_file.c_str(), IOWrapper::FileMode::read);
-  pinrst->LoadFromFile(resfile);
-
-  auto &indcs = pm->mb_indcs;
-  int nmb = pmbp->nmb_thispack;
-  int nout1 = indcs.nx1 + 2*(indcs.ng);
-  int nout2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
-  int nout3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-
-  // calculate total number of CC variables
-  hydro::Hydro* phydro = pmbp->phydro;
-  mhd::MHD* pmhd = pmbp->pmhd;
-  int nhydro_tot = 0, nmhd_tot = 0;
-  if (phydro != nullptr) {
-    nhydro_tot = phydro->nhydro + phydro->nscalars;
-  }
-  if (pmhd != nullptr) {
-    nmhd_tot = pmhd->nmhd + pmhd->nscalars;
-  }
-
-  // TODO(@mhguo): get old rank
-  int maxlevel = pm->max_level-2;
-  int oldlevel = old_level;
-  int myrank = global_variable::my_rank;
-  int newpart = 7*maxlevel+8;
-  int oldpart = 7*oldlevel+8;
-  int difpart = newpart-oldpart;
-  int m_old = -1;
-  for (int m=0; m<nmb; ++m) { // TODO(@mhguo): only work for nmb=1 now!
-    int mid = myrank+m;
-    m_old = mid;
-    for (int i=0; i<8; i++) {
-      if (mid>=i*newpart+(1-i)*(oldlevel+1) && mid<i*newpart+(7-i)*(oldlevel+1)) {
-        m_old = mid-i*difpart;
-      }
-      if (mid>=i*newpart+(7-i)*(oldlevel+1) && mid<(i+1)*newpart+(-i)*(oldlevel+1)) {
-        m_old = -1;
-      }
-    }
-    if (mid>=8*newpart-7*(oldlevel+1)) {
-      m_old = mid-8*difpart;
-    }
-    //m_old = 0;
-  }
-  if (global_variable::my_rank == 0) { // the master process reads the header data
-    for (int m=0; m<nmb; ++m) {
-      for (int i=0; i<8; i++) {
-        std::cout << " i=" << i
-                  << " 0=" << i*newpart+(1-i)*(oldlevel+1)
-                  << " 1=" << i*newpart+(7-i)*(oldlevel+1)
-                  << " 2=" << (i+1)*newpart+(-i)*(oldlevel+1)
-                  << std::endl;
-      }
-    }
-  }
-
-  IOWrapperSizeT headersize = 3*sizeof(int) + 2*sizeof(Real)
-    + sizeof(RegionSize) + 2*sizeof(RegionIndcs);
-  char *headerdata = new char[headersize];
-  if (global_variable::my_rank == 0) { // the master process reads the header data
-    if (resfile.Read_bytes(headerdata, 1, headersize) != headersize) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "Header size read from restart file is incorrect, "
-                << "restart file is broken." << std::endl;
-      exit(EXIT_FAILURE);
-    }
-  }
-#if MPI_PARALLEL_ENABLED
-  // then broadcast the header data
-  MPI_Bcast(headerdata, headersize, MPI_CHAR, 0, MPI_COMM_WORLD);
-#endif
-  // get old time and cycle
-  IOWrapperSizeT hdos = 0;
-  hdos += sizeof(int);
-  hdos += sizeof(int);
-  hdos += sizeof(RegionSize);
-  hdos += sizeof(RegionIndcs);
-  hdos += sizeof(RegionIndcs);
-  //std::memcpy(&(pmbp->pmesh->time), &(headerdata[hdos]), sizeof(Real));
-  hdos += sizeof(Real);
-  //std::memcpy(&(pmbp->pmesh->dt), &(headerdata[hdos]), sizeof(Real));
-  hdos += sizeof(Real);
-  //std::memcpy(&(pmbp->pmesh->ncycle), &(headerdata[hdos]), sizeof(int));
-  delete [] headerdata;
-
-  // allocate idlist buffer and read list of logical locations and cost
-  IOWrapperSizeT listsize = sizeof(LogicalLocation) + sizeof(float);
-  int nmb_old = 8*oldpart;
-  char *idlist = new char[listsize*nmb_old];
-  if (global_variable::my_rank == 0) { // only the master process reads the ID list
-    if (resfile.Read_bytes(idlist,listsize,nmb_old)
-        != static_cast<unsigned int>(nmb_old)) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "Incorrect number of MeshBlocks in restart file; "
-                << "restart file is broken." << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-  }
-
-  // root process reads size of CC and FC data arrays from restart file
-  IOWrapperSizeT variablesize = 2*sizeof(IOWrapperSizeT);
-  char *variabledata = new char[variablesize];
-  if (global_variable::my_rank == 0) { // the master process reads the variables data
-    if (resfile.Read_bytes(variabledata, 1, variablesize) != variablesize) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl
-                << "Variable data size read from restart file is incorrect, "
-                << "restart file is broken." << std::endl;
-      exit(EXIT_FAILURE);
-    }
-  }
-#if MPI_PARALLEL_ENABLED
-  // then broadcast the datasize information
-  MPI_Bcast(variabledata, variablesize, MPI_CHAR, 0, MPI_COMM_WORLD);
-#endif
-
-  // TODO(@mhguo): tmpcout!
-  //if (global_variable::my_rank == 0) {
-  //  std::cout << " gets file offset" << std::endl;
-  //}
-  IOWrapperSizeT headeroffset;
-  // master process gets file offset
-  if (global_variable::my_rank == 0) {
-    headeroffset = resfile.GetPosition();
-  }
-#if MPI_PARALLEL_ENABLED
-  // then broadcasts it
-  MPI_Bcast(&headeroffset, sizeof(IOWrapperSizeT), MPI_CHAR, 0, MPI_COMM_WORLD);
-#endif
-
-  IOWrapperSizeT ccdata_size, fcdata_size = 0;
-  hdos = 0;
-  std::memcpy(&ccdata_size, &(variabledata[hdos]), sizeof(IOWrapperSizeT));
-  hdos += sizeof(IOWrapperSizeT);
-  std::memcpy(&fcdata_size, &(variabledata[hdos]), sizeof(IOWrapperSizeT));
-
-  // allocate arrays for CC data
-  HostArray5D<Real> ccin("pgen-ccin", nmb, (nhydro_tot+nmhd_tot), nout3, nout2, nout1);
-  if (ccin.size()*sizeof(Real) != ccdata_size) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << " ccin.size=" << ccin.size()*sizeof(Real)
-              << " ccdata_size=" << ccdata_size << " nmb=" << nmb
-              << " myrank=" << myrank << " m_old=" << m_old
-              << std::endl << "CC data size read from restart file not equal to size "
-              << "of Hydro and MHD arrays, restart file is broken." << std::endl;
-    exit(EXIT_FAILURE);
-  }
-
-  // TODO(@mhguo): tmpcout!
-  //if (global_variable::my_rank == 0) {
-  //  std::cout << " read" << std::endl;
-  //}
-  // read CC data into host array
-  if (m_old>=0) {
-    int mygids = m_old;
-    IOWrapperSizeT myoffset = headeroffset + (ccdata_size+fcdata_size)*mygids;
-    if (resfile.Read_bytes_at_all(ccin.data(), ccdata_size, 1, myoffset) != 1) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "Input hydro data not read correctly from restart "
-                << "file, restart file is broken." << std::endl;
-      exit(EXIT_FAILURE);
-    }
-    myoffset += ccdata_size;
-
-    // copy CC Hydro data to device
-    if (phydro != nullptr) {
-      DvceArray5D<Real>::HostMirror host_u0 = Kokkos::create_mirror(phydro->u0);
-      auto hst_slice = Kokkos::subview(ccin, Kokkos::ALL, std::make_pair(0,nhydro_tot),
-                                      Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
-      Kokkos::deep_copy(host_u0, hst_slice);
-      Kokkos::deep_copy(phydro->u0, host_u0);
-    }
-  } else {
-    int mygids = 0;
-    IOWrapperSizeT myoffset = headeroffset + (ccdata_size+fcdata_size)*mygids;
-    if (resfile.Read_bytes_at_all(ccin.data(), ccdata_size, 1, myoffset) != 1) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "Input hydro data not read correctly from restart "
-                << "file, restart file is broken." << std::endl;
-      exit(EXIT_FAILURE);
-    }
-    myoffset += ccdata_size;
-  }
-  // TODO(@mhguo): tmpcout!
-  //std::cout << " Close:" << myrank << std::endl;
-  resfile.Close();
-  delete pinrst;
-  return;
 }
 
 } // namespace
