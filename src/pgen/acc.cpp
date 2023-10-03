@@ -66,9 +66,9 @@ struct pgenacc {
   Real gamma;    // EOS parameters
   bool potential;
   Real m_bh;
-  Real r_in;
-  Real r_in_old; // Inner boundary radius for restarting
-  Real r_in_new; // Inner boundary radius for restarting
+  Real r_in;     // inner radius
+  Real r_in_old; // inner radius for restarting
+  Real r_in_new; // inner radius for restarting
   Real r_in_beg_t; // start changing inner radius
   Real r_in_sof_t; // time for changing inner radius
   Real m_star, r_star;
@@ -109,6 +109,13 @@ struct pgenacc {
   int ndiag;
   Real t_cold;  // criterion of cold gas
   Real tf_hot;  // criterion of hot gas as fraction of initial temperature
+  bool heating_jet; // turn on jet heating
+  Real jet_epsilon; // jet efficiency
+  Real jet_amax; // maximum radius of jet launching point relative to inner radius
+  Real jet_awidth; // jet width relative to inner radius
+  Real jet_aedge; // jet truncation radius relative to inner radius
+  Real jet_vel; // jet velocity
+  Real jet_temp; // jet temperature
   DualArray1D<Real> dens_arr;
   DualArray1D<Real> logcooling_arr;
   array_acc::RadSum v_arr;
@@ -140,6 +147,8 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
+void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+                   DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddPowHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0);
 void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
@@ -275,6 +284,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc->heating_ini = pin->GetOrAddBoolean("problem","heating_ini",false);
   acc->heating_ana = pin->GetOrAddBoolean("problem","heating_ana",false);
   acc->heating_equ = pin->GetOrAddBoolean("problem","heating_equ",false);
+  acc->heating_jet = pin->GetOrAddBoolean("problem","heating_jet",false);
   acc->heating_pow = pin->GetOrAddBoolean("problem","heating_pow",false);
   acc->heat_beg_time = pin->GetOrAddReal("problem","heat_beg_time",0.0);
   acc->heat_sof_time = pin->GetOrAddReal("problem","heat_sof_time",0.0);
@@ -297,6 +307,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       acc->logcooling_arr.template modify<HostMemSpace>();
       acc->logcooling_arr.template sync<DevExeSpace>();
     }
+  }
+  if (acc->heating_jet) {
+    acc->jet_epsilon = pin->GetOrAddReal("problem","jet_epsilon",0.0);
+    acc->jet_amax = pin->GetOrAddReal("problem","jet_amax",0.0);
+    acc->jet_awidth = pin->GetOrAddReal("problem","jet_awidth",0.0);
+    acc->jet_aedge = pin->GetOrAddReal("problem","jet_aedge",0.0);
+    acc->jet_vel = pin->GetOrAddReal("problem","jet_vel",0.0);
+    acc->jet_temp = pin->GetOrAddReal("problem","jet_temp",0.0);
   }
   acc->heating_mdot = pin->GetOrAddBoolean("problem","heating_mdot",false);
   if (acc->heating_mdot) {
@@ -1560,7 +1578,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 
         // compute energy flux
         // TODO(@mhguo): check whether this is correct!
-        Real t1_0 = (int_ie + 0.5*e_k + 0.5*b_sq)*vr;
+        Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
         pdata->hdata[nflux*g+3] += 1.0*t1_0*r_sq*domega;
 
         // compute angular momentum flux
@@ -1784,8 +1802,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 void AddUserSrcs(Mesh *pm, const Real bdt) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   DvceArray5D<Real> &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
-  const DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ?
-                                pmbp->pmhd->w0 : pmbp->phydro->w0;
+  DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
   const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
                              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
@@ -1811,6 +1828,10 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
     if (acc->heating_equ) {
       //std::cout << "AddEquHeating" << std::endl;
       AddEquHeating(pm,bdt,u0,w0,eos_data);
+    }
+    if (acc->heating_jet) {
+      //std::cout << "AddMdotHeating" << std::endl;
+      AddJetHeating(pm,bdt,u0,w0,eos_data);
     }
     if (acc->heating_mdot) {
       //std::cout << "AddMdotHeating" << std::endl;
@@ -2406,6 +2427,171 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       //  printf("q_heating: rad=%0.6e q_heating=%0.6e\n",rad,q_heating);
       //}
       u0(m,IEN,k,j,i) += bdt * q_heating;
+    }
+  });
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void SourceTerms::AddJetHeating()
+//! \brief Add heating source terms in the energy equations.
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+
+// TODO(@mhguo): add jet precession
+void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+                   DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie; int nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je; int nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke; int nx3 = indcs.nx3;
+  auto &size = pmbp->pmb->mb_size;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji = nx2*nx1;
+  Real tfloor = eos_data.tfloor;
+  Real gm1 = eos_data.gamma - 1.0;
+  Real c_sq = SQR(pmbp->punit->speed_of_light());
+  
+  Real rin = acc->r_in;
+  Real gamma = acc->gamma;
+  Real &radentry = acc->rad_entry;
+  Real &tf_hot = acc->tf_hot;
+  Real &k0 = acc->k0_entry;
+  Real &xi = acc->xi_entry;
+  auto &d_arr = acc->dens_arr;
+
+  // jet parameters
+  Real jet_epsilon = acc->jet_epsilon;
+  Real jet_rmax = rin*acc->jet_amax;
+  Real jet_R0 = rin*acc->jet_awidth;
+  Real jet_Rmax = rin*acc->jet_aedge;
+  Real jet_vel = acc->jet_vel;
+  Real jet_temp = std::max(acc->jet_temp,tfloor);
+  Real jet_e_spec = jet_temp/gm1 + 0.5*SQR(jet_vel);
+  
+  int nvars;
+  if (pmbp->phydro != nullptr) {
+    nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
+  } else if (pmbp->pmhd != nullptr) {
+    nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+  }
+
+  // Get mass accretion rate, note that it could be negative and more complicated
+  Real sumdata[3] = {0.0,0.0,0.0};
+  // extract grids
+  auto &grids = pm->pgen->spherical_grids;
+  for (int g=0; g<1; ++g) {
+    grids[g]->InterpolateToSphere(nvars, w0);
+    for (int n=0; n<grids[g]->nangles; ++n) {
+      // extract coordinate data at this angle
+      Real r = grids[g]->radius;
+      Real x1 = grids[g]->interp_coord.h_view(n,0);
+      Real x2 = grids[g]->interp_coord.h_view(n,1);
+      Real x3 = grids[g]->interp_coord.h_view(n,2);
+      // extract interpolated primitives
+      Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+      Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+      Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+      Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+      Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+      Real int_temp = gm1*int_ie/int_dn;
+
+      Real v1 = int_vx, v2 = int_vy, v3 = int_vz;
+      Real r_sq = SQR(r);
+      Real drdx = x1/r;
+      Real drdy = x2/r;
+      Real drdz = x3/r;
+      // v_r
+      Real vr = drdx*v1 + drdy*v2 + drdz*v3;
+      // integration params
+      Real &domega = grids[g]->solid_angles.h_view(n);
+      Real x = r/radentry;
+      Real rho_ini = DensFn(x,d_arr);
+      Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
+      Real temp_ini = pgas_ini/rho_ini;
+      Real t_hot = tf_hot*temp_ini;
+      Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
+
+      // compute mass density
+      sumdata[0] += int_dn*r_sq*domega;
+      // compute mass flux
+      sumdata[1] += 1.0*int_dn*vr*r_sq*domega;
+      sumdata[2] += is_hot*int_dn*vr*r_sq*domega;
+    }
+  }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &sumdata, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  Real acc_rate = std::max(-sumdata[1],0.0);
+
+  Real s0 = 0.0, s1 = 0.0;
+  Kokkos::parallel_reduce("sum_mdot", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &sum_s0, Real &sum_s1) {
+    // compute n,k,j,i indices of thread
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    Real R = sqrt(SQR(x1v)+SQR(x2v));
+
+    if (rad > rin && rad <= jet_rmax && R <= jet_Rmax) {
+      sum_s0 += vol;
+      sum_s1 += vol*exp(-SQR(R/jet_R0));
+    }
+  }, Kokkos::Sum<Real>(s0), Kokkos::Sum<Real>(s1));
+
+#if MPI_PARALLEL_ENABLED
+  Real s_arr[2] = {s0,s1};
+  Real gs_arr[2] = {0.0,0.0};
+  MPI_Allreduce(s_arr, gs_arr, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  s0 = gs_arr[0];
+  s1 = gs_arr[1];
+#endif
+
+  par_for("add_jet_heating", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    Real R = sqrt(SQR(x1v)+SQR(x2v));
+
+    if (rad > rin && rad <= jet_rmax && R <= jet_Rmax) {
+      Real de = bdt * acc_rate * c_sq * jet_epsilon * exp(-SQR(R/jet_R0))/s1;
+      Real dm = de/jet_e_spec;
+      u0(m,IDN,k,j,i) += dm;
+      u0(m,IM3,k,j,i) += dm*jet_vel*SIGN(x3v);
+      u0(m,IEN,k,j,i) += de;
     }
   });
   return;
