@@ -179,27 +179,27 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     bool fofc_flag = false;
     bool rdf_flag = false, ave_flag = false, ceil_flag = false;
     if (only_testfloors) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      int nx2 = indcs.nx2;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      int nx3 = indcs.nx3;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (rad < a_excise*r_in) {
+        fofc_flag = true;
+      }
       if (rdfloor>0.0) {
-        Real &x1min = size.d_view(m).x1min;
-        Real &x1max = size.d_view(m).x1max;
-        int nx1 = indcs.nx1;
-        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-        Real &x2min = size.d_view(m).x2min;
-        Real &x2max = size.d_view(m).x2max;
-        int nx2 = indcs.nx2;
-        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-        Real &x3min = size.d_view(m).x3min;
-        Real &x3max = size.d_view(m).x3max;
-        int nx3 = indcs.nx3;
-        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-
-        if (rad < a_excise*r_in) {
-          fofc_flag = true;
-        }
         if (u.d < rdfloor/rad && rad>1.1*r_in) {
           sum0++;
           fofc_flag = true;

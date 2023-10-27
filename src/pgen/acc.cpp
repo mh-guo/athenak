@@ -3,8 +3,8 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file acc->cpp
-//! \brief Attempt to build a model for Accretion of Black Holes in Elliptical Galaxies
+//! \file acc.cpp
+//! \brief (@mhguo) A model of Accretion onto Black Holes in Elliptical Galaxies
 
 // Athena++ headers
 #include "athena.hpp"
@@ -285,6 +285,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc->heating_ana = pin->GetOrAddBoolean("problem","heating_ana",false);
   acc->heating_equ = pin->GetOrAddBoolean("problem","heating_equ",false);
   acc->heating_jet = pin->GetOrAddBoolean("problem","heating_jet",false);
+  acc->heating_mdot = pin->GetOrAddBoolean("problem","heating_mdot",false);
   acc->heating_pow = pin->GetOrAddBoolean("problem","heating_pow",false);
   acc->heat_beg_time = pin->GetOrAddReal("problem","heat_beg_time",0.0);
   acc->heat_sof_time = pin->GetOrAddReal("problem","heat_sof_time",0.0);
@@ -316,7 +317,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     acc->jet_vel = pin->GetOrAddReal("problem","jet_vel",0.0);
     acc->jet_temp = pin->GetOrAddReal("problem","jet_temp",0.0);
   }
-  acc->heating_mdot = pin->GetOrAddBoolean("problem","heating_mdot",false);
   if (acc->heating_mdot) {
     acc->epsilon = pin->GetOrAddReal("problem","epsilon",1e-6);
     acc->mdot_dr = pin->GetOrAddReal("problem","mdot_dr",0.2*acc->r_in);
@@ -399,16 +399,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  Real hist_a1 = pin->GetOrAddReal("problem","hist_a1",1.1);
-  Real hist_a2 = pin->GetOrAddReal("problem","hist_a2",3.0);
-  Real hist_a3 = pin->GetOrAddReal("problem","hist_a3",10.0);
-  Real hist_a4 = pin->GetOrAddReal("problem","hist_a4",100.0);
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a1*acc->r_in));
+  Real hist_r1 = pin->GetOrAddReal("problem","hist_a1",1.1)*acc->r_in;
+  Real hist_r2 = pin->GetOrAddReal("problem","hist_a2",3.0)*acc->r_in;
+  Real hist_r3 = pin->GetOrAddReal("problem","hist_a3",10.0)*acc->r_in;
+  hist_r1 = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : hist_r1;
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r1));
   // Enroll additional radii for flux analysis by
   // pushing back the grids vector with additional SphericalGrid instances
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a2*acc->r_in));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a3*acc->r_in));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_a4*acc->r_in));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r2));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r3));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 0.95*acc->rb_out));
 
   // Print info
   if (global_variable::my_rank == 0) {
@@ -1352,7 +1352,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   //const int nflux = (is_mhd) ? 7 : 6;
-  const int nflux = 8;
+  const int nflux = 9;
   // TODO(@mhguo): check what is necessary!
   // TODO(@mhguo): In the long run, it would be great if we can directly plot radial
   // TODO(@mhguo): profiles using history variables. We may need around 10 points and
@@ -1370,10 +1370,10 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   pdata->nhist = nuser;
   const char *data_label[nuser] = {
     // 6 letters for the first 7 labels, 5 for the rest
-    "m_1   ", "mdot1 ", "mdh1  ", "edot1 ", "lx_1  ", "ly_1  ", "lz_1  ", "phi_1",
-    "m_2  ",  "mdot2",  "mdh2 ",  "edot2",  "lx_2 ",  "ly_2 ",  "lz_2 ",  "phi_2",
-    "m_3  ",  "mdot3",  "mdh3 ",  "edot3",  "lx_3 ",  "ly_3 ",  "lz_3 ",  "phi_3",
-    "m_4  ",  "mdot4",  "mdh4 ",  "edot4",  "lx_4 ",  "ly_4 ",  "lz_4 ",  "phi_4",
+    "m_1   ", "mdot1 ", "mdo1  ", "mdh1  ", "edot1 ", "lx_1  ", "ly_1  ", "lz_1 ", "phi_1",
+    "m_2  ",  "mdot2",  "mdo2 ",  "mdh2 ",  "edot2",  "lx_2 ",  "ly_2 ",  "lz_2 ",  "phi_2",
+    "m_3  ",  "mdot3",  "mdo3 ",  "mdh3 ",  "edot3",  "lx_3 ",  "ly_3 ",  "lz_3 ",  "phi_3",
+    "m_4  ",  "mdot4",  "mdo4 ",  "mdh4 ",  "edot4",  "lx_4 ",  "ly_4 ",  "lz_4 ",  "phi_4",
     "Mdot ",  "Mglb ",  "M_in ",  "Lx_in",  "Ly_in",  "Lz_in",  "L_in ",
     "Vcold",  "Mcold",  "Lx_c ",  "Ly_c ",  "Lz_c ",  "L_c  ",
     "Vwarm",  "Mwarm",  "Lx_w ",  "Ly_w ",  "Lz_w ",  "L_w  ",
@@ -1499,6 +1499,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
         Real temp_ini = pgas_ini/rho_ini;
         Real t_hot = tf_hot*temp_ini;
+        Real is_out = (ur>0.0)? 1.0 : 0.0;
         Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
 
         // compute mass density
@@ -1506,24 +1507,25 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 
         // compute mass flux
         pdata->hdata[nflux*g+1] += 1.0*int_dn*ur*sqrtmdet*domega;
-        pdata->hdata[nflux*g+2] += is_hot*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+2] += is_out*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+3] += is_hot*int_dn*ur*sqrtmdet*domega;
 
         // compute energy flux
         Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
-        pdata->hdata[nflux*g+3] += 1.0*t1_0*sqrtmdet*domega;
+        pdata->hdata[nflux*g+4] += 1.0*t1_0*sqrtmdet*domega;
 
         // compute angular momentum flux
         // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
         Real t1_1 = 0.0;
         Real t1_2 = 0.0;
         Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
-        pdata->hdata[nflux*g+4] += t1_1*sqrtmdet*domega;
-        pdata->hdata[nflux*g+5] += t1_2*sqrtmdet*domega;
-        pdata->hdata[nflux*g+6] += t1_3*sqrtmdet*domega;
+        pdata->hdata[nflux*g+5] += t1_1*sqrtmdet*domega;
+        pdata->hdata[nflux*g+6] += t1_2*sqrtmdet*domega;
+        pdata->hdata[nflux*g+7] += t1_3*sqrtmdet*domega;
 
         // compute magnetic flux
         if (is_mhd) {
-          pdata->hdata[nflux*g+7] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+          pdata->hdata[nflux*g+8] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
         }
       }
     } else {
@@ -1567,6 +1569,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
         Real temp_ini = pgas_ini/rho_ini;
         Real t_hot = tf_hot*temp_ini;
+        Real is_out = (vr>0.0)? 1.0 : 0.0;
         Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
 
         // compute mass density
@@ -1574,22 +1577,23 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 
         // compute mass flux
         pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
-        pdata->hdata[nflux*g+2] += is_hot*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+2] += is_out*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+3] += is_hot*int_dn*vr*r_sq*domega;
 
         // compute energy flux
         // TODO(@mhguo): check whether this is correct!
         Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
-        pdata->hdata[nflux*g+3] += 1.0*t1_0*r_sq*domega;
+        pdata->hdata[nflux*g+4] += 1.0*t1_0*r_sq*domega;
 
         // compute angular momentum flux
         // TODO(@mhguo): check whether this is correct!
-        pdata->hdata[nflux*g+4] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
-        pdata->hdata[nflux*g+5] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
-        pdata->hdata[nflux*g+6] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
+        pdata->hdata[nflux*g+5] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+        pdata->hdata[nflux*g+6] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+        pdata->hdata[nflux*g+7] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
 
         // compute magnetic flux
         if (is_mhd) {
-          pdata->hdata[nflux*g+7] += 0.5*fabs(br)*r_sq*domega;
+          pdata->hdata[nflux*g+8] += 0.5*fabs(br)*r_sq*domega;
         }
       }
     }
@@ -2267,6 +2271,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   const int nji = nx2*nx1;
   Real use_e = eos_data.use_e;
   Real tfloor = eos_data.tfloor;
+  Real t_cold = acc->t_cold;
   Real gm1 = eos_data.gamma - 1.0;
   Real temp_unit = pmbp->punit->temperature_cgs();
   Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h/pmbp->punit->atomic_mass_unit_cgs;
@@ -2332,7 +2337,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         // soft function
         lambda_cooling *= exp(-50.0*pow(tfloor/w_temp,4.0));
         Real q_cooling = w_dens*w_dens*lambda_cooling;
-        if (w_temp<=tfloor*10.0) {
+        if (w_temp<=t_cold) {
           q_cooling = 0.0;
         }
         q_cooling = fmax(q_cooling,0.0);
@@ -2590,7 +2595,10 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       Real de = bdt * acc_rate * c_sq * jet_epsilon * exp(-SQR(R/jet_R0))/s1;
       Real dm = de/jet_e_spec;
       u0(m,IDN,k,j,i) += dm;
-      u0(m,IM3,k,j,i) += dm*jet_vel*SIGN(x3v);
+      //u0(m,IM3,k,j,i) += dm*jet_vel*SIGN(x3v);
+      u0(m,IM1,k,j,i) += dm*jet_vel*x1v/rad;
+      u0(m,IM2,k,j,i) += dm*jet_vel*x2v/rad;
+      u0(m,IM3,k,j,i) += dm*jet_vel*x3v/rad;
       u0(m,IEN,k,j,i) += de;
     }
   });
