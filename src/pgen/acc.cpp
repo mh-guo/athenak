@@ -119,6 +119,11 @@ struct pgenacc {
   Real jet_theta; // jet angle
   Real jet_phi; // jet angle
   Real jet_period; // jet period
+  bool stellar_fdbk; // turn on stellar feedback
+  Real stellar_rmin; // minimum radius of stellar feedback
+  Real stellar_rmax; // maximum radius of stellar feedback
+  Real stellar_mdot; // mass loss rate of stellar feedback
+  Real stellar_edot; // energy injection rate of stellar feedback
   DualArray1D<Real> dens_arr;
   DualArray1D<Real> logcooling_arr;
   array_acc::RadSum v_arr;
@@ -156,9 +161,15 @@ void AddPowHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0);
 void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                     const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
+void AddStellarFeedback(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0);
 
 //----------------------------------------------------------------------------------------
 //! \f computes gravitational acceleration
+
+KOKKOS_INLINE_FUNCTION
+static Real NFWDens(const Real r, const Real ms, const Real rs) {
+  return ms/(4.0*M_PI*SQR(rs)*r*SQR(1.0+r/rs));
+}
 
 KOKKOS_INLINE_FUNCTION
 static Real NFWMass(const Real r, const Real ms, const Real rs) {
@@ -332,6 +343,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (acc->heating_pow) {
     acc->rad_heat = pin->GetOrAddReal("problem","rad_heat",2.0);
     acc->radpow_heat = pin->GetOrAddReal("problem","radpow_heat",-1.5);
+  }
+  acc->stellar_fdbk = pin->GetOrAddBoolean("problem","stellar_fdbk",false);
+  if (acc->stellar_fdbk) {
+    acc->stellar_rmin = pin->GetOrAddReal("problem","stellar_rmin",0.0);
+    acc->stellar_rmax = pin->GetOrAddReal("problem","stellar_rmax",0.0);
+    acc->stellar_mdot = pin->GetOrAddReal("problem","stellar_mdot",0.0);
+    acc->stellar_edot = pin->GetOrAddReal("problem","stellar_edot",0.0);
   }
   acc->heat_tceiling = pin->GetOrAddReal("problem","heat_tceiling",
                         std::numeric_limits<float>::max());
@@ -1852,6 +1870,10 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
       AddPowHeating(pm,bdt,u0,w0);
     }
   }
+  if (acc->stellar_fdbk) {
+    //std::cout << "AddStellarFeedback" << std::endl;
+    AddStellarFeedback(pm,bdt,u0);
+  }
   // (@mhguo) change inner radius, if necessary
   if (acc->r_in_new<acc->r_in_old) {
     Real t_now = pm->time-acc->r_in_beg_t;
@@ -2782,6 +2804,53 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     }
 
     u0(m,IEN,k,j,i) += bdt * w0(m,IDN,k,j,i) * gamma_heating;
+  });
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void SourceTerms::AddStellarFeedback()
+//! \brief Add stellar feedback source terms.
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+
+void AddStellarFeedback(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  auto &size = pmbp->pmb->mb_size;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  Real &mstar = acc->m_star;
+  Real &rstar = acc->r_star;
+  Real stellar_rmin = acc->stellar_rmin;
+  Real stellar_rmax = acc->stellar_rmax;
+  Real stellar_mdot = acc->stellar_mdot;
+  Real stellar_edot = acc->stellar_edot;
+
+  par_for("add_stellar_fdbk", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    if (rad >= stellar_rmin && rad < stellar_rmax) {
+      Real dens = NFWDens(rad, mstar, rstar);
+      Real dm = bdt * stellar_mdot * dens;
+      Real de = bdt * stellar_edot * dens;
+      u0(m,IDN,k,j,i) += dm;
+      u0(m,IEN,k,j,i) += de;
+    }
   });
   return;
 }
