@@ -116,6 +116,9 @@ struct pgenacc {
   Real jet_aedge; // jet truncation radius relative to inner radius
   Real jet_vel; // jet velocity
   Real jet_temp; // jet temperature
+  Real jet_theta; // jet angle
+  Real jet_phi; // jet angle
+  Real jet_period; // jet period
   DualArray1D<Real> dens_arr;
   DualArray1D<Real> logcooling_arr;
   array_acc::RadSum v_arr;
@@ -316,6 +319,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     acc->jet_aedge = pin->GetOrAddReal("problem","jet_aedge",0.0);
     acc->jet_vel = pin->GetOrAddReal("problem","jet_vel",0.0);
     acc->jet_temp = pin->GetOrAddReal("problem","jet_temp",0.0);
+    acc->jet_theta = pin->GetOrAddReal("problem","jet_theta",0.0);
+    acc->jet_phi = pin->GetOrAddReal("problem","jet_phi",0.0);
+    acc->jet_period = pin->GetOrAddReal("problem","jet_period",0.0);
   }
   if (acc->heating_mdot) {
     acc->epsilon = pin->GetOrAddReal("problem","epsilon",1e-6);
@@ -623,7 +629,7 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
 
   // At this point, the restartfile is already open and the ParameterInput (input file)
   // data has already been read. Thus the file pointer is set to after <par_end>
-  
+
   // following must be identical to calculation of headeroffset (excluding size of
   // ParameterInput data) in restart.cpp
   IOWrapperSizeT headersize = 3*sizeof(int) + 2*sizeof(Real)
@@ -726,7 +732,7 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
   IOWrapperSizeT offset_myrank = headeroffset + data_size*mygids;
   IOWrapperSizeT myoffset = offset_myrank;
   IOWrapperSizeT var_offset = 0;
-  
+
   HostArray5D<Real> ccin("rst-cc-in", 1, 1, 1, 1, 1);
   HostFaceFld4D<Real> fcin("rst-fc-in", 1, 1, 1, 1);
 
@@ -1370,21 +1376,21 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   pdata->nhist = nuser;
   const char *data_label[nuser] = {
     // 6 letters for the first 7 labels, 5 for the rest
-    "m_1   ", "mdot1 ", "mdo1  ", "mdh1  ", "edot1 ", "lx_1  ", "ly_1  ", "lz_1 ", "phi_1",
-    "m_2  ",  "mdot2",  "mdo2 ",  "mdh2 ",  "edot2",  "lx_2 ",  "ly_2 ",  "lz_2 ",  "phi_2",
-    "m_3  ",  "mdot3",  "mdo3 ",  "mdh3 ",  "edot3",  "lx_3 ",  "ly_3 ",  "lz_3 ",  "phi_3",
-    "m_4  ",  "mdot4",  "mdo4 ",  "mdh4 ",  "edot4",  "lx_4 ",  "ly_4 ",  "lz_4 ",  "phi_4",
-    "Mdot ",  "Mglb ",  "M_in ",  "Lx_in",  "Ly_in",  "Lz_in",  "L_in ",
-    "Vcold",  "Mcold",  "Lx_c ",  "Ly_c ",  "Lz_c ",  "L_c  ",
-    "Vwarm",  "Mwarm",  "Lx_w ",  "Ly_w ",  "Lz_w ",  "L_w  ",
-    "Mdotc",  "Vinc ",  "Minc ",  "Lx_ic",  "Ly_ic",  "Lz_ic",  "L_ic ",
-    "Mdotw",  "Vinw ",  "Minw ",  "Lx_iw",  "Ly_iw",  "Lz_iw",  "L_iw ",
-    "Mdoth",  "Vinh ",  "Minh ",  "Lx_ih",  "Ly_ih",  "Lz_ih",  "L_ih ",
-    "V0c  ",  "M0c  ",  "V0w  ",  "M0w  ",  "V0h  ",  "M0h  ",
-    "V1c  ",  "M1c  ",  "V1w  ",  "M1w  ",  "V1h  ",  "M1h  ",
-    "V2c  ",  "M2c  ",  "V2w  ",  "M2w  ",  "V2h  ",  "M2h  ",
-    //"pr_in", "pr_ic", "pr_iw", "pr_ih",
-    //"Lx0c",  "Ly0c",  "Lz0c",  "L0c",
+    "m_1   ","mdot1 ","mdo1  ","mdh1  ","edot1 ","lx_1  ","ly_1  ","lz_1 ","phi_1",
+    "m_2  ", "mdot2", "mdo2 ", "mdh2 ", "edot2", "lx_2 ", "ly_2 ", "lz_2 ", "phi_2",
+    "m_3  ", "mdot3", "mdo3 ", "mdh3 ", "edot3", "lx_3 ", "ly_3 ", "lz_3 ", "phi_3",
+    "m_4  ", "mdot4", "mdo4 ", "mdh4 ", "edot4", "lx_4 ", "ly_4 ", "lz_4 ", "phi_4",
+    "Mdot ", "Mglb ", "M_in ", "Lx_in", "Ly_in", "Lz_in", "L_in ",
+    "Vcold", "Mcold", "Lx_c ", "Ly_c ", "Lz_c ", "L_c  ",
+    "Vwarm", "Mwarm", "Lx_w ", "Ly_w ", "Lz_w ", "L_w  ",
+    "Mdotc", "Vinc ", "Minc ", "Lx_ic", "Ly_ic", "Lz_ic", "L_ic ",
+    "Mdotw", "Vinw ", "Minw ", "Lx_iw", "Ly_iw", "Lz_iw", "L_iw ",
+    "Mdoth", "Vinh ", "Minh ", "Lx_ih", "Ly_ih", "Lz_ih", "L_ih ",
+    "V0c  ", "M0c  ", "V0w  ", "M0w  ", "V0h  ", "M0h  ",
+    "V1c  ", "M1c  ", "V1w  ", "M1w  ", "V1h  ", "M1h  ",
+    "V2c  ", "M2c  ", "V2w  ", "M2w  ", "V2h  ", "M2h  ",
+    //"pr_in","pr_ic","pr_iw","pr_ih",
+    //"Lx0c", "Ly0c", "Lz0c", "L0c",
   };
   for (int n=0; n<nuser; ++n) {
     pdata->label[n] = data_label[n];
@@ -2458,7 +2464,7 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real tfloor = eos_data.tfloor;
   Real gm1 = eos_data.gamma - 1.0;
   Real c_sq = SQR(pmbp->punit->speed_of_light());
-  
+
   Real rin = acc->r_in;
   Real gamma = acc->gamma;
   Real &radentry = acc->rad_entry;
@@ -2475,7 +2481,13 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real jet_vel = acc->jet_vel;
   Real jet_temp = std::max(acc->jet_temp,tfloor);
   Real jet_e_spec = jet_temp/gm1 + 0.5*SQR(jet_vel);
-  
+  Real jet_theta = acc->jet_theta;
+  Real jet_phi = acc->jet_phi;
+  Real jet_period = acc->jet_period;
+  if (jet_period > 0.0) {
+    jet_phi += 2.0*M_PI*pm->time/jet_period;
+  }
+
   int nvars;
   if (pmbp->phydro != nullptr) {
     nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
@@ -2558,7 +2570,9 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
     Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-    Real R = sqrt(SQR(x1v)+SQR(x2v));
+    Real z = x1v*sin(jet_theta)*cos(jet_phi)+x2v*sin(jet_theta)*sin(jet_phi)+
+             x3v*cos(jet_theta);
+    Real R = sqrt(SQR(rad)-SQR(z));
 
     if (rad > rin && rad <= jet_rmax && R <= jet_Rmax) {
       sum_s0 += vol;
@@ -2587,9 +2601,11 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-    
+
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-    Real R = sqrt(SQR(x1v)+SQR(x2v));
+    Real z = x1v*sin(jet_theta)*cos(jet_phi)+x2v*sin(jet_theta)*sin(jet_phi)+
+             x3v*cos(jet_theta);
+    Real R = sqrt(SQR(rad)-SQR(z));
 
     if (rad > rin && rad <= jet_rmax && R <= jet_Rmax) {
       Real de = bdt * acc_rate * c_sq * jet_epsilon * exp(-SQR(R/jet_R0))/s1;
