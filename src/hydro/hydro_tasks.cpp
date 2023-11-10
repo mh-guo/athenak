@@ -53,9 +53,9 @@ void Hydro::AssembleHydroTasks(TaskList &start, TaskList &run, TaskList &end) {
   id.restu = run.AddTask(&Hydro::RestrictU, this, id.expl);
   id.sendu = run.AddTask(&Hydro::SendU, this, id.restu);
   id.recvu = run.AddTask(&Hydro::RecvU, this, id.sendu);
-  id.bcs   = run.AddTask(&Hydro::ApplyPhysicalBCs, this, id.recvu);
-  id.prol  = run.AddTask(&Hydro::Prolongate, this, id.bcs);
-  id.c2p   = run.AddTask(&Hydro::ConToPrim, this, id.prol);
+  id.prol  = run.AddTask(&Hydro::Prolongate, this, id.recvu);
+  id.bcs   = run.AddTask(&Hydro::ApplyPhysicalBCs, this, id.prol);
+  id.c2p   = run.AddTask(&Hydro::ConToPrim, this, id.bcs);
   id.newdt = run.AddTask(&Hydro::NewTimeStep, this, id.c2p);
 
   // assemble end task list

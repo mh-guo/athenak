@@ -29,7 +29,7 @@
 
 using RK4FnPtr = Real (*)(Real x, Real y);
 
-#define NLEN_DENS_ARRAY 2048
+#define NLEN_DENS_ARRAY 3000
 //#define NREDUCTION_RADIAL 64
 #define NREDUCTION_RADIAL 24
 namespace array_acc {  // namespace helps with name resolution in reduction identity
@@ -77,6 +77,7 @@ struct pgenacc {
   Real rho_0, temp_0;
   Real k0_entry, xi_entry; // Parameters for entropy
   Real rad_entry, dens_entry; // Parameters for entropy
+  int vcycle_n; // number cycles in a V-cycle
   Real rb_in; // Inner boundary radius
   Real rb_out; // Outer boundary radius
   std::string user_bc_flag; // Boundary condition
@@ -163,6 +164,8 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                     const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddStellarFeedback(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0);
 
+Real AccTimeStep(Mesh *pm);
+
 //----------------------------------------------------------------------------------------
 //! \f computes gravitational acceleration
 
@@ -193,6 +196,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_srcs_func = AddUserSrcs;
   user_ref_func = AccRefine;
   user_hist_func = AccHistOutput;
+  user_dt_func = AccTimeStep;
   pgen_final_func = AccFinalWork;
   Kokkos::realloc(acc->dens_arr,NLEN_DENS_ARRAY);
   Kokkos::realloc(acc->logcooling_arr,NREDUCTION_RADIAL);
@@ -282,11 +286,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else {
     return;
   }
+  acc->vcycle_n = pin->GetOrAddInteger("problem","vcycle_n",0);
   acc->user_bc_flag = pin->GetOrAddString("problem","bc_flag","none");
   if (acc->user_bc_flag == "none") {
     std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__  << std::endl
               << "Boundary condition is not set!" << std::endl
-              << "Please set either fixed or outflow!" << std::endl;
+              << "Please set either initial, fixed or outflow!" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   acc->turb = pin->GetOrAddBoolean("problem","turb",false);
@@ -423,16 +428,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  Real hist_r1 = pin->GetOrAddReal("problem","hist_a1",1.1)*acc->r_in;
-  Real hist_r2 = pin->GetOrAddReal("problem","hist_a2",3.0)*acc->r_in;
-  Real hist_r3 = pin->GetOrAddReal("problem","hist_a3",10.0)*acc->r_in;
-  hist_r1 = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : hist_r1;
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r1));
-  // Enroll additional radii for flux analysis by
-  // pushing back the grids vector with additional SphericalGrid instances
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r2));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, hist_r3));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 0.95*acc->rb_out));
+  int hist_nr = pin->GetOrAddInteger("problem","hist_nr",4);
+  for (int i=0; i<hist_nr; i++) {
+    Real rmin = 1.1*acc->r_in;
+    Real rmax = 0.95*acc->rb_out;
+    Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rmin;
+    if (i==0) {
+      r_i = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : r_i;
+    }
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, r_i));
+  }
 
   // Print info
   if (global_variable::my_rank == 0) {
@@ -506,7 +511,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Convert Newtonian to GR
   bool newton_to_gr = pin->GetOrAddBoolean("problem","newton_to_gr",false);
   if (newton_to_gr) {
-    // Convert primitives to conserved
     if (pmbp->phydro != nullptr) {
       EquationOfState *peos = new IdealHydro(pmbp, pin);
       peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
@@ -568,6 +572,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0, bcc0_, u0, 0, n1m1, 0, n2m1, 0, n3m1);
   }
+  // Add turbulence
   for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
     if (it->block_name.compare(0, 9, "turb_init") == 0) {
       TurbulenceInit *pturb;
@@ -583,6 +588,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       pturb->AddForcing(1);
       delete pturb;
     }
+  }
+  // Convert conserved to primitives
+  if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
+  } else if (pmbp->pmhd != nullptr) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
   }
 
   // TODO(@mhguo): read and interpolate data
@@ -988,13 +1001,26 @@ void RadialBoundary(Mesh *pm) {
 
   auto &d_arr = acc->dens_arr;
   std::string bc_flag = acc->user_bc_flag;
+  int bc_num = 0;
+  if (bc_flag == "initial") {
+    bc_num = 1;
+  } else if (bc_flag == "fixed") {
+    bc_num = 2;
+  } else if (bc_flag == "outflow") {
+    bc_num = 3;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unknown boundary condition flag: " << bc_flag
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   Real &gamma=acc->gamma;
   Real gm1=(acc->gamma-1.0);
   Real &radentry = acc->rad_entry;
   Real &k0 = acc->k0_entry;
   Real &xi = acc->xi_entry;
-  Real &rbin = acc->rb_in;
-  Real &rbout = acc->rb_out;
+  Real rbin = acc->rb_in;
+  Real rbout = acc->rb_out;
   Real &rin = acc->r_in;
   Real &sinkd = acc->sink_d;
   Real &sinkt = acc->sink_t;
@@ -1007,6 +1033,24 @@ void RadialBoundary(Mesh *pm) {
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
   //std::cout << tmp << std::endl;
+  if (acc->vcycle_n>0) {
+    int cycle_index = (10*(pm->ncycle%acc->vcycle_n))/acc->vcycle_n;
+    if (cycle_index == 0 || cycle_index == 9) {
+      rbin = 1e5;
+    } else if (cycle_index == 1 || cycle_index == 8) {
+      rbin = 1e4;
+    } else if (cycle_index == 2 || cycle_index == 7) {
+      rbin = 1e3;
+    } else if (cycle_index == 3 || cycle_index == 6) {
+      rbin = 1e2;
+    } else if (cycle_index == 4 || cycle_index == 5) {
+      rbin = 0e0;
+    } else {
+    }
+  }
+  if (global_variable::my_rank == 0 && pm->ncycle % acc->ndiag == 0) {
+    std::cout << "rbin = " << rbin << std::endl;
+  }
 
   par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -1036,59 +1080,74 @@ void RadialBoundary(Mesh *pm) {
     }
 
     // apply initial conditions to boundary cells
-    if (rad < rbin || rad > rbout) {
-      Real x = rad/radentry;
-      Real rho = DensFnDevice(x,d_arr);
-      Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
-
-      if (is_gr) {
-        Real glower[4][4], gupper[4][4];
-        ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
-
-        HydCons1D u;
-        if (is_mhd) {
-          MHDPrim1D w;
+    if (bc_num <=2 && (rad < rbin || rad > rbout)) {
+      HydCons1D u;
+      if (is_mhd) {
+        MHDPrim1D w;
+        if (bc_num == 1) {
+          Real x = rad/radentry;
+          Real rho = DensFnDevice(x,d_arr);
+          Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
           w.d  = rho;
           w.vx = 0.0;
           w.vy = 0.0;
           w.vz = 0.0;
           w.e  = eint;
-          // load cell-centered fields into primitive state
-          w.bx = bcc(m,IBX,k,j,i);
-          w.by = bcc(m,IBY,k,j,i);
-          w.bz = bcc(m,IBZ,k,j,i);
+        } else {
+          w.d  = w0_(m,IDN,k,j,i);
+          w.vx = w0_(m,IVX,k,j,i);
+          w.vy = w0_(m,IVY,k,j,i);
+          w.vz = w0_(m,IVZ,k,j,i);
+          w.e  = w0_(m,IEN,k,j,i);
+        }
+        // load cell-centered fields into primitive state
+        w.bx = bcc(m,IBX,k,j,i);
+        w.by = bcc(m,IBY,k,j,i);
+        w.bz = bcc(m,IBZ,k,j,i);
 
-          // call p2c function
+        // call p2c function
+        if (is_gr) {
+          Real glower[4][4], gupper[4][4];
+          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
           SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
         } else {
-          HydPrim1D w;
+          SingleP2C_IdealMHD(w, u);
+        }
+      } else {
+        HydPrim1D w;
+        if (bc_num == 1) {
+          Real x = rad/radentry;
+          Real rho = DensFnDevice(x,d_arr);
+          Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
           w.d  = rho;
           w.vx = 0.0;
           w.vy = 0.0;
           w.vz = 0.0;
           w.e  = eint;
-
-          // call p2c function
-          SingleP2C_IdealGRHyd(glower, gupper, w, gamma, u);
-        }
-        // store conserved quantities in 3D array
-        u0_(m,IDN,k,j,i) = u.d;
-        u0_(m,IM1,k,j,i) = u.mx;
-        u0_(m,IM2,k,j,i) = u.my;
-        u0_(m,IM3,k,j,i) = u.mz;
-        u0_(m,IEN,k,j,i) = u.e;
-      } else {
-        u0_(m,IDN,k,j,i) = rho;
-        u0_(m,IM1,k,j,i) = 0.0;
-        u0_(m,IM2,k,j,i) = 0.0;
-        u0_(m,IM3,k,j,i) = 0.0;
-        if (is_mhd) {
-          u0_(m,IEN,k,j,i) = eint + 0.5*(SQR(bcc(m,IBX,k,j,i)) + SQR(bcc(m,IBY,k,j,i))
-                                        + SQR(bcc(m,IBZ,k,j,i)));
         } else {
-          u0_(m,IEN,k,j,i) = eint;
+          w.d  = w0_(m,IDN,k,j,i);
+          w.vx = w0_(m,IVX,k,j,i);
+          w.vy = w0_(m,IVY,k,j,i);
+          w.vz = w0_(m,IVZ,k,j,i);
+          w.e  = w0_(m,IEN,k,j,i);
+        }
+
+        // call p2c function
+        if (is_gr) {
+          Real glower[4][4], gupper[4][4];
+          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+          SingleP2C_IdealGRHyd(glower, gupper, w, gamma, u);
+        } else {
+          SingleP2C_IdealHyd(w, u);
         }
       }
+      // store conserved quantities in 3D array
+      u0_(m,IDN,k,j,i) = u.d;
+      u0_(m,IM1,k,j,i) = u.mx;
+      u0_(m,IM2,k,j,i) = u.my;
+      u0_(m,IM3,k,j,i) = u.mz;
+      u0_(m,IEN,k,j,i) = u.e;
+
     }
   });
 
@@ -1193,7 +1252,7 @@ void RadialBoundary(Mesh *pm) {
   // fixed condition: do nothing
   // if (bc_flag == "fixed") {}
   // outlfow condition
-  if (bc_flag == "outflow") {
+  if (bc_num == 3) {
     // ConsToPrim over all ghost zones *and* at the innermost/outermost X1-active zones
     // of Meshblocks, even if Meshblock face is not at the edge of computational domain
     if (pmbp->phydro != nullptr) {
@@ -1275,6 +1334,26 @@ void RadialBoundary(Mesh *pm) {
   }
 
   return;
+}
+
+Real AccTimeStep(Mesh *pm) {
+  Real dt = pm->dt/pm->cfl_no;
+  if (acc->vcycle_n>0) {
+    int cycle_index = (10*(pm->ncycle%acc->vcycle_n))/acc->vcycle_n;
+    if (cycle_index == 0 || cycle_index == 9) {
+      dt *= 3e6;
+    } else if (cycle_index == 1 || cycle_index == 8) {
+      dt *= 3.3e4;
+    } else if (cycle_index == 2 || cycle_index == 7) {
+      dt *= 1e3;
+    } else if (cycle_index == 3 || cycle_index == 6) {
+      dt *= 3.3e1;
+    } else if (cycle_index == 4 || cycle_index == 5) {
+      dt *= 1.0;
+    } else {
+    }
+  }
+  return dt;
 }
 
 //----------------------------------------------------------------------------------------
@@ -1388,16 +1467,16 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   //  (2) energy flux
   //  (3) angular momentum flux * 3
   //  (4) magnetic flux (iff MHD)
-  const int nsph = 4 * nflux;
+  int nsph = nradii * nflux;
   const int nreduce = 58;
-  const int nuser = nsph + nreduce;
+  int nuser = nsph + nreduce;
   pdata->nhist = nuser;
-  const char *data_label[nuser] = {
+  std::string data_label[nreduce] = {
     // 6 letters for the first 7 labels, 5 for the rest
-    "m_1   ","mdot1 ","mdo1  ","mdh1  ","edot1 ","lx_1  ","ly_1  ","lz_1 ","phi_1",
-    "m_2  ", "mdot2", "mdo2 ", "mdh2 ", "edot2", "lx_2 ", "ly_2 ", "lz_2 ", "phi_2",
-    "m_3  ", "mdot3", "mdo3 ", "mdh3 ", "edot3", "lx_3 ", "ly_3 ", "lz_3 ", "phi_3",
-    "m_4  ", "mdot4", "mdo4 ", "mdh4 ", "edot4", "lx_4 ", "ly_4 ", "lz_4 ", "phi_4",
+    //"m_1   ","mdot1 ","mdo1  ","mdh1  ","edot1 ","lx_1  ","ly_1  ","lz_1 ","phi_1",
+    //"m_2  ", "mdot2", "mdo2 ", "mdh2 ", "edot2", "lx_2 ", "ly_2 ", "lz_2 ", "phi_2",
+    //"m_3  ", "mdot3", "mdo3 ", "mdh3 ", "edot3", "lx_3 ", "ly_3 ", "lz_3 ", "phi_3",
+    //"m_4  ", "mdot4", "mdo4 ", "mdh4 ", "edot4", "lx_4 ", "ly_4 ", "lz_4 ", "phi_4",
     "Mdot ", "Mglb ", "M_in ", "Lx_in", "Ly_in", "Lz_in", "L_in ",
     "Vcold", "Mcold", "Lx_c ", "Ly_c ", "Lz_c ", "L_c  ",
     "Vwarm", "Mwarm", "Lx_w ", "Ly_w ", "Lz_w ", "L_w  ",
@@ -1410,8 +1489,20 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     //"pr_in","pr_ic","pr_iw","pr_ih",
     //"Lx0c", "Ly0c", "Lz0c", "L0c",
   };
-  for (int n=0; n<nuser; ++n) {
-    pdata->label[n] = data_label[n];
+  for (int g=0; g<nradii; ++g) {
+    std::string rstr = std::to_string(g);
+    pdata->label[nflux*g+0] = "m_" + rstr;
+    pdata->label[nflux*g+1] = "mdot" + rstr;
+    pdata->label[nflux*g+2] = "mdout" + rstr;
+    pdata->label[nflux*g+3] = "mdh" + rstr;
+    pdata->label[nflux*g+4] = "edot" + rstr;
+    pdata->label[nflux*g+5] = "lx" + rstr;
+    pdata->label[nflux*g+6] = "ly" + rstr;
+    pdata->label[nflux*g+7] = "lz" + rstr;
+    pdata->label[nflux*g+8] = "phi" + rstr;
+  }
+  for (int n=0; n<nreduce; ++n) {
+    pdata->label[n+nsph] = data_label[n];
   }
 
   // go through angles at each radii:
@@ -2856,8 +2947,8 @@ void AddStellarFeedback(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void SourceTerms::ISMCoolingNewTimeStep()
-//! \brief Compute new time step for ISM cooling.
+//! \fn void Diagnostic()
+//! \brief Compute diagnostics.
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 
 void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
