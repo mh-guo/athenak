@@ -52,9 +52,9 @@ void MHD::AssembleMHDTasks(TaskList &start, TaskList &run, TaskList &end) {
   id.restb = run.AddTask(&MHD::RestrictB, this, id.ct);
   id.sendb = run.AddTask(&MHD::SendB, this, id.restb);
   id.recvb = run.AddTask(&MHD::RecvB, this, id.sendb);
-  id.bcs   = run.AddTask(&MHD::ApplyPhysicalBCs, this, id.recvb);
-  id.prol  = run.AddTask(&MHD::Prolongate, this, id.bcs);
-  id.c2p   = run.AddTask(&MHD::ConToPrim, this, id.prol);
+  id.prol  = run.AddTask(&MHD::Prolongate, this, id.recvb);
+  id.bcs   = run.AddTask(&MHD::ApplyPhysicalBCs, this, id.prol);
+  id.c2p   = run.AddTask(&MHD::ConToPrim, this, id.bcs);
   id.newdt = run.AddTask(&MHD::NewTimeStep, this, id.c2p);
 
   // assemble end task list

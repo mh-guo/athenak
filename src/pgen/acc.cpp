@@ -165,6 +165,20 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 void AddStellarFeedback(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0);
 
 Real AccTimeStep(Mesh *pm);
+KOKKOS_INLINE_FUNCTION
+Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
+  Real x = static_cast<Real>(i%n)/static_cast<Real>(n-1);
+  Real r = rmin*std::pow(rmax/rmin,fabs(1.0-2.0*x));
+  r = (r<(10*rmin)) ? 0.0 : r;
+  return r;
+}
+KOKKOS_INLINE_FUNCTION
+Real VcycleTimeStep(int i, int n, Real rmin, Real rmax, Real dt) {
+  Real r = VcycleRadius(i,n,rmin,rmax);
+  r = std::fmax(r,1.0);
+  Real fac = std::exp(-100.0*rmin/r);
+  return dt*(1.0-fac+fac*0.4*std::pow(r,1.4)); // assume v ~ r^-2/5 & Ma=2.5
+}
 
 //----------------------------------------------------------------------------------------
 //! \f computes gravitational acceleration
@@ -526,7 +540,20 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
   }
 
-  if (restart) return;
+  if (restart) {
+    // Convert conserved to primitives
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    } else if (pmbp->pmhd != nullptr) {
+      auto &bcc0_ = pmbp->pmhd->bcc0;
+      auto &b0_ = pmbp->pmhd->b0;
+      pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "UserProblem complete" << std::endl;
+    }
+    return;
+  }
 
   // Set initial conditions
   Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
@@ -1034,19 +1061,7 @@ void RadialBoundary(Mesh *pm) {
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
   //std::cout << tmp << std::endl;
   if (acc->vcycle_n>0) {
-    int cycle_index = (10*(pm->ncycle%acc->vcycle_n))/acc->vcycle_n;
-    if (cycle_index == 0 || cycle_index == 9) {
-      rbin = 1e5;
-    } else if (cycle_index == 1 || cycle_index == 8) {
-      rbin = 1e4;
-    } else if (cycle_index == 2 || cycle_index == 7) {
-      rbin = 1e3;
-    } else if (cycle_index == 3 || cycle_index == 6) {
-      rbin = 1e2;
-    } else if (cycle_index == 4 || cycle_index == 5) {
-      rbin = 0e0;
-    } else {
-    }
+    rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
   }
   if (global_variable::my_rank == 0 && pm->ncycle % acc->ndiag == 0) {
     std::cout << "rbin = " << rbin << std::endl;
@@ -1147,7 +1162,6 @@ void RadialBoundary(Mesh *pm) {
       u0_(m,IM2,k,j,i) = u.my;
       u0_(m,IM3,k,j,i) = u.mz;
       u0_(m,IEN,k,j,i) = u.e;
-
     }
   });
 
@@ -1339,19 +1353,7 @@ void RadialBoundary(Mesh *pm) {
 Real AccTimeStep(Mesh *pm) {
   Real dt = pm->dt/pm->cfl_no;
   if (acc->vcycle_n>0) {
-    int cycle_index = (10*(pm->ncycle%acc->vcycle_n))/acc->vcycle_n;
-    if (cycle_index == 0 || cycle_index == 9) {
-      dt *= 3e6;
-    } else if (cycle_index == 1 || cycle_index == 8) {
-      dt *= 3.3e4;
-    } else if (cycle_index == 2 || cycle_index == 7) {
-      dt *= 1e3;
-    } else if (cycle_index == 3 || cycle_index == 6) {
-      dt *= 3.3e1;
-    } else if (cycle_index == 4 || cycle_index == 5) {
-      dt *= 1.0;
-    } else {
-    }
+    dt = VcycleTimeStep(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in, dt);
   }
   return dt;
 }
