@@ -1352,10 +1352,161 @@ void RadialBoundary(Mesh *pm) {
 
 Real AccTimeStep(Mesh *pm) {
   Real dt = pm->dt/pm->cfl_no;
-  if (acc->vcycle_n>0) {
-    dt = VcycleTimeStep(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in, dt);
+  if (acc->vcycle_n<=0) {
+    return dt;
   }
-  return dt;
+
+  Real rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
+  Real rbout = acc->rb_out;
+
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+
+  Real dt1 = std::numeric_limits<float>::max();
+  Real dt2 = std::numeric_limits<float>::max();
+  Real dt3 = std::numeric_limits<float>::max();
+
+  // capture class variables for kernel
+  bool is_mhd = (pmbp->pmhd != nullptr)? true : false;
+  auto &w0_ = (is_mhd)? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  auto &eos = (is_mhd)? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
+  auto &size = pmbp->pmb->mb_size;
+
+  auto &is_general_relativistic_ = pmbp->pcoord->is_general_relativistic;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+
+  if (is_mhd) {
+    // find smallest dx/(v +/- Cf) in each direction for mhd problems
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    Kokkos::parallel_reduce("AccMHDNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      int nx2 = indcs.nx2;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      int nx3 = indcs.nx3;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (is_general_relativistic_ && rbin <= 1.0) {
+        max_dv1 = 1.0;
+        max_dv2 = 1.0;
+        max_dv3 = 1.0;
+      } else if (rad >= rbin && rad < rbout) {
+        Real &w_d = w0_(m,IDN,k,j,i);
+        Real &w_bx = bcc0_(m,IBX,k,j,i);
+        Real &w_by = bcc0_(m,IBY,k,j,i);
+        Real &w_bz = bcc0_(m,IBZ,k,j,i);
+        Real cf;
+        Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+        if (eos.is_ideal) {
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_bx, w_by, w_bz);
+        } else {
+          cf = eos.IdealMHDFastSpeed(w_d, w_bx, w_by, w_bz);
+        }
+        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cf;
+
+        if (eos.is_ideal) {
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_by, w_bz, w_bx);
+        } else {
+          cf = eos.IdealMHDFastSpeed(w_d, w_by, w_bz, w_bx);
+        }
+        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cf;
+
+        if (eos.is_ideal) {
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_bz, w_bx, w_by);
+        } else {
+          cf = eos.IdealMHDFastSpeed(w_d, w_bz, w_bx, w_by);
+        }
+        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
+      }
+
+      min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+      min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+      min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+    }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+  } else {
+    // find smallest dx/(v +/- Cs) in each direction for hydrodynamic problems
+    Kokkos::parallel_reduce("AccHydroNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+
+      Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      int nx2 = indcs.nx2;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      int nx3 = indcs.nx3;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (is_general_relativistic_ && rbin <= 1.0) {
+        max_dv1 = 1.0;
+        max_dv2 = 1.0;
+        max_dv3 = 1.0;
+      } else if (rad >= rbin && rad < rbout) {
+        Real cs;
+        if (eos.is_ideal) {
+          Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+          cs = eos.IdealHydroSoundSpeed(w0_(m,IDN,k,j,i), p);
+        } else         {
+          cs = eos.iso_cs;
+        }
+        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cs;
+        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cs;
+        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cs;
+      }
+      min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+      min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+      min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+    }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+  }
+
+  // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems
+  Real dtnew = dt1;
+  if (pm->multi_d) { dtnew = std::min(dtnew, dt2); }
+  if (pm->three_d) { dtnew = std::min(dtnew, dt3); }
+
+  return dtnew;
 }
 
 //----------------------------------------------------------------------------------------
@@ -2017,6 +2168,7 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real &rdm = acc->r_dm;
   Real &rin = acc->r_in;
   Real grav = pmbp->punit->grav_constant();
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
 
   par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -2050,6 +2202,9 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     Real dmomx3 = dmomr*x3v/rad;
     Real denergy = bdt*w0(m,IDN,k,j,i)*accel/rad*
                   (w0(m,IVX,k,j,i)*x1v+w0(m,IVY,k,j,i)*x2v+w0(m,IVZ,k,j,i)*x3v);
+    if (is_gr) {
+      denergy = -denergy;
+    }
 
     u0(m,IM1,k,j,i) += dmomx1;
     u0(m,IM2,k,j,i) += dmomx2;
