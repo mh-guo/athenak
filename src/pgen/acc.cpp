@@ -172,13 +172,6 @@ Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
   r = (r<(10*rmin)) ? 0.0 : r;
   return r;
 }
-KOKKOS_INLINE_FUNCTION
-Real VcycleTimeStep(int i, int n, Real rmin, Real rmax, Real dt) {
-  Real r = VcycleRadius(i,n,rmin,rmax);
-  r = std::fmax(r,1.0);
-  Real fac = std::exp(-100.0*rmin/r);
-  return dt*(1.0-fac+fac*0.4*std::pow(r,1.4)); // assume v ~ r^-2/5 & Ma=2.5
-}
 
 //----------------------------------------------------------------------------------------
 //! \f computes gravitational acceleration
@@ -619,10 +612,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Convert conserved to primitives
   if (pmbp->phydro != nullptr) {
     pmbp->phydro->peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    pmbp->phydro->CopyCons(nullptr,1);
   } else if (pmbp->pmhd != nullptr) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
     pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    pmbp->pmhd->CopyCons(nullptr,1);
   }
 
   // TODO(@mhguo): read and interpolate data
@@ -632,10 +627,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     // Convert conserved to primitives
     if (pmbp->phydro != nullptr) {
       pmbp->phydro->peos->ConsToPrim(u0, w0, false, is, ie, js, je, ks, ke);
+      pmbp->phydro->CopyCons(nullptr,1);
     } else if (pmbp->pmhd != nullptr) {
       auto &bcc0_ = pmbp->pmhd->bcc0;
       auto &b0_ = pmbp->pmhd->b0;
       pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, is, ie, js, je, ks, ke);
+      pmbp->pmhd->CopyCons(nullptr,1);
     }
   }
 
@@ -1006,15 +1003,16 @@ void RadialBoundary(Mesh *pm) {
   auto &indcs = pm->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &ng = indcs.ng;
-  int n1 = indcs.nx1 + 2*ng;
-  int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
-  int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
-  int &is = indcs.is; int &ie = indcs.ie;
-  int &js = indcs.js; int &je = indcs.je;
-  int &ks = indcs.ks; int &ke = indcs.ke;
+  int &is = indcs.is; int &ie = indcs.ie, nx1 = indcs.nx1;
+  int &js = indcs.js; int &je = indcs.je, nx2 = indcs.nx2;
+  int &ks = indcs.ks; int &ke = indcs.ke, nx3 = indcs.nx3;
+  int n1 = nx1 + 2*ng;
+  int n2 = (nx2 > 1)? (nx2 + 2*ng) : 1;
+  int n3 = (nx3 > 1)? (nx3 + 2*ng) : 1;
 
   int nmb = pmbp->nmb_thispack;
   auto u0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  auto u1_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u1 : pmbp->phydro->u1;
   auto w0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
   bool is_mhd = false;
   DvceArray5D<Real> bcc;
@@ -1067,103 +1065,151 @@ void RadialBoundary(Mesh *pm) {
     std::cout << "rbin = " << rbin << std::endl;
   }
 
-  par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
-  KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
-    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+  if (bc_num == 1) {
+    par_for("initial_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
-    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
-    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-    if (rad < rin) {
-      u0_(m,IDN,k,j,i) = sinkd;
-      u0_(m,IEN,k,j,i) = sinke;
-      u0_(m,IM1,k,j,i) = 0.0;
-      u0_(m,IM2,k,j,i) = 0.0;
-      u0_(m,IM3,k,j,i) = 0.0;
-    }
+      Real x = rad/radentry;
+      Real rho = DensFnDevice(x,d_arr);
+      Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
 
-    // apply initial conditions to boundary cells
-    if (bc_num <=2 && (rad < rbin || rad > rbout)) {
-      HydCons1D u;
-      if (is_mhd) {
-        MHDPrim1D w;
-        if (bc_num == 1) {
-          Real x = rad/radentry;
-          Real rho = DensFnDevice(x,d_arr);
-          Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
+      // apply initial conditions to boundary cells
+      if (rad < rbin || rad > rbout) {
+        HydCons1D u;
+        if (is_mhd) {
+          MHDPrim1D w;
           w.d  = rho;
           w.vx = 0.0;
           w.vy = 0.0;
           w.vz = 0.0;
           w.e  = eint;
-        } else {
-          w.d  = w0_(m,IDN,k,j,i);
-          w.vx = w0_(m,IVX,k,j,i);
-          w.vy = w0_(m,IVY,k,j,i);
-          w.vz = w0_(m,IVZ,k,j,i);
-          w.e  = w0_(m,IEN,k,j,i);
-        }
-        // load cell-centered fields into primitive state
-        w.bx = bcc(m,IBX,k,j,i);
-        w.by = bcc(m,IBY,k,j,i);
-        w.bz = bcc(m,IBZ,k,j,i);
+          // load cell-centered fields into primitive state
+          w.bx = bcc(m,IBX,k,j,i);
+          w.by = bcc(m,IBY,k,j,i);
+          w.bz = bcc(m,IBZ,k,j,i);
 
-        // call p2c function
-        if (is_gr) {
-          Real glower[4][4], gupper[4][4];
-          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
-          SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+          // call p2c function
+          if (is_gr) {
+            Real glower[4][4], gupper[4][4];
+            ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+            SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+          } else {
+            SingleP2C_IdealMHD(w, u);
+          }
         } else {
-          SingleP2C_IdealMHD(w, u);
-        }
-      } else {
-        HydPrim1D w;
-        if (bc_num == 1) {
-          Real x = rad/radentry;
-          Real rho = DensFnDevice(x,d_arr);
-          Real eint = 0.5*k0*(1.0+pow(x,xi))*pow(rho,gamma)/gm1;
+          HydPrim1D w;
           w.d  = rho;
           w.vx = 0.0;
           w.vy = 0.0;
           w.vz = 0.0;
           w.e  = eint;
-        } else {
-          w.d  = w0_(m,IDN,k,j,i);
-          w.vx = w0_(m,IVX,k,j,i);
-          w.vy = w0_(m,IVY,k,j,i);
-          w.vz = w0_(m,IVZ,k,j,i);
-          w.e  = w0_(m,IEN,k,j,i);
-        }
 
-        // call p2c function
-        if (is_gr) {
-          Real glower[4][4], gupper[4][4];
-          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
-          SingleP2C_IdealGRHyd(glower, gupper, w, gamma, u);
-        } else {
-          SingleP2C_IdealHyd(w, u);
+          // call p2c function
+          if (is_gr) {
+            Real glower[4][4], gupper[4][4];
+            ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+            SingleP2C_IdealGRHyd(glower, gupper, w, gamma, u);
+          } else {
+            SingleP2C_IdealHyd(w, u);
+          }
         }
+        // store conserved quantities in 3D array
+        u0_(m,IDN,k,j,i) = u.d;
+        u0_(m,IM1,k,j,i) = u.mx;
+        u0_(m,IM2,k,j,i) = u.my;
+        u0_(m,IM3,k,j,i) = u.mz;
+        u0_(m,IEN,k,j,i) = u.e;
       }
-      // store conserved quantities in 3D array
-      u0_(m,IDN,k,j,i) = u.d;
-      u0_(m,IM1,k,j,i) = u.mx;
-      u0_(m,IM2,k,j,i) = u.my;
-      u0_(m,IM3,k,j,i) = u.mz;
-      u0_(m,IEN,k,j,i) = u.e;
+
+      if (rad < rin) {
+        u0_(m,IDN,k,j,i) = sinkd;
+        u0_(m,IEN,k,j,i) = sinke;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
+      }
+    });
+  }
+
+  if (bc_num == 2) {
+    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      // apply initial conditions to boundary cells
+      if (rad < rbin || rad > rbout) {
+        // store conserved quantities in 3D array
+        u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
+        u0_(m,IM1,k,j,i) = u1_(m,IM1,k,j,i);
+        u0_(m,IM2,k,j,i) = u1_(m,IM2,k,j,i);
+        u0_(m,IM3,k,j,i) = u1_(m,IM3,k,j,i);
+        u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
+      }
+
+      if (rad < rin) {
+        u0_(m,IDN,k,j,i) = sinkd;
+        u0_(m,IEN,k,j,i) = sinke;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
+      }
+    });
+
+    if (is_mhd) {
+      auto b0 = pmbp->pmhd->b0;
+      auto b1 = pmbp->pmhd->b1;
+      par_for("fixed_radial_b", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        Real &x1min = size.d_view(m).x1min;
+        Real &x1max = size.d_view(m).x1max;
+        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+        Real &x2min = size.d_view(m).x2min;
+        Real &x2max = size.d_view(m).x2max;
+        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+        Real &x3min = size.d_view(m).x3min;
+        Real &x3max = size.d_view(m).x3max;
+        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+        // TODO(@mhguo): will break the divergence-free constraint, i.e., divb!=0
+        if (rad < rbin || rad > rbout) {
+          // store conserved quantities in 3D array
+          // TODO(@hmhguo): only left face now
+          b0.x1f(m,k,j,i) = b1.x1f(m,k,j,i);
+          b0.x2f(m,k,j,i) = b1.x2f(m,k,j,i);
+          b0.x3f(m,k,j,i) = b1.x3f(m,k,j,i);
+        }
+      });
     }
-  });
+  }
 
   if (pmbp->pmhd != nullptr) {
     auto b0 = pmbp->pmhd->b0;
@@ -1172,15 +1218,15 @@ void RadialBoundary(Mesh *pm) {
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         Real &x1min = size.d_view(m).x1min;
         Real &x1max = size.d_view(m).x1max;
-        Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
         Real &x2min = size.d_view(m).x2min;
         Real &x2max = size.d_view(m).x2max;
-        Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
         Real &x3min = size.d_view(m).x3min;
         Real &x3max = size.d_view(m).x3max;
-        Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
@@ -1396,17 +1442,14 @@ Real AccTimeStep(Mesh *pm) {
 
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
       Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
       Real &x2min = size.d_view(m).x2min;
       Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
       Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
       Real &x3min = size.d_view(m).x3min;
       Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -1464,17 +1507,14 @@ Real AccTimeStep(Mesh *pm) {
 
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
       Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
       Real &x2min = size.d_view(m).x2min;
       Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
       Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
       Real &x3min = size.d_view(m).x3min;
       Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2156,9 +2196,9 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
               // const AthenaArray<Real> &press_arr, const AthenaArray<Real> &mom_arr)
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pmbp->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
   int nmb1 = pmbp->nmb_thispack - 1;
   auto size = pmbp->pmb->mb_size;
   Real &mbh = acc->m_bh;
@@ -2174,17 +2214,14 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2223,9 +2260,9 @@ void AddIniHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                 const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pmbp->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
   auto &size = pmbp->pmb->mb_size;
   int nmb1 = pmbp->nmb_thispack - 1;
   Real gamma = eos_data.gamma;
@@ -2246,17 +2283,14 @@ void AddIniHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2445,17 +2479,14 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2506,17 +2537,14 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2582,17 +2610,14 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
       Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
       Real &x2min = size.d_view(m).x2min;
       Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
       Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
       Real &x3min = size.d_view(m).x3min;
       Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2670,17 +2695,14 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2718,7 +2740,6 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 //! \brief Add heating source terms in the energy equations.
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 
-// TODO(@mhguo): add jet precession
 void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
   MeshBlockPack *pmbp = pm->pmb_pack;
@@ -2828,15 +2849,15 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
@@ -2862,15 +2883,15 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
     Real z = x1v*sin(jet_theta)*cos(jet_phi)+x2v*sin(jet_theta)*sin(jet_phi)+
@@ -2975,17 +2996,14 @@ void AddMdotHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
     Real &x2min = size.d_view(m).x2min;
     Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
