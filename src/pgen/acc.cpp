@@ -537,10 +537,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     // Convert conserved to primitives
     if (pmbp->phydro != nullptr) {
       pmbp->phydro->peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
+      pmbp->phydro->CopyCons(nullptr,1);
     } else if (pmbp->pmhd != nullptr) {
       auto &bcc0_ = pmbp->pmhd->bcc0;
       auto &b0_ = pmbp->pmhd->b0;
       pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+      pmbp->pmhd->CopyCons(nullptr,1);
     }
     if (global_variable::my_rank == 0) {
       std::cout << "UserProblem complete" << std::endl;
