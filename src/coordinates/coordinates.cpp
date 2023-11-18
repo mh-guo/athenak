@@ -20,11 +20,13 @@
 
 Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
     pmy_pack(ppack),
+    zone_mask("zone_mask",1,1,1,1),
     excision_floor("excision_floor",1,1,1,1),
     excision_flux("excision_flux",1,1,1,1) {
   // Check for relativistic dynamics
   is_special_relativistic = pin->GetOrAddBoolean("coord","special_rel",false);
   is_general_relativistic = pin->GetOrAddBoolean("coord","general_rel",false);
+  multi_zone = pin->GetOrAddBoolean("coord","multi_zone",false);
   if (is_special_relativistic && is_general_relativistic) {
     std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
               << "Cannot specify both SR and GR at same time" << std::endl;
@@ -60,6 +62,15 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
       Kokkos::realloc(excision_flux, nmb, ncells3, ncells2, ncells1);
       SetExcisionMasks(excision_floor, excision_flux);
     }
+  }
+  if (multi_zone) {
+    // boolean masks allocation
+    int nmb = ppack->nmb_thispack;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(zone_mask, nmb, ncells3, ncells2, ncells1);
   }
 }
 

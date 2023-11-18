@@ -42,6 +42,30 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto e3 = efld.x3e;
   auto &mbsize = pmy_pack->pmb->mb_size;
 
+  int &ng = indcs.ng;
+  bool &multi_zone = pmy_pack->pcoord->multi_zone;
+  auto zone_mask = pmy_pack->pcoord->zone_mask;
+  if (multi_zone) {
+    // fix E field
+    par_for("fix-efld", DevExeSpace(), 0, nmb1, ks-ng, ke+ng, js-ng, je+ng ,is-ng, ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (zone_mask(m,k,j,i)) {
+        e3(m,k,j,i) = 0.0;
+        e3(m,k,j,i+1) = 0.0;
+        e3(m,k,j+1,i) = 0.0;
+        e3(m,k,j+1,i+1) = 0.0;
+        e2(m,k,j,i) = 0.0;
+        e2(m,k,j,i+1) = 0.0;
+        e2(m,k+1,j,i) = 0.0;
+        e2(m,k+1,j,i+1) = 0.0;
+        e1(m,k,j,i) = 0.0;
+        e1(m,k,j+1,i) = 0.0;
+        e1(m,k+1,j,i) = 0.0;
+        e1(m,k+1,j+1,i) = 0.0;
+      }
+    });
+  }
+
   //---- update B1 (only for 2D/3D problems)
   if (multi_d) {
     auto bx1f = b0.x1f;

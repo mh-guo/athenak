@@ -77,6 +77,7 @@ struct pgenacc {
   Real rho_0, temp_0;
   Real k0_entry, xi_entry; // Parameters for entropy
   Real rad_entry, dens_entry; // Parameters for entropy
+  bool multi_zone; // multi-zone
   int vcycle_n; // number cycles in a V-cycle
   Real rb_in; // Inner boundary radius
   Real rb_out; // Outer boundary radius
@@ -293,7 +294,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else {
     return;
   }
+  acc->multi_zone = pin->GetOrAddBoolean("coord","multi_zone",false);
   acc->vcycle_n = pin->GetOrAddInteger("problem","vcycle_n",0);
+  if (acc->multi_zone) {
+    pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, acc->rb_in,
+                               std::numeric_limits<Real>::max());
+  }
   acc->user_bc_flag = pin->GetOrAddString("problem","bc_flag","none");
   if (acc->user_bc_flag == "none") {
     std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__  << std::endl
@@ -1181,36 +1187,6 @@ void RadialBoundary(Mesh *pm) {
         u0_(m,IM3,k,j,i) = 0.0;
       }
     });
-
-    if (is_mhd) {
-      auto b0 = pmbp->pmhd->b0;
-      auto b1 = pmbp->pmhd->b1;
-      par_for("fixed_radial_b", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        Real &x1min = size.d_view(m).x1min;
-        Real &x1max = size.d_view(m).x1max;
-        Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-        Real &x2min = size.d_view(m).x2min;
-        Real &x2max = size.d_view(m).x2max;
-        Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-        Real &x3min = size.d_view(m).x3min;
-        Real &x3max = size.d_view(m).x3max;
-        Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-
-        // TODO(@mhguo): will break the divergence-free constraint, i.e., divb!=0
-        if (rad < rbin || rad > rbout) {
-          // store conserved quantities in 3D array
-          // TODO(@hmhguo): only left face now
-          b0.x1f(m,k,j,i) = b1.x1f(m,k,j,i);
-          b0.x2f(m,k,j,i) = b1.x2f(m,k,j,i);
-          b0.x3f(m,k,j,i) = b1.x3f(m,k,j,i);
-        }
-      });
-    }
   }
 
   if (pmbp->pmhd != nullptr) {
@@ -1427,6 +1403,11 @@ Real AccTimeStep(Mesh *pm) {
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
+
+  if (acc->multi_zone) {
+    pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, rbin,
+                               std::numeric_limits<Real>::max());
+  }
 
   if (is_mhd) {
     // find smallest dx/(v +/- Cf) in each direction for mhd problems
