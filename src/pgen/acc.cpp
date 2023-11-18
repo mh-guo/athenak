@@ -1069,9 +1069,6 @@ void RadialBoundary(Mesh *pm) {
   if (acc->vcycle_n>0) {
     rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
   }
-  if (global_variable::my_rank == 0 && pm->ncycle % acc->ndiag == 0) {
-    std::cout << "rbin = " << rbin << std::endl;
-  }
 
   if (bc_num == 1) {
     par_for("initial_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
@@ -1381,6 +1378,9 @@ Real AccTimeStep(Mesh *pm) {
   }
 
   Real rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
+  if (global_variable::my_rank == 0 && pm->ncycle % acc->ndiag == 0) {
+    std::cout << "rbin = " << rbin << std::endl;
+  }
   Real rbout = acc->rb_out;
 
   MeshBlockPack *pmbp = pm->pmb_pack;
@@ -1973,9 +1973,9 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real dv_warm = (temp>=t_cold && temp<t_hot)? vol : 0.0;
     Real dv_hot = (temp>=t_hot)? vol : 0.0;
     Real dv_in = (rad>rin && rad<rin*1.2)? vol : 0.0;
-    Real dv_r0 = (rad>rin && rad<1.0e-3)? vol : 0.0;
-    Real dv_r1 = (rad>rin && rad<1.0e-2)? vol : 0.0;
-    Real dv_r2 = (rad>rin && rad<1.0e-1)? vol : 0.0;
+    Real dv_r0 = (rad>1.1*rin && rad<rin*1e1)? vol : 0.0;
+    Real dv_r1 = (rad>1.1*rin && rad<rin*1e2)? vol : 0.0;
+    Real dv_r2 = (rad>1.1*rin && rad<rin*1e3)? vol : 0.0;
 
     Real dv_inc = fmin(dv_in,dv_cold);
     Real dv_inw = fmin(dv_in,dv_warm);
