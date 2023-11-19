@@ -118,6 +118,11 @@ struct torus_pgen {
   Real potential_r_pow;                       // set how vector potential scales
   Real potential_beta_min;                    // set how vector potential scales (cont.)
   Real potential_rho_pow;                     // set vector potential dependence on rho
+  int  ndiag;                                 // number of cycles between diagnostics
+  bool multi_zone;                            // flag to indicate multi-zone problem
+  int  vcycle_n;                              // number of cycle in a V-cycle
+  int  user_bc_flag;                          // flag for user-defined BCs
+  Real rb_in;                                 // inner radius of radial boundary
 };
 
   torus_pgen torus;
@@ -127,6 +132,15 @@ struct torus_pgen {
 // Prototypes for user-defined BCs and history functions
 void NoInflowTorus(Mesh *pm);
 void TorusFluxes(HistoryData *pdata, Mesh *pm);
+void RadialBoundary(Mesh *pm);
+Real UsrTimeStep(Mesh *pm);
+KOKKOS_INLINE_FUNCTION
+Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
+  Real x = static_cast<Real>(i%n)/static_cast<Real>(n-1);
+  Real r = rmin*std::pow(rmax/rmin,fabs(1.0-2.0*x));
+  r = (r<(10*rmin)) ? 0.0 : r;
+  return r;
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
@@ -145,6 +159,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // User boundary function
   user_bcs_func = NoInflowTorus;
+  user_dt_func = UsrTimeStep;
 
   // capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -167,10 +182,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // pushing back the grids vector with additional SphericalGrid instances
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 100.0));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 1000.0));
   user_hist_func = TorusFluxes;
 
+  torus.ndiag = pin->GetOrAddInteger("problem", "ndiag", 1);
+  torus.multi_zone = pin->GetOrAddBoolean("problem", "multi_zone", false);
+  torus.vcycle_n = pin->GetOrAddInteger("problem", "vcycle_n", 0);
+  torus.user_bc_flag = pin->GetOrAddInteger("problem", "user_bc_flag", 0);
+  torus.rb_in = pin->GetOrAddReal("problem", "rb_in", 0.0);
+
   // return if restart
-  if (restart) return;
+  if (restart) {
+    // Convert conserved to primitives
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->CopyCons(nullptr,1);
+    } else if (pmbp->pmhd != nullptr) {
+      pmbp->pmhd->CopyCons(nullptr,1);
+    }
+    return;
+  }
 
   // Select either Hydro or MHD
   DvceArray5D<Real> u0_, w0_;
@@ -784,9 +815,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Convert primitives to conserved
   if (pmbp->phydro != nullptr) {
     pmbp->phydro->peos->PrimToCons(w0_, u0_, is, ie, js, je, ks, ke);
+    pmbp->phydro->CopyCons(nullptr,1);
   } else if (pmbp->pmhd != nullptr) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0_, bcc0_, u0_, is, ie, js, je, ks, ke);
+    pmbp->pmhd->CopyCons(nullptr,1);
   }
 
   return;
@@ -1383,6 +1416,10 @@ void NoInflowTorus(Mesh *pm) {
   int &ks = indcs.ks;  int &ke  = indcs.ke;
   auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
 
+  auto pmbp = pm->pmb_pack;
+  auto &size = pmbp->pmb->mb_size;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+
   // Select either Hydro or MHD
   DvceArray5D<Real> u0_, w0_;
   if (pm->pmb_pack->phydro != nullptr) {
@@ -1394,6 +1431,7 @@ void NoInflowTorus(Mesh *pm) {
   }
   int nmb = pm->pmb_pack->nmb_thispack;
   int nvar = u0_.extent_int(1);
+  auto u1_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u1 : pmbp->phydro->u1;
 
   // Determine if radiation is enabled
   const bool is_radiation_enabled = (pm->pmb_pack->prad != nullptr);
@@ -1401,6 +1439,42 @@ void NoInflowTorus(Mesh *pm) {
   if (is_radiation_enabled) {
     i0_ = pm->pmb_pack->prad->i0;
     nang1 = pm->pmb_pack->prad->prgeo->nangles - 1;
+  }
+
+  int bc_flag = torus.user_bc_flag;
+  // 1: fixed radial boundary
+  Real rbin = torus.rb_in;
+
+  if (torus.vcycle_n>0) {
+    rbin = VcycleRadius(pm->ncycle, torus.vcycle_n, 1.0, torus.rb_in);
+  }
+  if (bc_flag == 1) {
+    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      // apply initial conditions to boundary cells
+      if (rad < rbin) {
+        // store conserved quantities in 3D array
+        u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
+        u0_(m,IM1,k,j,i) = u1_(m,IM1,k,j,i);
+        u0_(m,IM2,k,j,i) = u1_(m,IM2,k,j,i);
+        u0_(m,IM3,k,j,i) = u1_(m,IM3,k,j,i);
+        u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
+      }
+    });
   }
 
   // X1-Boundary
@@ -1838,4 +1912,225 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   }
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn RadialBoundary
+//! \brief Sets boundary condition on surfaces of computational domain and radial regions
+// Quantities are held fixed to sink cell for r<r_in
+// Quantities at boundaryies are held fixed to initial condition values
+// for r<rb_in and r>rb_out
+
+void RadialBoundary(Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  auto &size = pmbp->pmb->mb_size;
+  int &ng = indcs.ng;
+  int &is = indcs.is; int &ie = indcs.ie, nx1 = indcs.nx1;
+  int &js = indcs.js; int &je = indcs.je, nx2 = indcs.nx2;
+  int &ks = indcs.ks; int &ke = indcs.ke, nx3 = indcs.nx3;
+  int n1 = nx1 + 2*ng;
+  int n2 = (nx2 > 1)? (nx2 + 2*ng) : 1;
+  int n3 = (nx3 > 1)? (nx3 + 2*ng) : 1;
+
+  int nmb = pmbp->nmb_thispack;
+  auto u0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  auto u1_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u1 : pmbp->phydro->u1;
+  auto w0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+
+  DvceArray5D<Real> bcc;
+  if (pmbp->pmhd != nullptr) {
+    // TODO(@mhguo) using bcc is not good here because b0 is already updated
+    bcc = pmbp->pmhd->bcc0;
+  }
+  auto &mb_bcs = pmbp->pmb->mb_bcs;
+  int nvar = u0_.extent_int(1);
+
+  int bc_flag = torus.user_bc_flag;
+  // 1: initial, 2: fixed, 3: outflow
+  int bc_num = 0;
+  if (bc_flag == 1 || bc_flag == 2 || bc_flag == 3) {
+    bc_num = bc_flag;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "User specified torus.user_bc_flag is not valid"
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  Real rbin = torus.rb_in;
+
+  //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
+  //std::cout << tmp << std::endl;
+  if (torus.vcycle_n>0) {
+    rbin = VcycleRadius(pm->ncycle, torus.vcycle_n, 1.0, torus.rb_in);
+  }
+  if (global_variable::my_rank == 0 && pm->ncycle % torus.ndiag == 0) {
+    std::cout << "rbin = " << rbin << std::endl;
+  }
+
+  if (bc_num == 2) {
+    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      // apply initial conditions to boundary cells
+      if (rad < rbin) {
+        // store conserved quantities in 3D array
+        u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
+        u0_(m,IM1,k,j,i) = u1_(m,IM1,k,j,i);
+        u0_(m,IM2,k,j,i) = u1_(m,IM2,k,j,i);
+        u0_(m,IM3,k,j,i) = u1_(m,IM3,k,j,i);
+        u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
+      }
+    });
+  }
+
+  if (pmbp->pmhd != nullptr) {
+    auto b0 = pmbp->pmhd->b0;
+    // outflow condition
+    par_for("outflow_bfield_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
+        b0.x1f(m,k,j,is-i-1) = b0.x1f(m,k,j,is);
+        b0.x2f(m,k,j,is-i-1) = b0.x2f(m,k,j,is);
+        if (j == n2-1) {b0.x2f(m,k,j+1,is-i-1) = b0.x2f(m,k,j+1,is);}
+        b0.x3f(m,k,j,is-i-1) = b0.x3f(m,k,j,is);
+        if (k == n3-1) {b0.x3f(m,k+1,j,is-i-1) = b0.x3f(m,k+1,j,is);}
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
+        b0.x1f(m,k,j,ie+i+2) = b0.x1f(m,k,j,ie+1);
+        b0.x2f(m,k,j,ie+i+1) = b0.x2f(m,k,j,ie);
+        if (j == n2-1) {b0.x2f(m,k,j+1,ie+i+1) = b0.x2f(m,k,j+1,ie);}
+        b0.x3f(m,k,j,ie+i+1) = b0.x3f(m,k,j,ie);
+        if (k == n3-1) {b0.x3f(m,k+1,j,ie+i+1) = b0.x3f(m,k+1,j,ie);}
+      }
+    });
+
+    par_for("outflow_bfield_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
+        b0.x1f(m,k,js-j-1,i) = b0.x1f(m,k,js,i);
+        if (i == n1-1) {b0.x1f(m,k,js-j-1,i+1) = b0.x1f(m,k,js,i+1);}
+        b0.x2f(m,k,js-j-1,i) = b0.x2f(m,k,js,i);
+        b0.x3f(m,k,js-j-1,i) = b0.x3f(m,k,js,i);
+        if (k == n3-1) {b0.x3f(m,k+1,js-j-1,i) = b0.x3f(m,k+1,js,i);}
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
+        b0.x1f(m,k,je+j+1,i) = b0.x1f(m,k,je,i);
+        if (i == n1-1) {b0.x1f(m,k,je+j+1,i+1) = b0.x1f(m,k,je,i+1);}
+        b0.x2f(m,k,je+j+2,i) = b0.x2f(m,k,je+1,i);
+        b0.x3f(m,k,je+j+1,i) = b0.x3f(m,k,je,i);
+        if (k == n3-1) {b0.x3f(m,k+1,je+j+1,i) = b0.x3f(m,k+1,je,i);}
+      }
+    });
+
+    par_for("outflow_bfield_x3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+        b0.x1f(m,ks-k-1,j,i) = b0.x1f(m,ks,j,i);
+        if (i == n1-1) {b0.x1f(m,ks-k-1,j,i+1) = b0.x1f(m,ks,j,i+1);}
+        b0.x2f(m,ks-k-1,j,i) = b0.x2f(m,ks,j,i);
+        if (j == n2-1) {b0.x2f(m,ks-k-1,j+1,i) = b0.x2f(m,ks,j+1,i);}
+        b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i);
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
+        b0.x1f(m,ke+k+1,j,i) = b0.x1f(m,ke,j,i);
+        if (i == n1-1) {b0.x1f(m,ke+k+1,j,i+1) = b0.x1f(m,ke,j,i+1);}
+        b0.x2f(m,ke+k+1,j,i) = b0.x2f(m,ke,j,i);
+        if (j == n2-1) {b0.x2f(m,ke+k+1,j+1,i) = b0.x2f(m,ke,j+1,i);}
+        b0.x3f(m,ke+k+2,j,i) = b0.x3f(m,ke+1,j,i);
+      }
+    });
+  }
+  return;
+}
+
+Real UsrTimeStep(Mesh *pm) {
+  Real dt = pm->dt/pm->cfl_no;
+  if (torus.vcycle_n<=0) {
+    return dt;
+  }
+
+  Real rbin = VcycleRadius(pm->ncycle, torus.vcycle_n, 1.0, torus.rb_in);
+  if (global_variable::my_rank == 0 && pm->ncycle % torus.ndiag == 0) {
+    std::cout << "rbin = " << rbin << std::endl;
+  }
+
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+
+  Real dt1 = std::numeric_limits<float>::max();
+  Real dt2 = std::numeric_limits<float>::max();
+  Real dt3 = std::numeric_limits<float>::max();
+
+  // capture class variables for kernel
+  auto &size = pmbp->pmb->mb_size;
+
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+
+  if (pmbp->pcoord->multi_zone) {
+    pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, rbin,
+                               std::numeric_limits<Real>::max());
+  }
+
+  // find smallest dx/(v +/- Cf) in each direction for mhd problems
+  Kokkos::parallel_reduce("TorusNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+    // compute m,k,j,i indices of thread and call function
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+    Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    if (rad >= rbin) {
+      max_dv1 = 1.0;
+      max_dv2 = 1.0;
+      max_dv3 = 1.0;
+    }
+    min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+    min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+    min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+  }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+
+  // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems
+  Real dtnew = dt1;
+  if (pm->multi_d) { dtnew = std::min(dtnew, dt2); }
+  if (pm->three_d) { dtnew = std::min(dtnew, dt3); }
+  
+
+  return dtnew;
 }
