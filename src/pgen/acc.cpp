@@ -61,27 +61,31 @@ struct pgenacc {
   Real grav;  // gravitational constant in code unit
   Real r_refine; // mesh refinement radius
   Real dens_refine;
+  int  ncycle_amr;
+  int  beg_level;
+  int  end_level;
   Real tfloor;
   Real heat_tceiling;
   Real gamma;    // EOS parameters
   bool potential;
-  Real m_bh;
   Real r_in;     // inner radius
   Real r_in_old; // inner radius for restarting
   Real r_in_new; // inner radius for restarting
   Real r_in_beg_t; // start changing inner radius
   Real r_in_sof_t; // time for changing inner radius
+  Real m_bh;
   Real m_star, r_star;
   Real m_dm, r_dm;
-  Real sink_d, sink_t;
   Real rho_0, temp_0;
   Real k0_entry, xi_entry; // Parameters for entropy
   Real rad_entry, dens_entry; // Parameters for entropy
-  bool multi_zone; // multi-zone
-  int vcycle_n; // number cycles in a V-cycle
+  int  sink_flag; // Sink condition
+  Real sink_d, sink_t; // Parameters for sink
+  int  user_bc_flag; // Boundary condition
   Real rb_in; // Inner boundary radius
   Real rb_out; // Outer boundary radius
-  std::string user_bc_flag; // Boundary condition
+  bool multi_zone; // multi-zone
+  int  vcycle_n; // number cycles in a V-cycle
   Real dt_floor; // floor of timestep
   Real sink_dt_floor; // floor of timestep
   bool turb; // turbulence
@@ -96,8 +100,8 @@ struct pgenacc {
   Real heatnorm;
   Real fac_heat;
   bool heating_equ;
-  int heat_weight;
-  int bins_heat;
+  int  heat_weight;
+  int  bins_heat;
   Real rmin_heat;
   Real rmax_heat;
   Real logr_heat;
@@ -107,8 +111,8 @@ struct pgenacc {
   Real mdot_dr;
   Real heat_beg_time;
   Real heat_sof_time; // soft time
-  int heat_cycle; // heating rate updating cycle
-  int ndiag;
+  int  heat_cycle; // heating rate updating cycle
+  int  ndiag;
   Real t_cold;  // criterion of cold gas
   Real tf_hot;  // criterion of hot gas as fraction of initial temperature
   bool heating_jet; // turn on jet heating
@@ -172,6 +176,14 @@ Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
   Real r = rmin*std::pow(rmax/rmin,fabs(1.0-2.0*x));
   r = (r<(10*rmin)) ? 0.0 : r;
   return r;
+}
+KOKKOS_INLINE_FUNCTION
+int AMRLevel(int i, int n, int lbeg, int lend) {
+  int nlevel = abs(lend-lbeg)+1;
+  int j = static_cast<int>(i/n)%(2*(nlevel));
+  int sign = (lend>lbeg) ? 1 : -1;
+  int level = (j<(nlevel)) ? lbeg+sign*j : lend-sign*(j-nlevel);
+  return level;
 }
 
 //----------------------------------------------------------------------------------------
@@ -255,13 +267,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
   acc->r_refine = pin->GetOrAddReal("problem","r_refine",0.0);
   acc->dens_refine = pin->GetOrAddReal("problem","dens_refine",0.0);
+  acc->ncycle_amr = pin->GetOrAddInteger("problem","ncycle_amr",0);
+  acc->beg_level = pin->GetOrAddInteger("problem","beg_level",0);
+  acc->end_level = pin->GetOrAddInteger("problem","end_level",0);
   acc->ndiag = pin->GetOrAddInteger("problem","ndiag",-1);
   acc->rho_0 = pin->GetOrAddReal("problem","dens",1.0);
   Real temp_kelvin = pin->GetOrAddReal("problem","temp",1.0);
   bool rst_flag = pin->GetOrAddBoolean("problem","rst",false);
 
   if (acc->potential) {
-    acc->m_bh = pin->GetReal("problem","m_bh");
     acc->r_in = pin->GetReal("problem","r_in");
     acc->r_in_old = pin->GetOrAddReal("problem","r_in_old",acc->r_in);
     acc->r_in_new = pin->GetOrAddReal("problem","r_in_new",acc->r_in);
@@ -279,16 +293,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         acc->r_in = acc->r_in_new;
       }
     }
+    acc->m_bh = pin->GetReal("problem","m_bh");
     acc->m_star = pin->GetReal("problem","m_star");
     acc->r_star = pin->GetReal("problem","r_star");
     acc->m_dm = pin->GetReal("problem","m_dm");
     acc->r_dm = pin->GetReal("problem","r_dm");
-    acc->sink_d = pin->GetReal("problem","sink_d");
-    acc->sink_t = pin->GetReal("problem","sink_t");
     acc->rad_entry = pin->GetReal("problem","rad_entry");
     acc->dens_entry = pin->GetReal("problem","dens_entry");
     acc->k0_entry = pin->GetReal("problem","k0_entry");
     acc->xi_entry = pin->GetReal("problem","xi_entry");
+    acc->sink_d = pin->GetReal("problem","sink_d");
+    acc->sink_t = pin->GetReal("problem","sink_t");
     acc->rb_in = pin->GetOrAddReal("problem","rb_in",0.0);
     acc->rb_out = pin->GetOrAddReal("problem","rb_out",std::numeric_limits<Real>::max());
   } else {
@@ -300,11 +315,21 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, acc->rb_in,
                                std::numeric_limits<Real>::max());
   }
-  acc->user_bc_flag = pin->GetOrAddString("problem","bc_flag","none");
-  if (acc->user_bc_flag == "none") {
-    std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__  << std::endl
-              << "Boundary condition is not set!" << std::endl
-              << "Please set either initial, fixed or outflow!" << std::endl;
+  std::string bc_flag = pin->GetOrAddString("problem","bc_flag","none");
+  if (bc_flag == "initial") { acc->user_bc_flag = 1;
+  } else if (bc_flag == "fixed") { acc->user_bc_flag = 2;
+  } else if (bc_flag == "outflow") { acc->user_bc_flag = 3;
+  } else {
+    std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Unknown boundary condition flag: " << bc_flag << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  std::string sink_flag = pin->GetOrAddString("problem","sink_flag","vaccum");
+  if (sink_flag == "vaccum") { acc->sink_flag = 1;
+  } else if (sink_flag == "soft") { acc->sink_flag = 2;
+  } else {
+    std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Unknown sink condition flag: " << sink_flag << std::endl;
     std::exit(EXIT_FAILURE);
   }
   acc->turb = pin->GetOrAddBoolean("problem","turb",false);
@@ -1033,20 +1058,8 @@ void RadialBoundary(Mesh *pm) {
   int nvar = u0_.extent_int(1);
 
   auto &d_arr = acc->dens_arr;
-  std::string bc_flag = acc->user_bc_flag;
-  int bc_num = 0;
-  if (bc_flag == "initial") {
-    bc_num = 1;
-  } else if (bc_flag == "fixed") {
-    bc_num = 2;
-  } else if (bc_flag == "outflow") {
-    bc_num = 3;
-  } else {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "Unknown boundary condition flag: " << bc_flag
-              << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
+  int sink_flag = acc->sink_flag;
+  int bc_flag = acc->user_bc_flag;
   Real &gamma=acc->gamma;
   Real gm1=(acc->gamma-1.0);
   Real &radentry = acc->rad_entry;
@@ -1070,7 +1083,7 @@ void RadialBoundary(Mesh *pm) {
     rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
   }
 
-  if (bc_num == 1) {
+  if (bc_flag == 1) {
     par_for("initial_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real &x1min = size.d_view(m).x1min;
@@ -1140,16 +1153,25 @@ void RadialBoundary(Mesh *pm) {
       }
 
       if (rad < rin) {
-        u0_(m,IDN,k,j,i) = sinkd;
-        u0_(m,IEN,k,j,i) = sinke;
-        u0_(m,IM1,k,j,i) = 0.0;
-        u0_(m,IM2,k,j,i) = 0.0;
-        u0_(m,IM3,k,j,i) = 0.0;
+        if (sink_flag == 1) {
+          u0_(m,IDN,k,j,i) = sinkd;
+          u0_(m,IEN,k,j,i) = sinke;
+          u0_(m,IM1,k,j,i) = 0.0;
+          u0_(m,IM2,k,j,i) = 0.0;
+          u0_(m,IM3,k,j,i) = 0.0;
+        } else if (sink_flag == 2) {
+          u0_(m,IDN,k,j,i) = fmax(0.9*u0_(m,IDN,k,j,i),sinkd);
+          u0_(m,IEN,k,j,i) = sinke;
+          u0_(m,IM1,k,j,i) *= 0.9;
+          u0_(m,IM2,k,j,i) *= 0.9;
+          u0_(m,IM3,k,j,i) *= 0.9;
+        }
       }
     });
   }
 
-  if (bc_num == 2) {
+  bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
+  if (bc_flag == 2 && !refining) {
     par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real &x1min = size.d_view(m).x1min;
@@ -1177,11 +1199,19 @@ void RadialBoundary(Mesh *pm) {
       }
 
       if (rad < rin) {
-        u0_(m,IDN,k,j,i) = sinkd;
-        u0_(m,IEN,k,j,i) = sinke;
-        u0_(m,IM1,k,j,i) = 0.0;
-        u0_(m,IM2,k,j,i) = 0.0;
-        u0_(m,IM3,k,j,i) = 0.0;
+        if (sink_flag == 1) {
+          u0_(m,IDN,k,j,i) = sinkd;
+          u0_(m,IEN,k,j,i) = sinke;
+          u0_(m,IM1,k,j,i) = 0.0;
+          u0_(m,IM2,k,j,i) = 0.0;
+          u0_(m,IM3,k,j,i) = 0.0;
+        } else if (sink_flag == 2) {
+          u0_(m,IDN,k,j,i) = fmax(0.9*u0_(m,IDN,k,j,i),sinkd);
+          u0_(m,IEN,k,j,i) = sinke;
+          u0_(m,IM1,k,j,i) *= 0.9;
+          u0_(m,IM2,k,j,i) *= 0.9;
+          u0_(m,IM3,k,j,i) *= 0.9;
+        }
       }
     });
   }
@@ -1287,7 +1317,7 @@ void RadialBoundary(Mesh *pm) {
   // fixed condition: do nothing
   // if (bc_flag == "fixed") {}
   // outlfow condition
-  if (bc_num == 3) {
+  if (bc_flag == 3) {
     // ConsToPrim over all ghost zones *and* at the innermost/outermost X1-active zones
     // of Meshblocks, even if Meshblock face is not at the edge of computational domain
     if (pmbp->phydro != nullptr) {
@@ -1538,9 +1568,9 @@ Real AccTimeStep(Mesh *pm) {
 
 void AccRefine(MeshBlockPack* pmbp) {
   // capture variables for kernels
-  Mesh *pmesh = pmbp->pmesh;
+  Mesh *pm = pmbp->pmesh;
   auto &size = pmbp->pmb->mb_size;
-  auto &indcs = pmesh->mb_indcs;
+  auto &indcs = pm->mb_indcs;
   int &is = indcs.is, nx1 = indcs.nx1;
   int &js = indcs.js, nx2 = indcs.nx2;
   int &ks = indcs.ks, nx3 = indcs.nx3;
@@ -1548,12 +1578,12 @@ void AccRefine(MeshBlockPack* pmbp) {
   const int nji  = nx2*nx1;
 
   // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
-  auto refine_flag_ = pmesh->pmr->refine_flag;
+  auto refine_flag_ = pm->pmr->refine_flag;
   Real &rad_thresh  = acc->r_refine;
   Real &dens_thresh = acc->dens_refine;
   int nmb = pmbp->nmb_thispack;
-  int mbs = pmesh->gids_eachrank[global_variable::my_rank];
-  if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
+  int mbs = pm->gids_eachrank[global_variable::my_rank];
+  if (acc->ncycle_amr==0) {
     if (global_variable::my_rank == 0) {printf("AccRefine\n");}
     auto &w0 = (pmbp->phydro != nullptr)? pmbp->phydro->w0 : pmbp->pmhd->w0;
     par_for_outer("AccRefineCond",DevExeSpace(), 0, 0, 0, (nmb-1),
@@ -1598,6 +1628,45 @@ void AccRefine(MeshBlockPack* pmbp) {
       //if (rad_min > rad_thresh) {refine_flag_.d_view(m+mbs) = -1;}
     });
   }
+
+  if (acc->ncycle_amr>0 && pm->ncycle % acc->ncycle_amr == 0) {
+    int root_level = pm->root_level;
+    int ncycle=pm->ncycle, ncycle_amr=acc->ncycle_amr;
+    int old_level = AMRLevel(ncycle-1, ncycle_amr, acc->beg_level, acc->end_level);
+    int new_level = AMRLevel(ncycle, ncycle_amr, acc->beg_level, acc->end_level);
+    DualArray1D<int> levels_thisrank("levels_thisrank", nmb);
+    if (global_variable::my_rank == 0) {
+      std::cout << "AccRefine: ncycle= " << ncycle << " old_level= " << old_level
+                << " new_level= " << new_level << std::endl;
+    }
+    for (int m=0; m<nmb; ++m) {
+      levels_thisrank.h_view(m) = pm->lloc_eachmb[m+mbs].level;
+    }
+    levels_thisrank.template modify<HostMemSpace>();
+    levels_thisrank.template sync<DevExeSpace>();
+    par_for_outer("AccRefineLevel",DevExeSpace(), 0, 0, 0, (nmb-1),
+    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
+      Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
+      Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
+      Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
+      if (levels_thisrank.d_view(m+mbs) == old_level+root_level) {
+        if (new_level > old_level) {
+          if (rad_min < rad_thresh) {
+            refine_flag_.d_view(m+mbs) = 1;
+          }
+        } else if (new_level < old_level) {
+          refine_flag_.d_view(m+mbs) = -1;
+        }
+      }
+    });
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -1631,7 +1700,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   //const int nflux = (is_mhd) ? 7 : 6;
-  const int nflux = 9;
+  const int nflux = 10;
   // TODO(@mhguo): check what is necessary!
   // TODO(@mhguo): In the long run, it would be great if we can directly plot radial
   // TODO(@mhguo): profiles using history variables. We may need around 10 points and
@@ -1672,10 +1741,11 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     pdata->label[nflux*g+2] = "mdout" + rstr;
     pdata->label[nflux*g+3] = "mdh" + rstr;
     pdata->label[nflux*g+4] = "edot" + rstr;
-    pdata->label[nflux*g+5] = "lx" + rstr;
-    pdata->label[nflux*g+6] = "ly" + rstr;
-    pdata->label[nflux*g+7] = "lz" + rstr;
-    pdata->label[nflux*g+8] = "phi" + rstr;
+    pdata->label[nflux*g+5] = "edout" + rstr;
+    pdata->label[nflux*g+6] = "lx" + rstr;
+    pdata->label[nflux*g+7] = "ly" + rstr;
+    pdata->label[nflux*g+8] = "lz" + rstr;
+    pdata->label[nflux*g+9] = "phi" + rstr;
   }
   for (int n=0; n<nreduce; ++n) {
     pdata->label[n+nsph] = data_label[n];
@@ -1804,19 +1874,20 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         // compute energy flux
         Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
         pdata->hdata[nflux*g+4] += 1.0*t1_0*sqrtmdet*domega;
+        pdata->hdata[nflux*g+5] += is_out*t1_0*sqrtmdet*domega;
 
         // compute angular momentum flux
         // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
         Real t1_1 = 0.0;
         Real t1_2 = 0.0;
         Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
-        pdata->hdata[nflux*g+5] += t1_1*sqrtmdet*domega;
-        pdata->hdata[nflux*g+6] += t1_2*sqrtmdet*domega;
-        pdata->hdata[nflux*g+7] += t1_3*sqrtmdet*domega;
+        pdata->hdata[nflux*g+6] += t1_1*sqrtmdet*domega;
+        pdata->hdata[nflux*g+7] += t1_2*sqrtmdet*domega;
+        pdata->hdata[nflux*g+8] += t1_3*sqrtmdet*domega;
 
         // compute magnetic flux
         if (is_mhd) {
-          pdata->hdata[nflux*g+8] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+          pdata->hdata[nflux*g+9] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
         }
       }
     } else {
@@ -1875,16 +1946,17 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         // TODO(@mhguo): check whether this is correct!
         Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
         pdata->hdata[nflux*g+4] += 1.0*t1_0*r_sq*domega;
+        pdata->hdata[nflux*g+5] += is_out*t1_0*r_sq*domega;
 
         // compute angular momentum flux
         // TODO(@mhguo): check whether this is correct!
-        pdata->hdata[nflux*g+5] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
-        pdata->hdata[nflux*g+6] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
-        pdata->hdata[nflux*g+7] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
+        pdata->hdata[nflux*g+6] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+        pdata->hdata[nflux*g+7] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+        pdata->hdata[nflux*g+8] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
 
         // compute magnetic flux
         if (is_mhd) {
-          pdata->hdata[nflux*g+8] += 0.5*fabs(br)*r_sq*domega;
+          pdata->hdata[nflux*g+9] += 0.5*fabs(br)*r_sq*domega;
         }
       }
     }
@@ -2350,58 +2422,66 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     bool sub_cycling = true;
     bool sub_cycling_used = false;
     Real bdt_now = 0.0;
-    if (is_gr) sub_cycling = false;
-    do {
+    if (is_gr) {
       Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
       // soft function
       lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
       Real cooling_heating = dens * dens * lambda_cooling;
-      Real dt_cool = (eint/(FLT_MIN + fabs(cooling_heating)));
-      // half of the timestep
-      Real bdt_cool = 0.5*beta*cfl_no*dt_cool;
-      if (bdt_now+bdt_cool<bdt) {
-        u0(m,IEN,k,j,i) -= bdt_cool * cooling_heating;
+      // conserve energy is minus sign
+      u0(m,IEN,k,j,i) += bdt * cooling_heating;
+    } else {
+      do {
+        Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
+        // soft function
+        lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
+        Real cooling_heating = dens * dens * lambda_cooling;
+        Real dt_cool = (eint/(FLT_MIN + fabs(cooling_heating)));
+        // half of the timestep
+        Real bdt_cool = 0.5*beta*cfl_no*dt_cool;
+        if (bdt_now+bdt_cool<bdt) {
+          u0(m,IEN,k,j,i) -= bdt_cool * cooling_heating;
 
-        // compute new temperature and internal energy
+          // compute new temperature and internal energy
 
-        // load single state conserved variables
-        HydPrim1D w;
-        if (is_hydro) {
-          HydCons1D u;
-          u.d  = u0(m,IDN,k,j,i);
-          u.mx = u0(m,IM1,k,j,i);
-          u.my = u0(m,IM2,k,j,i);
-          u.mz = u0(m,IM3,k,j,i);
-          u.e  = u0(m,IEN,k,j,i);
-          // call c2p function
-          bool dfloor_used=false, efloor_used=false, tfloor_used=false;
-          SingleC2P_IdealHyd(u, eos, w, dfloor_used, efloor_used, tfloor_used);
+          // load single state conserved variables
+          HydPrim1D w;
+          if (is_hydro) {
+            HydCons1D u;
+            u.d  = u0(m,IDN,k,j,i);
+            u.mx = u0(m,IM1,k,j,i);
+            u.my = u0(m,IM2,k,j,i);
+            u.mz = u0(m,IM3,k,j,i);
+            u.e  = u0(m,IEN,k,j,i);
+            // call c2p function
+            bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+            SingleC2P_IdealHyd(u, eos, w, dfloor_used, efloor_used, tfloor_used);
+          } else {
+            MHDCons1D u;
+            u.d  = u0(m,IDN,k,j,i);
+            u.mx = u0(m,IM1,k,j,i);
+            u.my = u0(m,IM2,k,j,i);
+            u.mz = u0(m,IM3,k,j,i);
+            u.e  = u0(m,IEN,k,j,i);
+            u.bx = bcc(m,IBX,k,j,i);
+            u.by = bcc(m,IBY,k,j,i);
+            u.bz = bcc(m,IBZ,k,j,i);
+            // call c2p function
+            bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+            SingleC2P_IdealMHD(u, eos, w, dfloor_used, efloor_used, tfloor_used);
+          }
+
+          dens = w.d;
+          temp = gm1*w.e/w.d;
+          eint = w.e;
+          sub_cycling_used = true;
+          sum1++;
         } else {
-          MHDCons1D u;
-          u.d  = u0(m,IDN,k,j,i);
-          u.mx = u0(m,IM1,k,j,i);
-          u.my = u0(m,IM2,k,j,i);
-          u.mz = u0(m,IM3,k,j,i);
-          u.e  = u0(m,IEN,k,j,i);
-          u.bx = bcc(m,IBX,k,j,i);
-          u.by = bcc(m,IBY,k,j,i);
-          u.bz = bcc(m,IBZ,k,j,i);
-          // call c2p function
-          bool dfloor_used=false, efloor_used=false, tfloor_used=false;
-          SingleC2P_IdealMHD(u, eos, w, dfloor_used, efloor_used, tfloor_used);
+          u0(m,IEN,k,j,i) -= (bdt-bdt_now) * cooling_heating;
+          sub_cycling = false;
         }
-
-        dens = w.d;
-        temp = gm1*w.e/w.d;
-        eint = w.e;
-        sub_cycling_used = true;
-        sum1++;
-      } else {
-        u0(m,IEN,k,j,i) -= (bdt-bdt_now) * cooling_heating;
-        sub_cycling = false;
-      }
-      bdt_now += bdt_cool;
-    } while (sub_cycling);
+        bdt_now += bdt_cool;
+      } while (sub_cycling);
+    }
     if (sub_cycling_used) {
       sum0++;
     }

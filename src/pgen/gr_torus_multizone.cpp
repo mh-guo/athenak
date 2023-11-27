@@ -2130,7 +2130,6 @@ Real UsrTimeStep(Mesh *pm) {
   Real dtnew = dt1;
   if (pm->multi_d) { dtnew = std::min(dtnew, dt2); }
   if (pm->three_d) { dtnew = std::min(dtnew, dt3); }
-  
 
   return dtnew;
 }
