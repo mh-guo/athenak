@@ -130,6 +130,9 @@ struct pgenacc {
   Real stellar_rmax; // maximum radius of stellar feedback
   Real stellar_mdot; // mass loss rate of stellar feedback
   Real stellar_edot; // energy injection rate of stellar feedback
+  int  hist_nr;      // number of radial bins for history
+  Real hist_amin;    // minimum relative radius of history
+  Real hist_amax;    // maximum relative radius of history
   DualArray1D<Real> dens_arr;
   DualArray1D<Real> logcooling_arr;
   array_acc::RadSum v_arr;
@@ -474,10 +477,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  int hist_nr = pin->GetOrAddInteger("problem","hist_nr",4);
+  int hist_nr = acc->hist_nr = pin->GetOrAddInteger("problem","hist_nr",4);
+  Real hist_amin = acc->hist_amin = pin->GetOrAddReal("problem","hist_amin",1.1);
+  Real hist_amax = acc->hist_amax = pin->GetOrAddReal("problem","hist_amax",0.9);
   for (int i=0; i<hist_nr; i++) {
-    Real rmin = 1.1*acc->r_in;
-    Real rmax = 0.95*acc->rb_out;
+    Real rmin = hist_amin*acc->r_in;
+    Real rmax = hist_amax*acc->rb_out;
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rmin;
     if (i==0) {
       r_i = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : r_i;
@@ -1673,10 +1678,19 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   Real &k0 = acc->k0_entry;
   Real &xi = acc->xi_entry;
   auto &d_arr = acc->dens_arr;
-  Real gamma = acc->gamma;
+  Real &gamma = acc->gamma;
   Real gm1 = gamma - 1.0;
-  Real t_cold = acc->t_cold;
-  Real tf_hot = acc->tf_hot;
+  int  &hist_nr = acc->hist_nr;
+  Real &hist_amin = acc->hist_amin;
+  Real &hist_amax = acc->hist_amax;
+  Real &t_cold = acc->t_cold;
+  Real &tf_hot = acc->tf_hot;
+  Real rmin = hist_amin*acc->r_in;
+  Real rmax = hist_amin*acc->rb_out;
+  Real hist_nrm1 = static_cast<Real>(hist_nr-1);
+  Real hist_r1 = std::pow(rmax/rmin,1.0/hist_nrm1)*rmin;
+  Real hist_r2 = std::pow(rmax/rmin,2.0/hist_nrm1)*rmin;
+  Real hist_r3 = std::pow(rmax/rmin,3.0/hist_nrm1)*rmin;
   int nvars; bool is_mhd = false;
   DvceArray5D<Real> w0_, bcc0_;
   if (pmbp->phydro != nullptr) {
@@ -1720,9 +1734,9 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     "Mdotc", "Vinc ", "Minc ", "Lx_ic", "Ly_ic", "Lz_ic", "L_ic ",
     "Mdotw", "Vinw ", "Minw ", "Lx_iw", "Ly_iw", "Lz_iw", "L_iw ",
     "Mdoth", "Vinh ", "Minh ", "Lx_ih", "Ly_ih", "Lz_ih", "L_ih ",
-    "V0c  ", "M0c  ", "V0w  ", "M0w  ", "V0h  ", "M0h  ",
     "V1c  ", "M1c  ", "V1w  ", "M1w  ", "V1h  ", "M1h  ",
     "V2c  ", "M2c  ", "V2w  ", "M2w  ", "V2h  ", "M2h  ",
+    "V3c  ", "M3c  ", "V3w  ", "M3w  ", "V3h  ", "M3h  ",
     //"pr_in","pr_ic","pr_iw","pr_ih",
     //"Lx0c", "Ly0c", "Lz0c", "L0c",
   };
@@ -2030,24 +2044,20 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       }
     }
 
-    Real dv_glb = (rad>rin && rad<rbout)? vol : 0.0;
+    Real dv_glb = (rad>hist_amin*rin && rad<hist_amax*rbout)? vol : 0.0;
     Real dm_glb = dv_glb*dens;
 
     Real dv_cold = (temp<t_cold)? vol : 0.0;
     Real dv_warm = (temp>=t_cold && temp<t_hot)? vol : 0.0;
     Real dv_hot = (temp>=t_hot)? vol : 0.0;
     Real dv_in = (rad>rin && rad<rin*1.2)? vol : 0.0;
-    Real dv_r0 = (rad>1.1*rin && rad<rin*1e1)? vol : 0.0;
-    Real dv_r1 = (rad>1.1*rin && rad<rin*1e2)? vol : 0.0;
-    Real dv_r2 = (rad>1.1*rin && rad<rin*1e3)? vol : 0.0;
+    Real dv_r1 = (rad>rin && rad<hist_r1)? vol : 0.0;
+    Real dv_r2 = (rad>rin && rad<hist_r2)? vol : 0.0;
+    Real dv_r3 = (rad>rin && rad<hist_r3)? vol : 0.0;
 
     Real dv_inc = fmin(dv_in,dv_cold);
     Real dv_inw = fmin(dv_in,dv_warm);
     Real dv_inh = fmin(dv_in,dv_hot);
-
-    Real dv_r0c = fmin(dv_r0,dv_cold);
-    Real dv_r0w = fmin(dv_r0,dv_warm);
-    Real dv_r0h = fmin(dv_r0,dv_hot);
 
     Real dv_r1c = fmin(dv_r1,dv_cold);
     Real dv_r1w = fmin(dv_r1,dv_warm);
@@ -2056,6 +2066,10 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real dv_r2c = fmin(dv_r2,dv_cold);
     Real dv_r2w = fmin(dv_r2,dv_warm);
     Real dv_r2h = fmin(dv_r2,dv_hot);
+
+    Real dv_r3c = fmin(dv_r3,dv_cold);
+    Real dv_r3w = fmin(dv_r3,dv_warm);
+    Real dv_r3h = fmin(dv_r3,dv_hot);
 
     Real dm_cold = dv_cold*dens;
     Real lx_c = dv_cold*(x2v*mom3 - x3v*mom2);
@@ -2093,10 +2107,6 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real lz_inh = dv_inh*(x1v*mom2 - x2v*mom1);
     Real l_inh = sqrt(SQR(lx_inh)+SQR(ly_inh)+SQR(lz_inh));
 
-    Real dm_r0c = dv_r0c*dens;
-    Real dm_r0w = dv_r0w*dens;
-    Real dm_r0h = dv_r0h*dens;
-
     Real dm_r1c = dv_r1c*dens;
     Real dm_r1w = dv_r1w*dens;
     Real dm_r1h = dv_r1h*dens;
@@ -2105,6 +2115,10 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     Real dm_r2w = dv_r2w*dens;
     Real dm_r2h = dv_r2h*dens;
 
+    Real dm_r3c = dv_r3c*dens;
+    Real dm_r3w = dv_r3w*dens;
+    Real dm_r3h = dv_r3h*dens;
+
     Real vars[nreduce] = {
       mdot,    dm_glb,  dm_in,   lx_in,   ly_in,   lz_in,   l_in,
       dv_cold, dm_cold, lx_c,    ly_c,    lz_c,    l_c,
@@ -2112,9 +2126,9 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       mdot_c,  dv_inc,  dm_inc,  lx_inc,  ly_inc,  lz_inc,  l_inc,
       mdot_w,  dv_inw,  dm_inw,  lx_inw,  ly_inw,  lz_inw,  l_inw,
       mdot_h,  dv_inh,  dm_inh,  lx_inh,  ly_inh,  lz_inh,  l_inh,
-      dv_r0c,  dm_r0c,  dv_r0w,  dm_r0w,  dv_r0h,  dm_r0h,
       dv_r1c,  dm_r1c,  dv_r1w,  dm_r1w,  dv_r1h,  dm_r1h,
       dv_r2c,  dm_r2c,  dv_r2w,  dm_r2w,  dv_r2h,  dm_r2h,
+      dv_r3c,  dm_r3c,  dv_r3w,  dm_r3w,  dv_r3h,  dm_r3h,
     };
 
     // Hydro conserved variables:
