@@ -153,6 +153,8 @@ int GIDConvert(int id, Mesh *pm, ParameterInput *pin);
 void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
               const DvceArray5D<Real> &w0);
+void AddSink(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+             const DvceArray5D<Real> &w0);
 void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void AddIniHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
@@ -200,9 +202,15 @@ static Real NFWMass(const Real r, const Real ms, const Real rs) {
 }
 
 KOKKOS_INLINE_FUNCTION
+static Real GM(const Real r, const Real m, const Real mc, const Real rc,
+               const Real ms, const Real rs, const Real g) {
+  return g*(m+NFWMass(r,mc,rc)+NFWMass(r,ms,rs));
+}
+
+KOKKOS_INLINE_FUNCTION
 static Real Acceleration(const Real r, const Real m, const Real mc, const Real rc,
                          const Real ms, const Real rs, const Real g) {
-  return -g*(m+NFWMass(r,mc,rc)+NFWMass(r,ms,rs))/SQR(r);
+  return -GM(r,m,mc,rc,ms,rs,g)/SQR(r);
 }
 
 } // namespace
@@ -1061,7 +1069,7 @@ void RadialBoundary(Mesh *pm) {
   int sink_flag = acc->sink_flag;
   int bc_flag = acc->user_bc_flag;
   Real &gamma=acc->gamma;
-  Real gm1=(acc->gamma-1.0);
+  Real gm1 = gamma-1.0;
   Real &radentry = acc->rad_entry;
   Real &k0 = acc->k0_entry;
   Real &xi = acc->xi_entry;
@@ -1152,20 +1160,12 @@ void RadialBoundary(Mesh *pm) {
         u0_(m,IEN,k,j,i) = u.e;
       }
 
-      if (rad < rin) {
-        if (sink_flag == 1) {
-          u0_(m,IDN,k,j,i) = sinkd;
-          u0_(m,IEN,k,j,i) = sinke;
-          u0_(m,IM1,k,j,i) = 0.0;
-          u0_(m,IM2,k,j,i) = 0.0;
-          u0_(m,IM3,k,j,i) = 0.0;
-        } else if (sink_flag == 2) {
-          u0_(m,IDN,k,j,i) = fmax(0.9*u0_(m,IDN,k,j,i),sinkd);
-          u0_(m,IEN,k,j,i) = sinke;
-          u0_(m,IM1,k,j,i) *= 0.9;
-          u0_(m,IM2,k,j,i) *= 0.9;
-          u0_(m,IM3,k,j,i) *= 0.9;
-        }
+      if (rad < rin && sink_flag ==1) {
+        u0_(m,IDN,k,j,i) = sinkd;
+        u0_(m,IEN,k,j,i) = sinke;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
       }
     });
   }
@@ -1198,20 +1198,12 @@ void RadialBoundary(Mesh *pm) {
         u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
       }
 
-      if (rad < rin) {
-        if (sink_flag == 1) {
-          u0_(m,IDN,k,j,i) = sinkd;
-          u0_(m,IEN,k,j,i) = sinke;
-          u0_(m,IM1,k,j,i) = 0.0;
-          u0_(m,IM2,k,j,i) = 0.0;
-          u0_(m,IM3,k,j,i) = 0.0;
-        } else if (sink_flag == 2) {
-          u0_(m,IDN,k,j,i) = fmax(0.9*u0_(m,IDN,k,j,i),sinkd);
-          u0_(m,IEN,k,j,i) = sinke;
-          u0_(m,IM1,k,j,i) *= 0.9;
-          u0_(m,IM2,k,j,i) *= 0.9;
-          u0_(m,IM3,k,j,i) *= 0.9;
-        }
+      if (rad < rin && sink_flag == 1) {
+        u0_(m,IDN,k,j,i) = sinkd;
+        u0_(m,IEN,k,j,i) = sinke;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
       }
     });
   }
@@ -2179,6 +2171,10 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
     //std::cout << "AddAccel" << std::endl;
     AddAccel(pm,bdt,u0,w0);
   }
+  if (acc->sink_flag==2) { // Add soft sink
+    //std::cout << "AddSink" << std::endl;
+    AddSink(pm,bdt,u0,w0);
+  }
   if (acc->cooling) {
     //std::cout << "AddISMCooling" << std::endl;
     AddISMCooling(pm,bdt,u0,w0,eos_data);
@@ -2302,6 +2298,60 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     u0(m,IM2,k,j,i) += dmomx2;
     u0(m,IM3,k,j,i) += dmomx3;
     u0(m,IEN,k,j,i) += denergy;
+  });
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void AddSink()
+//! \brief Add Sink
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+void AddSink(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+             const DvceArray5D<Real> &w0) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  auto size = pmbp->pmb->mb_size;
+  Real gm1 = acc->gamma-1.0;
+  Real &mbh = acc->m_bh;
+  Real &mstar = acc->m_star;
+  Real &rstar = acc->r_star;
+  Real &mdm = acc->m_dm;
+  Real &rdm = acc->r_dm;
+  Real &rin = acc->r_in;
+  Real grav = pmbp->punit->grav_constant();
+  Real &sinkd = acc->sink_d;
+  Real &sinkt = acc->sink_t;
+  Real sinke = sinkd*sinkt/gm1;
+
+  par_for("sink", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    Real sink_fac = bdt*sqrt(GM(rad,mbh,mstar,rstar,mdm,rdm,grav)/rad)/rad;
+    if (rad < rin) {
+      Real &dens = w0(m,IDN,k,j,i);
+      u0(m,IDN,k,j,i) = fmax(sinkd,u0(m,IDN,k,j,i)-sink_fac*dens);
+      u0(m,IM1,k,j,i) -= sink_fac*dens*w0(m,IVX,k,j,i);
+      u0(m,IM2,k,j,i) -= sink_fac*dens*w0(m,IVY,k,j,i);
+      u0(m,IM3,k,j,i) -= sink_fac*dens*w0(m,IVZ,k,j,i);
+      u0(m,IEN,k,j,i) = sinke;
+    }
   });
   return;
 }
