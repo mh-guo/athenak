@@ -153,7 +153,7 @@ void AccFinalWork(ParameterInput *pin, Mesh *pm);
 void ReadFromRestart(Mesh *pm, ParameterInput *pin);
 int GIDConvert(int id, Mesh *pm, ParameterInput *pin);
 
-void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
+void Diagnostic(Mesh *pm);
 void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
               const DvceArray5D<Real> &w0);
 void AddSink(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
@@ -1399,6 +1399,37 @@ void RadialBoundary(Mesh *pm) {
 }
 
 Real AccTimeStep(Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+
+  if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
+    Diagnostic(pm);
+  }
+  // change inner radius, if necessary
+  if (acc->r_in_new<acc->r_in_old) {
+    Real t_now = pm->time-acc->r_in_beg_t;
+    if (t_now<=0.0) {
+      acc->r_in = acc->r_in_old;
+    } else if (t_now<acc->r_in_sof_t) {
+      Real t_ratio = (pm->time-acc->r_in_beg_t)/acc->r_in_sof_t;
+      Real &rino = acc->r_in_old;
+      Real &rinn = acc->r_in_new;
+      //acc->r_in = std::pow(rinn,t_ratio)*std::pow(rino,(1.0-t_ratio));
+      acc->r_in = rinn*t_ratio+rino*(1.0-t_ratio);
+    } else {
+      acc->r_in = acc->r_in_new;
+    }
+    // update problem-specific parameters
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->peos->eos_data.r_in = acc->r_in;
+    }
+    if (pmbp->pmhd != nullptr) {
+      pmbp->pmhd->peos->eos_data.r_in = acc->r_in;
+    }
+    if (global_variable::my_rank == 0 && pm->ncycle%acc->ndiag==0) {
+      std::cout << " r_in=" << acc->r_in << std::endl;
+    }
+  }
+
   Real dt = pm->dt/pm->cfl_no;
   if (acc->vcycle_n<=0) {
     return dt;
@@ -1410,7 +1441,6 @@ Real AccTimeStep(Mesh *pm) {
   }
   Real rbout = acc->rb_out;
 
-  MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
   int js = indcs.js, nx2 = indcs.nx2;
@@ -1707,11 +1737,6 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
   int nradii = grids.size();
   //const int nflux = (is_mhd) ? 7 : 6;
   const int nflux = 10;
-  // TODO(@mhguo): check what is necessary!
-  // TODO(@mhguo): In the long run, it would be great if we can directly plot radial
-  // TODO(@mhguo): profiles using history variables. We may need around 10 points and
-  // TODO(@mhguo): span roughly 2 orders of magnitude: 1,2,3,5,10,20,30,50,100,200,300
-  // TODO(@mhguo): or 1,1.5,2,3,5,7,10,15,20,30,50,70,100
   // set number of and names of history variables for hydro or mhd
   //  (0) mass
   //  (1) mass accretion rate
@@ -2178,9 +2203,6 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
   const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
                              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
-  if (acc->ndiag>0 && pm->ncycle % acc->ndiag == 0) {
-    Diagnostic(pm,w0,eos_data);
-  }
   if (acc->potential) {
     //std::cout << "AddAccel" << std::endl;
     AddAccel(pm,bdt,u0,w0);
@@ -2222,31 +2244,6 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   if (acc->stellar_fdbk) {
     //std::cout << "AddStellarFeedback" << std::endl;
     AddStellarFeedback(pm,bdt,u0);
-  }
-  // (@mhguo) change inner radius, if necessary
-  if (acc->r_in_new<acc->r_in_old) {
-    Real t_now = pm->time-acc->r_in_beg_t;
-    if (t_now<=0.0) {
-      acc->r_in = acc->r_in_old;
-    } else if (t_now<acc->r_in_sof_t) {
-      Real t_ratio = (pm->time-acc->r_in_beg_t)/acc->r_in_sof_t;
-      Real &rino = acc->r_in_old;
-      Real &rinn = acc->r_in_new;
-      //acc->r_in = std::pow(rinn,t_ratio)*std::pow(rino,(1.0-t_ratio));
-      acc->r_in = rinn*t_ratio+rino*(1.0-t_ratio);
-    } else {
-      acc->r_in = acc->r_in_new;
-    }
-    // update problem-specific parameters
-    if (pmbp->phydro != nullptr) {
-      pmbp->phydro->peos->eos_data.r_in = acc->r_in;
-    }
-    if (pmbp->pmhd != nullptr) {
-      pmbp->pmhd->peos->eos_data.r_in = acc->r_in;
-    }
-    if (global_variable::my_rank == 0 && pm->ncycle%acc->ndiag==0) {
-      std::cout << " r_in=" << acc->r_in << std::endl;
-    }
   }
   return;
 }
@@ -3253,8 +3250,11 @@ void AddStellarFeedback(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0) {
 //! \brief Compute diagnostics.
 // NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
 
-void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+void Diagnostic(Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
+  DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
+                             pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   auto &indcs = pmbp->pmesh->mb_indcs;
   int is = indcs.is; int nx1 = indcs.nx1;
   int js = indcs.js; int nx2 = indcs.nx2;
@@ -3264,7 +3264,6 @@ void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data)
   const int nkji = nx3*nx2*nx1;
   const int nji = nx2*nx1;
 
-  Real use_e = eos_data.use_e;
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
 
@@ -3278,9 +3277,12 @@ void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data)
   Real max_vtot = std::numeric_limits<Real>::min();
   Real max_temp = std::numeric_limits<Real>::min();
   Real max_eint = std::numeric_limits<Real>::min();
+  Real max_bfld = std::numeric_limits<Real>::min();
+  Real max_valf = std::numeric_limits<Real>::min();
+  Real min_dtva = std::numeric_limits<Real>::max();
 
   // find smallest (e/cooling_rate) in each cell
-  Kokkos::parallel_reduce("cooling_newdt", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  Kokkos::parallel_reduce("diagnostic", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &min_dt, Real &min_d, Real &min_v, Real &min_t,
   Real &min_e, Real &max_d, Real &max_v, Real &max_t, Real &max_e) {
     // compute m,k,j,i indices of thread and call function
@@ -3294,15 +3296,8 @@ void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data)
     Real dx = fmin(fmin(size.d_view(m).dx1,size.d_view(m).dx2),size.d_view(m).dx3);
 
     // temperature in cgs unit
-    Real temp = 1.0;
-    Real eint = 1.0;
-    if (use_e) {
-      temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
-      eint = w0(m,IEN,k,j,i);
-    } else {
-      temp = w0(m,ITM,k,j,i);
-      eint = w0(m,ITM,k,j,i)*w0(m,IDN,k,j,i)/gm1;
-    }
+    Real temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+    Real eint = w0(m,IEN,k,j,i);
 
     Real vtot = sqrt(SQR(w0(m,IVX,k,j,i))+SQR(w0(m,IVY,k,j,i))+SQR(w0(m,IVZ,k,j,i)));
     min_dt = fmin(dx/sqrt(gamma*temp), min_dt);
@@ -3314,39 +3309,64 @@ void Diagnostic(Mesh *pm, const DvceArray5D<Real> &w0, const EOS_Data &eos_data)
     max_v = fmax(vtot,max_v);
     max_t = fmax(temp, max_t);
     max_e = fmax(eint, max_e);
-  }, Kokkos::Min<Real>(dtnew),
-     Kokkos::Min<Real>(min_dens),
-     Kokkos::Min<Real>(min_vtot),
-     Kokkos::Min<Real>(min_temp),
-     Kokkos::Min<Real>(min_eint),
-     Kokkos::Max<Real>(max_dens),
-     Kokkos::Max<Real>(max_vtot),
-     Kokkos::Max<Real>(max_temp),
-     Kokkos::Max<Real>(max_eint));
+  }, Kokkos::Min<Real>(dtnew), Kokkos::Min<Real>(min_dens), Kokkos::Min<Real>(min_vtot),
+  Kokkos::Min<Real>(min_temp), Kokkos::Min<Real>(min_eint), Kokkos::Max<Real>(max_dens),
+  Kokkos::Max<Real>(max_vtot), Kokkos::Max<Real>(max_temp), Kokkos::Max<Real>(max_eint));
+
+  if (pmbp->pmhd != nullptr) {
+    auto bcc = pmbp->pmhd->bcc0;
+    Kokkos::parallel_reduce("diagnostic", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &max_b, Real &max_va, Real &min_dta) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+
+      Real dx = fmin(fmin(size.d_view(m).dx1,size.d_view(m).dx2),size.d_view(m).dx3);
+      Real btot = sqrt(SQR(bcc(m,IBX,k,j,i))+SQR(bcc(m,IBY,k,j,i))+SQR(bcc(m,IBZ,k,j,i)));
+      Real va = btot/sqrt(w0(m,IDN,k,j,i));
+      Real dta = dx/fmax(va,1e-30);
+      max_b = fmax(btot,max_b);
+      max_va = fmax(va,max_va);
+      min_dta = fmin(dta,min_dta);
+    }, Kokkos::Max<Real>(max_bfld), Kokkos::Max<Real>(max_valf),
+    Kokkos::Min<Real>(min_dtva));
+  }
 #if MPI_PARALLEL_ENABLED
-  Real m_min[5] = {dtnew,min_dens,min_vtot,min_temp,min_eint};
-  Real m_max[4] = {max_dens,max_vtot,max_temp,max_eint};
-  Real gm_min[5];
-  Real gm_max[4];
+  Real m_min[6] = {dtnew,min_dens,min_vtot,min_temp,min_eint,min_dtva};
+  Real m_max[6] = {max_dens,max_vtot,max_temp,max_eint,max_bfld,max_valf};
+  Real gm_min[6];
+  Real gm_max[6];
   //MPI_Allreduce(MPI_IN_PLACE, &dtnew, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
-  MPI_Allreduce(m_min, gm_min, 5, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
-  MPI_Allreduce(m_max, gm_max, 4, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+  MPI_Allreduce(m_min, gm_min, 6, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(m_max, gm_max, 6, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
   dtnew = gm_min[0];
   min_dens = gm_min[1];
   min_vtot = gm_min[2];
   min_temp = gm_min[3];
   min_eint = gm_min[4];
+  min_dtva = gm_min[5];
   max_dens = gm_max[0];
   max_vtot = gm_max[1];
   max_temp = gm_max[2];
   max_eint = gm_max[3];
+  max_bfld = gm_max[4];
+  max_valf = gm_max[5];
 #endif
   if (global_variable::my_rank == 0) {
     std::cout << " min_d=" << min_dens << " max_d=" << max_dens << std::endl
               << " min_v=" << min_vtot << " max_v=" << max_vtot << std::endl
               << " min_t=" << min_temp << " max_t=" << max_temp << std::endl
               << " min_e=" << min_eint << " max_e=" << max_eint << std::endl
-              << " dt_cs=" << dtnew << std::endl;
+              << " dt_cs=" << dtnew;
+    if (pmbp->pmhd != nullptr) {
+      std::cout << " dt_va=" << min_dtva << std::endl
+                << " max_b=" << max_bfld << " max_va=" << max_valf;
+    }
+    std::cout << std::endl;
   }
   return;
 }

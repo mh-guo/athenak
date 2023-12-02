@@ -540,7 +540,7 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
   int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
-  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;  
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
   const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
