@@ -806,7 +806,7 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
         printf("mom_old: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
       }
       if (turb_dens) {
-        u(m,IDN,k,j,i) += den*(v1+v2+v3);
+        u(m,IDN,k,j,i) += den*fmax((v1+v2+v3),-0.9);
       } else {
         u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
         u(m,IM1,k,j,i) += den*v1;

@@ -24,6 +24,9 @@
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
 
+#include "pgen/turb_init.hpp"
+#include "pgen/turb_mhd.hpp"
+
 namespace {
 
 KOKKOS_INLINE_FUNCTION
@@ -64,14 +67,27 @@ struct bondi_pgen {
   Real c1, c2;              // useful constants
   Real temp_min, temp_max;  // bounds for temperature root find
   bool reset_ic = false;    // reset initial conditions after run
+  bool multi_zone = false;  // true if multi-zone
+  int  vcycle_n = 0;        // number of cycles in a V-cycle
+  Real rv_in = 0.0;         // inner radius of V-cycle
+  Real rv_out = 0.0;        // outer radius of V-cycle
 };
 
   bondi_pgen bondi;
+
+KOKKOS_INLINE_FUNCTION
+Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
+  Real x = static_cast<Real>(i%n)/static_cast<Real>(n-1);
+  Real r = rmin*std::pow(rmax/rmin,fabs(1.0-2.0*x));
+  r = (r<(10*rmin)) ? 0.0 : r;
+  return r;
+}
 
 // prototypes for user-defined BCs and error functions
 void FixedBondiInflow(Mesh *pm);
 void BondiErrors(ParameterInput *pin, Mesh *pm);
 void BondiFluxes(HistoryData *pdata, Mesh *pm);
+Real BondiTimeStep(Mesh *pm);
 
 } // namespace
 
@@ -101,6 +117,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   pgen_final_func = BondiErrors;
   user_bcs_func = FixedBondiInflow;
   user_hist_func = BondiFluxes;
+  user_dt_func = BondiTimeStep;
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
@@ -115,12 +132,19 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, r_i));
   }
 
-  if (restart) return;
-
   // Read problem-specific parameters from input file
   // global parameters
   bondi.k_adi = pin->GetReal("problem", "k_adi");
   bondi.r_crit = pin->GetReal("problem", "r_crit");
+
+  bondi.multi_zone = pin->GetOrAddBoolean("coord", "multi_zone", false);
+  if (bondi.multi_zone) {
+    bondi.vcycle_n = pin->GetOrAddInteger("problem", "vcycle_n", 1000);
+    bondi.rv_in = pin->GetOrAddReal("problem", "rv_in", 1.0);
+    bondi.rv_out = pin->GetOrAddReal("problem", "rv_out", 100.0);
+  }
+
+  if (restart) return;
 
   // Get ideal gas EOS data
   bondi.gm = pmbp->phydro->peos->eos_data.gamma;
@@ -158,6 +182,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int n1 = indcs.nx1 + 2*ng;
   int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
+  int n1m1 = n1 - 1, n2m1 = n2 - 1, n3m1 = n3 - 1;
   int is = indcs.is;
   int js = indcs.js;
   int ks = indcs.ks;
@@ -193,8 +218,44 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &u1_ = pmbp->phydro->u1;
   if (bondi.reset_ic) {
     pmbp->phydro->peos->PrimToCons(w0_, u1_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+    return;
   } else {
     pmbp->phydro->peos->PrimToCons(w0_, u0_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  }
+
+  // Convert primitives to conserved
+  if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->PrimToCons(w0_, u0_, 0, n1m1, 0, n2m1, 0, n3m1);
+  } else if (pmbp->pmhd != nullptr) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    pmbp->pmhd->peos->PrimToCons(w0_, bcc0_, u0_, 0, n1m1, 0, n2m1, 0, n3m1);
+  }
+  // Add turbulence
+  for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+    if (it->block_name.compare(0, 9, "turb_init") == 0) {
+      TurbulenceInit *pturb;
+      pturb = new TurbulenceInit(it->block_name,pmbp, pin);
+      pturb->InitializeModes(1);
+      pturb->AddForcing(1);
+      delete pturb;
+    }
+    if (it->block_name.compare(0, 8, "turb_mhd") == 0) {
+      TurbulenceMhd *pturb;
+      pturb = new TurbulenceMhd(it->block_name,pmbp, pin);
+      pturb->InitializeModes(1);
+      pturb->AddForcing(1);
+      delete pturb;
+    }
+  }
+  // Convert conserved to primitives
+  if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->ConsToPrim(u0_, w0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    pmbp->phydro->CopyCons(nullptr,1);
+  } else if (pmbp->pmhd != nullptr) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0_, b0_, w0_, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    pmbp->pmhd->CopyCons(nullptr,1);
   }
 
   return;
@@ -485,8 +546,26 @@ void FixedBondiInflow(Mesh *pm) {
   auto bondi_ = bondi;
 
   int nmb = pm->pmb_pack->nmb_thispack;
-  auto u0_ = pm->pmb_pack->phydro->u0;
-  auto w0_ = pm->pmb_pack->phydro->w0;
+  auto pmbp = pm->pmb_pack;
+  auto u0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  auto u1_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u1 : pmbp->phydro->u1;
+  auto w0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+
+  bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
+  bool &multi_zone = pmbp->pcoord->multi_zone;
+  auto zone_mask = pmbp->pcoord->zone_mask;
+  if (multi_zone && !refining) {
+    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (zone_mask(m,k,j,i)) {
+        u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
+        u0_(m,IM1,k,j,i) = u1_(m,IM1,k,j,i);
+        u0_(m,IM2,k,j,i) = u1_(m,IM2,k,j,i);
+        u0_(m,IM3,k,j,i) = u1_(m,IM3,k,j,i);
+        u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
+      }
+    });
+  }
 
   pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
   pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
@@ -789,12 +868,14 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   // extract grids, number of radii, number of fluxes, and history appending index
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
-  int nflux = (is_mhd) ? 4 : 3;
+  //int nflux = (is_mhd) ? 4 : 3;
+  const int nflux = 10;
 
   // set number of and names of history variables for hydro or mhd
+  //  (0) mass
   //  (1) mass accretion rate
   //  (2) energy flux
-  //  (3) angular momentum flux
+  //  (3) angular momentum flux * 3
   //  (4) magnetic flux (iff MHD)
   pdata->nhist = nradii*nflux;
   if (pdata->nhist > NHISTORY_VARIABLES) {
@@ -804,26 +885,26 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
     exit(EXIT_FAILURE);
   }
   for (int g=0; g<nradii; ++g) {
-    std::stringstream stream;
-    stream << std::fixed << std::setprecision(1) << grids[g]->radius;
-    std::string rad_str = stream.str();
-    pdata->label[nflux*g+0] = "mdot_" + rad_str;
-    pdata->label[nflux*g+1] = "edot_" + rad_str;
-    pdata->label[nflux*g+2] = "ldot_" + rad_str;
-    if (is_mhd) {
-      pdata->label[nflux*g+3] = "phi_" + rad_str;
-    }
+    std::string rstr = std::to_string(g);
+    pdata->label[nflux*g+0] = "m_" + rstr;
+    pdata->label[nflux*g+1] = "mdot" + rstr;
+    pdata->label[nflux*g+2] = "mdout" + rstr;
+    pdata->label[nflux*g+3] = "mdh" + rstr;
+    pdata->label[nflux*g+4] = "edot" + rstr;
+    pdata->label[nflux*g+5] = "edout" + rstr;
+    pdata->label[nflux*g+6] = "lx" + rstr;
+    pdata->label[nflux*g+7] = "ly" + rstr;
+    pdata->label[nflux*g+8] = "lz" + rstr;
+    pdata->label[nflux*g+9] = "phi" + rstr;
   }
 
   // go through angles at each radii:
   DualArray2D<Real> interpolated_bcc;  // needed for MHD
   for (int g=0; g<nradii; ++g) {
     // zero fluxes at this radius
-    pdata->hdata[nflux*g+0] = 0.0;
-    pdata->hdata[nflux*g+1] = 0.0;
-    pdata->hdata[nflux*g+2] = 0.0;
-    if (is_mhd) pdata->hdata[nflux*g+3] = 0.0;
-
+    for (int i=0; i<nflux; ++i) {
+      pdata->hdata[nflux*g+i] = 0.0;
+    }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
@@ -902,9 +983,9 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       Real drdy = r*x2/(2.0*r2 - rad2 + a2);
       Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
       // contravariant r component of 4-velocity
-      Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
+      Real ur = drdx *u1 + drdy *u2 + drdz *u3;
       // contravariant r component of 4-magnetic field (returns zero if not MHD)
-      Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+      Real br = drdx *b1 + drdy *b2 + drdz *b3;
       // covariant phi component of 4-velocity
       Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
       // covariant phi component of 4-magnetic field (returns zero if not MHD)
@@ -914,20 +995,35 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       Real &domega = grids[g]->solid_angles.h_view(n);
       Real sqrtmdet = (r2+SQR(spin*cos(theta)));
 
+      Real is_out = (ur>0.0)? 1.0 : 0.0;
+      Real int_temp = (gamma-1.0)*int_ie/int_dn;
+      Real is_hot = (int_temp>0.1/r)? 1.0 : 0.0;
+
+      // compute mass density
+      pdata->hdata[nflux*g+0] += int_dn*sqrtmdet*domega;
+
       // compute mass flux
-      pdata->hdata[nflux*g+0] += -1.0*int_dn*ur*sqrtmdet*domega;
+      pdata->hdata[nflux*g+1] += 1.0*int_dn*ur*sqrtmdet*domega;
+      pdata->hdata[nflux*g+2] += is_out*int_dn*ur*sqrtmdet*domega;
+      pdata->hdata[nflux*g+3] += is_hot*int_dn*ur*sqrtmdet*domega;
 
       // compute energy flux
       Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
-      pdata->hdata[nflux*g+1] += -1.0*t1_0*sqrtmdet*domega;
+      pdata->hdata[nflux*g+4] += 1.0*t1_0*sqrtmdet*domega;
+      pdata->hdata[nflux*g+5] += is_out*t1_0*sqrtmdet*domega;
 
       // compute angular momentum flux
+      // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
+      Real t1_1 = 0.0;
+      Real t1_2 = 0.0;
       Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
-      pdata->hdata[nflux*g+2] += t1_3*sqrtmdet*domega;
+      pdata->hdata[nflux*g+6] += t1_1*sqrtmdet*domega;
+      pdata->hdata[nflux*g+7] += t1_2*sqrtmdet*domega;
+      pdata->hdata[nflux*g+8] += t1_3*sqrtmdet*domega;
 
       // compute magnetic flux
       if (is_mhd) {
-        pdata->hdata[nflux*g+3] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+        pdata->hdata[nflux*g+9] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
       }
     }
   }
@@ -938,6 +1034,162 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   }
 
   return;
+}
+
+Real BondiTimeStep(Mesh *pm) {
+  Real dt = pm->dt/pm->cfl_no;
+  if (!bondi.multi_zone) {
+    return dt;
+  }
+
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+
+  Real dt1 = std::numeric_limits<float>::max();
+  Real dt2 = std::numeric_limits<float>::max();
+  Real dt3 = std::numeric_limits<float>::max();
+
+  // capture class variables for kernel
+  bool is_mhd = (pmbp->pmhd != nullptr)? true : false;
+  auto &w0_ = (is_mhd)? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  auto &eos = (is_mhd)? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
+  auto &size = pmbp->pmb->mb_size;
+
+  auto &is_general_relativistic_ = pmbp->pcoord->is_general_relativistic;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+
+  Real r_v = VcycleRadius(pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
+  if (bondi.multi_zone) {
+    pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, r_v,
+                               std::numeric_limits<Real>::max());
+  }
+
+  if (is_mhd) {
+    // find smallest dx/(v +/- Cf) in each direction for mhd problems
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    Kokkos::parallel_reduce("AccMHDNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (is_general_relativistic_ && r_v <= 1.0) {
+        max_dv1 = 1.0;
+        max_dv2 = 1.0;
+        max_dv3 = 1.0;
+      } else if (rad >= r_v) {
+        Real &w_d = w0_(m,IDN,k,j,i);
+        Real &w_bx = bcc0_(m,IBX,k,j,i);
+        Real &w_by = bcc0_(m,IBY,k,j,i);
+        Real &w_bz = bcc0_(m,IBZ,k,j,i);
+        Real cf;
+        Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+        if (eos.is_ideal) {
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_bx, w_by, w_bz);
+        } else {
+          cf = eos.IdealMHDFastSpeed(w_d, w_bx, w_by, w_bz);
+        }
+        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cf;
+
+        if (eos.is_ideal) {
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_by, w_bz, w_bx);
+        } else {
+          cf = eos.IdealMHDFastSpeed(w_d, w_by, w_bz, w_bx);
+        }
+        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cf;
+
+        if (eos.is_ideal) {
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_bz, w_bx, w_by);
+        } else {
+          cf = eos.IdealMHDFastSpeed(w_d, w_bz, w_bx, w_by);
+        }
+        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
+      }
+
+      min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+      min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+      min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+    }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+  } else {
+    // find smallest dx/(v +/- Cs) in each direction for hydrodynamic problems
+    Kokkos::parallel_reduce("AccHydroNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+
+      Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (is_general_relativistic_ && r_v <= 1.0) {
+        max_dv1 = 1.0;
+        max_dv2 = 1.0;
+        max_dv3 = 1.0;
+      } else if (rad >= r_v) {
+        Real cs;
+        if (eos.is_ideal) {
+          Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+          cs = eos.IdealHydroSoundSpeed(w0_(m,IDN,k,j,i), p);
+        } else         {
+          cs = eos.iso_cs;
+        }
+        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cs;
+        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cs;
+        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cs;
+      }
+      min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+      min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+      min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+    }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+  }
+
+  // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems
+  Real dtnew = dt1;
+  if (pm->multi_d) { dtnew = std::min(dtnew, dt2); }
+  if (pm->three_d) { dtnew = std::min(dtnew, dt3); }
+
+  return dtnew;
 }
 
 } // namespace
