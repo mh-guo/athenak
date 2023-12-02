@@ -32,6 +32,8 @@ struct EOS_Data {
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
   Real daverage;     // density floor for averaging
   Real rdfloor;      // r-dependent dfloor
+  Real rdfloor_r0;   // r0 for r-dependent dfloor
+  Real rdfloor_pow;  // power law index for r-dependent dfloor
   Real dt_floor;     // floor of timestep
   Real r_in;         // inner radius
   Real a_excise;     // excision radius relative to r_in

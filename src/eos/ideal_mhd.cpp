@@ -58,6 +58,8 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
   Real &tfloor = eos.tfloor;
   Real &daverage = eos.daverage;
   Real &rdfloor = eos.rdfloor;
+  Real &rdfl_r0 = eos.rdfloor_r0;
+  Real &rdfl_pow = eos.rdfloor_pow;
 
   int nfloord_=0, nfloore_=0, nfloort_=0;
   Kokkos::parallel_reduce("mhd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
@@ -200,11 +202,11 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
         fofc_flag = true;
       }
       if (rdfloor>0.0) {
-        if (u.d < rdfloor/rad && rad>1.1*r_in) {
+        if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
           sum0++;
           fofc_flag = true;
         }
-        if (w.d <= 1e3*eos.rdfloor/rad && rad>1.1*r_in) {
+        if (w.d <= 1e3*rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
           Real w_dkm = (k>ks-ng)? prim(m,IDN,k-1,j,i) : w.d;
           Real w_dkp = (k<ke+ng)? prim(m,IDN,k+1,j,i) : w.d;
           Real w_djm = (j>js-ng)? prim(m,IDN,k,j-1,i) : w.d;
@@ -243,16 +245,17 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
       if (rdfloor>0.0) {
-        if (u.d < rdfloor/rad && rad>1.1*r_in) {
-          u.d = rdfloor/rad;
-          w.d = rdfloor/rad;
-          dave = rdfloor/rad;
+        if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
+          u.d = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
+          w.d = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
+          dave = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
           rdf_flag = true;
           sum0++;
         }
       }
-      // apply cell averaging
-      if (u.d <= dave && rad>1.1*r_in && k>kl && k<ku && j>jl && j<ju && i>il && i<iu) {
+      // apply cell averaging, only when daverage>0.0
+      if (daverage>0.0 && u.d <= dave && rad>1.1*r_in &&
+          k>kl && k<ku && j>jl && j<ju && i>il && i<iu) {
         MHDCons1D ukm, ukp, ujm, ujp, uim, uip;
         ukm.d  = cons(m,IDN,k-1,j,i);
         ukm.mx = cons(m,IM1,k-1,j,i);
