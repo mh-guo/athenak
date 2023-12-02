@@ -482,81 +482,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
     }
   });
 
-  // Subtract any global mean from new force array (force_new)
-
-  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
-  const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
-
-  Real m0 = static_cast<Real>(nmkji);
-  Real m1 = 0.0, m2 = 0.0, m3 = 0.0;
-  if (!(pmy_pack->pmesh->multilevel)) {
-  Kokkos::parallel_reduce("net_mom_1", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &sum_m1, Real &sum_m2, Real &sum_m3) {
-    // compute n,k,j,i indices of thread
-    int m = (idx)/nkji;
-    int k = (idx - m*nkji)/nji;
-    int j = (idx - m*nkji - k*nji)/nx1;
-    int i = (idx - m*nkji - k*nji - j*nx1) + is;
-    k += ks;
-    j += js;
-
-    sum_m1 += force_new_(m,0,k,j,i);
-    sum_m2 += force_new_(m,1,k,j,i);
-    sum_m3 += force_new_(m,2,k,j,i);
-  }, Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2), Kokkos::Sum<Real>(m3));
-  } else {
-    m0 = 0.0;
-    if (pmy_pack->pionn == nullptr) {
-      // modify conserved variables
-      DvceArray5D<Real> u;
-      if (pmy_pack->phydro != nullptr) {
-        u = (pmy_pack->phydro->u0);
-      }
-      if (pmy_pack->pmhd != nullptr) {
-        u = (pmy_pack->pmhd->u0);
-      }
-      auto &size = pmy_pack->pmb->mb_size;
-      Kokkos::parallel_reduce("net_mom_1", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
-      KOKKOS_LAMBDA(const int &idx, Real &sum_m0, Real &sum_m1, Real &sum_m2,
-      Real &sum_m3) {
-        // compute n,k,j,i indices of thread
-        int m = (idx)/nkji;
-        int k = (idx - m*nkji)/nji;
-        int j = (idx - m*nkji - k*nji)/nx1;
-        int i = (idx - m*nkji - k*nji - j*nx1) + is;
-        k += ks;
-        j += js;
-
-        Real dens = u(m,IDN,k,j,i);
-        Real dm = dens*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
-        sum_m0 += dm;
-        sum_m1 += dm*force_new_(m,0,k,j,i);
-        sum_m2 += dm*force_new_(m,1,k,j,i);
-        sum_m3 += dm*force_new_(m,2,k,j,i);
-      }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2),
-      Kokkos::Sum<Real>(m3));
-    }
-  }
-
-#if MPI_PARALLEL_ENABLED
-    Real m_sum4[4] = {m0,m1,m2,m3};
-    Real gm_sum4[4];
-    MPI_Allreduce(m_sum4, gm_sum4, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    m0 = gm_sum4[0];
-    m1 = gm_sum4[1];
-    m2 = gm_sum4[2];
-    m3 = gm_sum4[3];
-#endif
-
-  Real m00 = m0;
-  par_for("net_mom_2", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
-  KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    force_new_(m,0,k,j,i) -= m1/m0;
-    force_new_(m,1,k,j,i) -= m2/m0;
-    force_new_(m,2,k,j,i) -= m3/m0;
-  });
-
   // Calculate normalization of new force array so that energy input rate ~ dedt
   DvceArray5D<Real> u,w;
   if (pmy_pack->phydro != nullptr) u = (pmy_pack->phydro->u0);
@@ -568,7 +493,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
   if (pmy_pack->pionn != nullptr) w = (pmy_pack->phydro->w0); // assume neutral density
                                                               //     >> ionized density
 
-  // Normalization: a constant beta
   auto &eos = pmy_pack->pmhd->peos->eos_data;
   auto &mbsize = pmy_pack->pmb->mb_size;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
@@ -595,129 +519,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
     }
   });
 
-  m0 = 0.0, m1 = 0.0;
-  if (!(pmy_pack->pmesh->multilevel)) {
-  Kokkos::parallel_reduce("forcing_norm", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &sum_m0, Real &sum_m1) {
-     // compute n,k,j,i indices of thread
-    int m = (idx)/nkji;
-    int k = (idx - m*nkji)/nji;
-    int j = (idx - m*nkji - k*nji)/nx1;
-    int i = (idx - m*nkji - k*nji - j*nx1) + is;
-    k += ks;
-    j += js;
-
-    Real v1 = force_new_(m,0,k,j,i);
-    Real v2 = force_new_(m,1,k,j,i);
-    Real v3 = force_new_(m,2,k,j,i);
-
-    // two options here
-    // Real u1 = u(m,IM1,k,j,i)/u(m,IDN,k,j,i);
-    // Real u2 = u(m,IM2,k,j,i)/u(m,IDN,k,j,i);
-    // Real u3 = u(m,IM3,k,j,i)/u(m,IDN,k,j,i);
-
-    // force_sum::GlobalSum fsum;
-    // fsum.the_array[IDN] = (v1*v1+v2*v2+v3*v3);
-    // fsum.the_array[IM1] = u1*v1 + u2*v2 + u3*v3;
-
-    Real u1 = u(m,IM1,k,j,i);
-    Real u2 = u(m,IM2,k,j,i);
-    Real u3 = u(m,IM3,k,j,i);
-
-    array_sum::GlobalSum fsum;
-    sum_m0 += u(m,IDN,k,j,i)*(v1*v1+v2*v2+v3*v3);
-    sum_m1 += u1*v1 + u2*v2 + u3*v3;
-  }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1));
-  m0 = std::max(m0, static_cast<Real>(std::numeric_limits<float>::min()) );
-  } else {
-    auto &size = pmy_pack->pmb->mb_size;
-    Kokkos::parallel_reduce("forcing_norm2", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
-    KOKKOS_LAMBDA(const int &idx, Real &sum_m0, Real &sum_m1) {
-      // compute n,k,j,i indices of thread
-      int m = (idx)/nkji;
-      int k = (idx - m*nkji)/nji;
-      int j = (idx - m*nkji - k*nji)/nx1;
-      int i = (idx - m*nkji - k*nji - j*nx1) + is;
-      k += ks;
-      j += js;
-
-      Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
-
-      Real v1 = force_new_(m,0,k,j,i);
-      Real v2 = force_new_(m,1,k,j,i);
-      Real v3 = force_new_(m,2,k,j,i);
-
-      // two options here
-      // Real u1 = u(m,IM1,k,j,i)/u(m,IDN,k,j,i);
-      // Real u2 = u(m,IM2,k,j,i)/u(m,IDN,k,j,i);
-      // Real u3 = u(m,IM3,k,j,i)/u(m,IDN,k,j,i);
-
-      // force_sum::GlobalSum fsum;
-      // fsum.the_array[IDN] = (v1*v1+v2*v2+v3*v3);
-      // fsum.the_array[IM1] = u1*v1 + u2*v2 + u3*v3;
-
-      Real u1 = u(m,IM1,k,j,i);
-      Real u2 = u(m,IM2,k,j,i);
-      Real u3 = u(m,IM3,k,j,i);
-
-      //if (m==0&&k==6&&j==6&&i==6) {
-      //  printf("normden: %.6e\n",u(m,IDN,k,j,i));
-      //  printf("normmom: %.6e %.6e %.6e\n",u1,u2,u3);
-      //  printf("normv: %.6e %.6e %.6e\n",v1,v2,v3);
-      //}
-
-      array_sum::GlobalSum fsum;
-      sum_m0 += vol*u(m,IDN,k,j,i)*(v1*v1+v2*v2+v3*v3);
-      sum_m1 += vol*(u1*v1 + u2*v2 + u3*v3);
-    }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1));
-    m0 = std::max(m0, static_cast<Real>(std::numeric_limits<float>::min()) );
-  }
-
-#if MPI_PARALLEL_ENABLED
-    Real m_sum2[2] = {m0,m1};
-    Real gm_sum2[2];
-    MPI_Allreduce(m_sum2, gm_sum2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    m0 = gm_sum2[0];
-    m1 = gm_sum2[1];
-#endif
-
-  // old normalization
-  // aa = 0.5*m0;
-  // aa = max(aa,static_cast<Real>(1.0e-20));
-  // if (tcorr<=1e-20) {
-  //   s = sqrt(dedt/dt/dvol/aa);
-  // } else {
-  //   s = sqrt(dedt/tcorr/dvol/aa);
-  // }
-
-  // new normalization: assume constant energy injection per unit mass
-  // explicit solution of <sF . (v + sF dt)> = dedt
-
-  Real dvol = 1.0/(nx1*nx2*nx3); // old: Lx*Ly*Lz/nx1/nx2/nx3;
-  // TODO(@mhguo): Note It should be nx of mesh, not meshblocks!
-  auto &mesh_indcs = pmy_pack->pmesh->mesh_indcs;
-  dvol = 1.0/(mesh_indcs.nx1*mesh_indcs.nx2*mesh_indcs.nx3);
-  if (!(pmy_pack->pmesh->multilevel)) {
-  m0 = m0*dvol*(1.0);
-  m1 = m1*dvol;
-  } else {
-    m0 = m0*(1.0)/m00;
-    m1 = m1/m00;
-  }
-
-  Real s;
-  if (m1 >= 0) {
-    s = -m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
-  } else {
-    s = m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
-  }
-
-  // Now normalize new force array
-  par_for("OU_process", DevExeSpace(),0,nmb-1,0,2,0,ncells3-1,0,ncells2-1,0,ncells1-1,
-  KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
-    force_new_(m,n,k,j,i) *= s;
-  });
-
   return TaskStatus::complete;
 }
 
@@ -737,9 +538,12 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
     }
   }
   auto &indcs = pmy_pack->pmesh->mb_indcs;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;  
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
 
   Real beta_dt = 1.0;
   // turb_flag == 1 : decaying turbulence
@@ -770,53 +574,83 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
     std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
 
     auto b0 = pmy_pack->pmhd->b0;
-    // TODO(@mhguo): write a correct plasma beta!!!
-    Real fac_beta = sqrt(inv_beta/dedt);
     auto &size = pmy_pack->pmb->mb_size;
     par_for("turb-b", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      //Real &x1min = size.d_view(m).x1min;
-      //Real &x1max = size.d_view(m).x1max;
-      //int nx1 = indcs.nx1;
-      //Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
       Real dx1 = size.d_view(m).dx1;
       Real dx2 = size.d_view(m).dx2;
       Real dx3 = size.d_view(m).dx3;
-      b0.x1f(m,k,j,i) = 0.25*(((f_n_(m,2,k,j+1,i-1)-f_n_(m,2,k,j-1,i-1))
-                              +(f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  )))/dx2
-                             -((f_n_(m,1,k+1,j,i-1)-f_n_(m,1,k-1,j,i-1))
-                              +(f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  )))/dx3
-                              )*fac_beta;
-      b0.x2f(m,k,j,i) = 0.25*(((f_n_(m,0,k+1,j-1,i)-f_n_(m,0,k-1,j-1,i))
-                              +(f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i)))/dx3
-                             -((f_n_(m,2,k,j-1,i+1)-f_n_(m,2,k,j-1,i-1))
-                              +(f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1)))/dx1
-                              )*fac_beta;
-      b0.x3f(m,k,j,i) = 0.25*(((f_n_(m,1,k-1,j,i+1)-f_n_(m,1,k-1,j,i-1))
-                              +(f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1)))/dx1
-                             -((f_n_(m,0,k-1,j+1,i)-f_n_(m,0,k-1,j-1,i))
-                              +(f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i)))/dx2
-                              )*fac_beta;
+      b0.x1f(m,k,j,i) = ((f_n_(m,2,k,j+1,i-1)-f_n_(m,2,k,j-1,i-1))
+                        +(f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  )))/dx2
+                       -((f_n_(m,1,k+1,j,i-1)-f_n_(m,1,k-1,j,i-1))
+                        +(f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  )))/dx3;
+      b0.x2f(m,k,j,i) = ((f_n_(m,0,k+1,j-1,i)-f_n_(m,0,k-1,j-1,i))
+                        +(f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i)))/dx3
+                       -((f_n_(m,2,k,j-1,i+1)-f_n_(m,2,k,j-1,i-1))
+                        +(f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1)))/dx1;
+      b0.x3f(m,k,j,i) = ((f_n_(m,1,k-1,j,i+1)-f_n_(m,1,k-1,j,i-1))
+                        +(f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1)))/dx1
+                       -((f_n_(m,0,k-1,j+1,i)-f_n_(m,0,k-1,j-1,i))
+                        +(f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i)))/dx2;
       if (i==ie) {
-        b0.x1f(m,k,j,ie+1) = 0.25*(((f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  ))
-                                   +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j-1,i+1)))/dx2
-                                  -((f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  ))
-                                   +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k-1,j,i+1)))/dx3
-                                  )*fac_beta;
+        b0.x1f(m,k,j,ie+1) = ((f_n_(m,2,k,j+1,i  )-f_n_(m,2,k,j-1,i  ))
+                             +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j-1,i+1)))/dx2
+                            -((f_n_(m,1,k+1,j,i  )-f_n_(m,1,k-1,j,i  ))
+                             +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k-1,j,i+1)))/dx3;
       }
       if (j==je) {
-        b0.x2f(m,k,je+1,i) = 0.25*(((f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i))
-                                   +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k-1,j+1,i)))/dx3
-                                  -((f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1))
-                                   +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j+1,i-1)))/dx1
-                                  )*fac_beta;
+        b0.x2f(m,k,je+1,i) = ((f_n_(m,0,k+1,j  ,i)-f_n_(m,0,k-1,j  ,i))
+                              +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k-1,j+1,i)))/dx3
+                             -((f_n_(m,2,k,j  ,i+1)-f_n_(m,2,k,j  ,i-1))
+                              +(f_n_(m,2,k,j+1,i+1)-f_n_(m,2,k,j+1,i-1)))/dx1;
       }
       if (k==ke) {
-        b0.x3f(m,ke+1,j,i) = 0.25*(((f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1))
-                                   +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k+1,j,i-1)))/dx1
-                                  -((f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i))
-                                   +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k+1,j-1,i)))/dx2
-                                  )*fac_beta;
+        b0.x3f(m,ke+1,j,i) = ((f_n_(m,1,k  ,j,i+1)-f_n_(m,1,k  ,j,i-1))
+                             +(f_n_(m,1,k+1,j,i+1)-f_n_(m,1,k+1,j,i-1)))/dx1
+                            -((f_n_(m,0,k  ,j+1,i)-f_n_(m,0,k  ,j-1,i))
+                             +(f_n_(m,0,k+1,j+1,i)-f_n_(m,0,k+1,j-1,i)))/dx2;
+      }
+    });
+    Real m0 = 0.0, m1 = 0.0;
+    Kokkos::parallel_reduce("b-sum", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &sum_m0, Real &sum_m1) {
+      // compute n,k,j,i indices of thread
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      Real dx1 = size.d_view(m).dx1;
+      Real dx2 = size.d_view(m).dx2;
+      Real dx3 = size.d_view(m).dx3;
+      Real dvol = dx1*dx2*dx3;
+      sum_m0 += dvol*w(m,IEN,k,j,i);
+      sum_m1 += dvol*(SQR(b0.x1f(m,k,j,i)+b0.x1f(m,k,j,i+1))
+                     +SQR(b0.x2f(m,k,j,i)+b0.x2f(m,k,j+1,i))
+                     +SQR(b0.x3f(m,k,j,i)+b0.x3f(m,k+1,j,i)));
+    }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1));
+#if MPI_PARALLEL_ENABLED
+    Real m_sum2[2] = {m0,m1};
+    Real gm_sum2[2];
+    MPI_Allreduce(m_sum2, gm_sum2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    m0 = gm_sum2[0];
+    m1 = gm_sum2[1];
+#endif
+    Real norm = sqrt(inv_beta*m0/m1*8.0);
+    par_for("b-norm", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      b0.x1f(m,k,j,i) *= norm;
+      b0.x2f(m,k,j,i) *= norm;
+      b0.x3f(m,k,j,i) *= norm;
+      if (i==ie) {
+        b0.x1f(m,k,j,ie+1) *= norm;
+      }
+      if (j==je) {
+        b0.x2f(m,k,je+1,i) *= norm;
+      }
+      if (k==ke) {
+        b0.x3f(m,ke+1,j,i) *= norm;
       }
     });
     par_for("turb-be", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,

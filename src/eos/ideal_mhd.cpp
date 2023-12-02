@@ -198,9 +198,6 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (rad < a_excise*r_in) {
-        fofc_flag = true;
-      }
       if (rdfloor>0.0) {
         if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
           sum0++;
