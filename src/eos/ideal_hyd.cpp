@@ -168,11 +168,11 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
       if (rdfloor>0.0) {
-        if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
+        if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>r_in) {
           sum0++;
           fofc_flag = true;
         }
-        if (w.d <= 1e3*rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
+        if (w.d <= 1e3*rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>r_in) {
           Real w_dkm = (k>ks-ng)? prim(m,IDN,k-1,j,i) : w.d;
           Real w_dkp = (k<ke+ng)? prim(m,IDN,k+1,j,i) : w.d;
           Real w_djm = (j>js-ng)? prim(m,IDN,k,j-1,i) : w.d;
@@ -211,7 +211,7 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
       if (rdfloor>0.0) {
-        if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>1.1*r_in) {
+        if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad>r_in) {
           u.d = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
           w.d = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
           dave = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
@@ -220,7 +220,7 @@ void IdealHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
         }
       }
       // apply cell averaging, only when daverage>0.0
-      if (daverage>0.0 && u.d <= dave && rad>1.1*r_in &&
+      if (daverage>0.0 && u.d <= dave && rad>r_in &&
           k>kl && k<ku && j>jl && j<ju && i>il && i<iu) {
         MHDCons1D ukm, ukp, ujm, ujp, uim, uip;
         ukm.d  = cons(m,IDN,k-1,j,i);
