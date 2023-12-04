@@ -54,6 +54,7 @@ class TurbulenceInit {
   Real tcorr,dedt;
   Real expo;
   Real last_dt;
+  Real turb_amin;
   int64_t seed; // for generating amp1,amp2,amp3 arrays
 
   // functions
@@ -108,6 +109,7 @@ TurbulenceInit::TurbulenceInit(std::string bk, MeshBlockPack *pp, ParameterInput
   turb_flag = pin->GetOrAddInteger(bk,"turb_flag",0);
   turb_count = pin->GetOrAddInteger(bk,"turb_count",0);
   turb_type = pin->GetOrAddString(bk,"turb_type","none");
+  turb_amin = pin->GetOrAddReal(bk,"turb_amin",0.0);
   seed = pin->GetOrAddInteger(bk,"seed",-1);
   if (ncells3>1) { // 3D
     ntot = (nhigh+1)*(nhigh+1)*(nhigh+1);
@@ -571,6 +573,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   EOS_Data &eos = (pmy_pack->pmhd != nullptr) ?
                   pmy_pack->pmhd->peos->eos_data : pmy_pack->phydro->peos->eos_data;
   auto &mbsize = pmy_pack->pmb->mb_size;
+  Real &amin = turb_amin;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     if (!(turb_dens)) {
@@ -589,8 +592,8 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
       force_new_(m,0,k,j,i) = 0.0;
       force_new_(m,1,k,j,i) = 0.0;
       force_new_(m,2,k,j,i) = 0.0;
-    } else if (rad < 3.0*eos.r_in) {
-      Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in*M_PI/4.0));
+    } else if (rad < amin*eos.r_in) {
+      Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in/(amin-1.0)*M_PI/2.0));
       force_new_(m,0,k,j,i) *= fac_smooth;
       force_new_(m,1,k,j,i) *= fac_smooth;
       force_new_(m,2,k,j,i) *= fac_smooth;
