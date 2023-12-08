@@ -2911,7 +2911,7 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   }
 
   // Get mass accretion rate, note that it could be negative and more complicated
-  Real sumdata[3] = {0.0,0.0,0.0};
+  Real sumdata[4] = {0.0,0.0,0.0,0.0};
   // extract grids
   auto &grids = pm->pgen->spherical_grids;
   for (int g=0; g<1; ++g) {
@@ -2944,24 +2944,26 @@ void AddJetHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       Real pgas_ini = 0.5*k0*(1.0+pow(x,xi))*pow(rho_ini,gamma);
       Real temp_ini = pgas_ini/rho_ini;
       Real t_hot = tf_hot*temp_ini;
+      Real is_in = (vr<0.0)? 1.0 : 0.0;
       Real is_hot = (int_temp>=t_hot)? 1.0 : 0.0;
 
       // compute mass density
       sumdata[0] += int_dn*r_sq*domega;
       // compute mass flux
       sumdata[1] += 1.0*int_dn*vr*r_sq*domega;
-      sumdata[2] += is_hot*int_dn*vr*r_sq*domega;
+      sumdata[2] += is_in*int_dn*vr*r_sq*domega;
+      sumdata[3] += is_hot*int_dn*vr*r_sq*domega;
     }
   }
 
 #if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, &sumdata, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &sumdata, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
 
-  Real acc_rate = std::max(-sumdata[1],0.0);
+  Real acc_rate = std::max(-sumdata[2],0.0);
 
   Real s0 = 0.0, s1 = 0.0;
-  Kokkos::parallel_reduce("sum_mdot", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
+  Kokkos::parallel_reduce("sum_jet_origin", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &sum_s0, Real &sum_s1) {
     // compute n,k,j,i indices of thread
     int m = (idx)/nkji;
