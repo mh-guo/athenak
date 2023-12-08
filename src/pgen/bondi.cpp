@@ -71,6 +71,11 @@ struct bondi_pgen {
   int  vcycle_n = 0;        // number of cycles in a V-cycle
   Real rv_in = 0.0;         // inner radius of V-cycle
   Real rv_out = 0.0;        // outer radius of V-cycle
+  bool is_amr = false;      // true if AMR
+  int  ncycle_amr = 0;      // number cycles between AMR
+  int  beg_level = 0;       // beginning level for AMR
+  int  end_level = 0;       // ending level for AMR
+  Real r_refine = 0.0;      // mesh refinement radius
 };
 
   bondi_pgen bondi;
@@ -82,12 +87,21 @@ Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
   r = (r<(10*rmin)) ? 0.0 : r;
   return r;
 }
+KOKKOS_INLINE_FUNCTION
+int AMRLevel(int i, int n, int lbeg, int lend) {
+  int nlevel = abs(lend-lbeg)+1;
+  int j = static_cast<int>(i/n)%(2*(nlevel));
+  int sign = (lend>lbeg) ? 1 : -1;
+  int level = (j<(nlevel)) ? lbeg+sign*j : lend-sign*(j-nlevel);
+  return level;
+}
 
 // prototypes for user-defined BCs and error functions
 void FixedBondiInflow(Mesh *pm);
 void BondiErrors(ParameterInput *pin, Mesh *pm);
 void BondiFluxes(HistoryData *pdata, Mesh *pm);
 Real BondiTimeStep(Mesh *pm);
+void BondiRefine(MeshBlockPack* pmbp);
 
 } // namespace
 
@@ -118,6 +132,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = FixedBondiInflow;
   user_hist_func = BondiFluxes;
   user_dt_func = BondiTimeStep;
+  user_ref_func = BondiRefine;
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
@@ -139,12 +154,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   bondi.multi_zone = pin->GetOrAddBoolean("coord", "multi_zone", false);
   if (bondi.multi_zone) {
-    bondi.vcycle_n = pin->GetOrAddInteger("problem", "vcycle_n", 1000);
-    bondi.rv_in = pin->GetOrAddReal("problem", "rv_in", 1.0);
-    bondi.rv_out = pin->GetOrAddReal("problem", "rv_out", 100.0);
+    bondi.vcycle_n = pin->GetOrAddInteger("problem", "vcycle_n", 0);
+    bondi.rv_in = pin->GetOrAddReal("problem", "rv_in", 0.0);
+    bondi.rv_out = pin->GetOrAddReal("problem", "rv_out", 0.0);
   }
 
-  if (restart) return;
+  bondi.is_amr = pmy_mesh_->adaptive;
+  if (bondi.is_amr) {
+    bondi.ncycle_amr = pin->GetOrAddInteger("problem","ncycle_amr",0);
+    bondi.beg_level = pin->GetOrAddInteger("problem","beg_level",0);
+    bondi.end_level = pin->GetOrAddInteger("problem","end_level",0);
+    bondi.r_refine = pin->GetOrAddReal("problem","r_refine",0.0);
+  }
 
   // Get ideal gas EOS data
   bondi.gm = pmbp->phydro->peos->eos_data.gamma;
@@ -172,6 +193,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bondi.c1 = pow(t_crit, bondi.n_adi) * u_crit * SQR(bondi.r_crit);  // (HSW 68)
   bondi.c2 = (SQR(1.0 + (bondi.n_adi+1.0) * t_crit)
               * (1.0 - 3.0/(2.0*bondi.r_crit)));                     // (HSW 69)
+
+  if (restart) return;
 
   // capture variables for the kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -1038,7 +1061,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
 
 Real BondiTimeStep(Mesh *pm) {
   Real dt = pm->dt/pm->cfl_no;
-  if (!bondi.multi_zone) {
+  if (!bondi.multi_zone && !bondi.is_amr) {
     return dt;
   }
 
@@ -1058,15 +1081,21 @@ Real BondiTimeStep(Mesh *pm) {
   auto &eos = (is_mhd)? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   auto &size = pmbp->pmb->mb_size;
 
-  auto &is_general_relativistic_ = pmbp->pcoord->is_general_relativistic;
+  auto &is_gr = pmbp->pcoord->is_general_relativistic;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
 
-  Real r_v = VcycleRadius(pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
+  Real r_v = 0.0;
   if (bondi.multi_zone) {
+    r_v = VcycleRadius(pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
     pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, r_v,
                                std::numeric_limits<Real>::max());
+  }
+
+  if (is_gr && bondi.is_amr && pmbp->pcoord->coord_data.bh_excise) {
+    pmbp->pcoord->SetExcisionMasks(pmbp->pcoord->excision_floor,
+                                   pmbp->pcoord->excision_flux);
   }
 
   if (is_mhd) {
@@ -1097,7 +1126,7 @@ Real BondiTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_general_relativistic_ && r_v <= 1.0) {
+      if (is_gr && r_v <= 1.0 && rad < 10.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
@@ -1162,7 +1191,7 @@ Real BondiTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_general_relativistic_ && r_v <= 1.0) {
+      if (is_gr && r_v <= 1.0 && rad < 20.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
@@ -1190,6 +1219,62 @@ Real BondiTimeStep(Mesh *pm) {
   if (pm->three_d) { dtnew = std::min(dtnew, dt3); }
 
   return dtnew;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn BondiRefine
+//! \brief User-defined refinement condition(s)
+
+// TODO(@mhguo): current AMR method still not working for horizon, need to fix it
+void BondiRefine(MeshBlockPack* pmbp) {
+  // capture variables for kernels
+  Mesh *pm = pmbp->pmesh;
+  auto &size = pmbp->pmb->mb_size;
+
+  // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
+  auto refine_flag_ = pm->pmr->refine_flag;
+  int nmb = pmbp->nmb_thispack;
+  int mbs = pm->gids_eachrank[global_variable::my_rank];
+
+  if (bondi.ncycle_amr>0 && pm->ncycle % bondi.ncycle_amr == 0) {
+    int root_level = pm->root_level;
+    int ncycle=pm->ncycle, ncycle_amr=bondi.ncycle_amr;
+    int old_level = AMRLevel(ncycle-1, ncycle_amr, bondi.beg_level, bondi.end_level);
+    int new_level = AMRLevel(ncycle, ncycle_amr, bondi.beg_level, bondi.end_level);
+    Real &rad_thresh  = bondi.r_refine;
+    DualArray1D<int> levels_thisrank("levels_thisrank", nmb);
+    if (global_variable::my_rank == 0) {
+      std::cout << "BondiRefine: ncycle= " << ncycle << " old_level= " << old_level
+                << " new_level= " << new_level << std::endl;
+    }
+    for (int m=0; m<nmb; ++m) {
+      levels_thisrank.h_view(m) = pm->lloc_eachmb[m+mbs].level;
+    }
+    levels_thisrank.template modify<HostMemSpace>();
+    levels_thisrank.template sync<DevExeSpace>();
+    par_for_outer("BondiRefineLevel",DevExeSpace(), 0, 0, 0, (nmb-1),
+    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
+      Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
+      Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
+      Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
+      if (levels_thisrank.d_view(m+mbs) == old_level+root_level) {
+        if (new_level > old_level) {
+          if (rad_min < rad_thresh) {
+            refine_flag_.d_view(m+mbs) = 1;
+          }
+        } else if (new_level < old_level) {
+          refine_flag_.d_view(m+mbs) = -1;
+        }
+      }
+    });
+  }
 }
 
 } // namespace
