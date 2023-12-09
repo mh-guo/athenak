@@ -548,6 +548,7 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
 
+  bool is_gr = pmy_pack->pcoord->is_general_relativistic;
   Real beta_dt = 1.0;
   // turb_flag == 1 : decaying turbulence
   if (turb_flag == 1) {
@@ -656,12 +657,21 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
         b0.x3f(m,ke+1,j,i) *= norm;
       }
     });
-    par_for("turb-be", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      u(m,IEN,k,j,i)+=0.125*(SQR(b0.x1f(m,k,j,i)+b0.x1f(m,k,j,i+1))
-                            +SQR(b0.x2f(m,k,j,i)+b0.x2f(m,k,j+1,i))
-                            +SQR(b0.x3f(m,k,j,i)+b0.x3f(m,k+1,j,i)));
-    });
+    if (!is_gr) {
+      par_for("turb-be", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        u(m,IEN,k,j,i)+=0.125*(SQR(b0.x1f(m,k,j,i)+b0.x1f(m,k,j,i+1))
+                              +SQR(b0.x2f(m,k,j,i)+b0.x2f(m,k,j+1,i))
+                              +SQR(b0.x3f(m,k,j,i)+b0.x3f(m,k+1,j,i)));
+      });
+    } else { // GR
+      par_for("turb-be", DevExeSpace(), 0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        u(m,IEN,k,j,i)-=0.125*(SQR(b0.x1f(m,k,j,i)+b0.x1f(m,k,j,i+1))
+                              +SQR(b0.x2f(m,k,j,i)+b0.x2f(m,k,j+1,i))
+                              +SQR(b0.x3f(m,k,j,i)+b0.x3f(m,k+1,j,i)));
+      });
+    }
   } else {
     // modify conserved variables
     DvceArray5D<Real> u,w,u_,w_;

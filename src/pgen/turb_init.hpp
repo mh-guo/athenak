@@ -765,6 +765,7 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
   int js = indcs.js, je = indcs.je;
   int ks = indcs.ks, ke = indcs.ke;
 
+  bool is_gr = pmy_pack->pcoord->is_general_relativistic;
   Real beta_dt = 1.0;
   // turb_flag == 1 : decaying turbulence
   if (turb_flag == 1) {
@@ -811,7 +812,11 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
       if (turb_dens) {
         u(m,IDN,k,j,i) += den*fmax((v1+v2+v3),-0.9);
       } else {
-        u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
+        if (!is_gr) {
+          u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
+        } else {
+          u(m,IEN,k,j,i) -= m1*v1 + m2*v2 + m3*v3;
+        }
         u(m,IM1,k,j,i) += den*v1;
         u(m,IM2,k,j,i) += den*v2;
         u(m,IM3,k,j,i) += den*v3;
