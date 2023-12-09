@@ -1398,6 +1398,10 @@ void RadialBoundary(Mesh *pm) {
   return;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn Real AccTimeStep()
+//! \brief User-defined time step function
+
 Real AccTimeStep(Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
 

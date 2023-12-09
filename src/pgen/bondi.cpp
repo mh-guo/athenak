@@ -1199,6 +1199,10 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   return;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn Real BondiTimeStep()
+//! \brief User-defined time step function
+
 Real BondiTimeStep(Mesh *pm) {
   Real dt = pm->dt/pm->cfl_no;
   if (!bondi.multi_zone && !bondi.is_amr) {
