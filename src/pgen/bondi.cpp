@@ -1347,9 +1347,9 @@ Real BondiTimeStep(Mesh *pm) {
         } else         {
           cs = eos.iso_cs;
         }
-        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cs;
-        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cs;
-        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cs;
+        max_dv1 = fmin(fabs(w0_(m,IVX,k,j,i)) + cs, 1.0);
+        max_dv2 = fmin(fabs(w0_(m,IVY,k,j,i)) + cs, 1.0);
+        max_dv3 = fmin(fabs(w0_(m,IVZ,k,j,i)) + cs, 1.0);
       }
       min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
       min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
