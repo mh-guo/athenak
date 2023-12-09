@@ -64,6 +64,7 @@ struct bondi_pgen {
   Real dexcise, pexcise;    // excision parameters
   Real n_adi, k_adi, gm;    // hydro EOS parameters
   Real r_crit;              // sonic point radius
+  Real b_ini;               // initial magnetic field
   Real c1, c2;              // useful constants
   Real temp_min, temp_max;  // bounds for temperature root find
   bool reset_ic = false;    // reset initial conditions after run
@@ -114,10 +115,13 @@ void BondiRefine(MeshBlockPack* pmbp);
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_gr = pmbp->pcoord->is_general_relativistic;
+  bool is_mhd = (pmbp->pmhd != nullptr);
+  auto peos = (is_mhd) ? pmbp->pmhd->peos : pmbp->phydro->peos;
+  bool use_e = peos->eos_data.use_e;
 
-  if (!(pmbp->phydro->peos->eos_data.use_e)) {
+  if (!(use_e)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "bondi test requires hydro/use_e=true" << std::endl;
+              << "bondi test requires use_e=true" << std::endl;
     exit(EXIT_FAILURE);
   }
   if (!is_gr) {
@@ -151,6 +155,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // global parameters
   bondi.k_adi = pin->GetReal("problem", "k_adi");
   bondi.r_crit = pin->GetReal("problem", "r_crit");
+  Real b_ini = bondi.b_ini = pin->GetOrAddReal("problem", "b_ini", 0.0);
 
   bondi.multi_zone = pin->GetOrAddBoolean("coord", "multi_zone", false);
   if (bondi.multi_zone) {
@@ -168,7 +173,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // Get ideal gas EOS data
-  bondi.gm = pmbp->phydro->peos->eos_data.gamma;
+  bondi.gm = peos->eos_data.gamma;
   Real gm1 = bondi.gm - 1.0;
 
   // Parameters
@@ -210,10 +215,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int js = indcs.js;
   int ks = indcs.ks;
   int nmb = pmbp->nmb_thispack;
-  auto w0_ = pmbp->phydro->w0;
+  auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
 
   // Initialize primitive values (HYDRO ONLY)
-  par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
+  par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real rho, pgas, uu1, uu2, uu3;
     Real &x1min = size.d_view(m).x1min;
@@ -236,14 +241,35 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     w0_(m,IM3,k,j,i) = uu3;
   });
 
+  // Add magnetic field
+  if (is_mhd && b_ini>0.0) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    par_for("pgen_bondi_bfield", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      b0_.x1f(m,k,j,i) = 0.0;
+      if (i==n1m1) b0_.x1f(m,k,j,i+1) = 0.0;
+      b0_.x2f(m,k,j,i) = 0.0;
+      if (j==n2m1) b0_.x2f(m,k,j+1,i) = 0.0;
+      b0_.x3f(m,k,j,i) = b_ini;
+      if (k==n3m1) b0_.x3f(m,k+1,j,i) = b_ini;
+      bcc0_(m,IBX,k,j,i) = 0.0;
+      bcc0_(m,IBY,k,j,i) = 0.0;
+      bcc0_(m,IBZ,k,j,i) = b_ini;
+    });
+  }
+
   // Convert primitives to conserved
-  auto &u0_ = pmbp->phydro->u0;
-  auto &u1_ = pmbp->phydro->u1;
+  auto &u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  auto &u1_ = is_mhd ? pmbp->pmhd->u1 : pmbp->phydro->u1;
   if (bondi.reset_ic) {
-    pmbp->phydro->peos->PrimToCons(w0_, u1_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->peos->PrimToCons(w0_, u1_, 0, n1m1, 0, n2m1, 0, n3m1);
+    } else if (pmbp->pmhd != nullptr) {
+      auto &bcc0_ = pmbp->pmhd->bcc0;
+      pmbp->pmhd->peos->PrimToCons(w0_, bcc0_, u1_, 0, n1m1, 0, n2m1, 0, n3m1);
+    }
     return;
-  } else {
-    pmbp->phydro->peos->PrimToCons(w0_, u0_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
   }
 
   // Convert primitives to conserved
@@ -555,30 +581,32 @@ static Real TemperatureResidual(struct bondi_pgen pgen, Real t, Real r) {
 // Note quantities at boundaryies are held fixed to initial condition values
 
 void FixedBondiInflow(Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
-  auto &size = pm->pmb_pack->pmb->mb_size;
-  auto &coord = pm->pmb_pack->pcoord->coord_data;
+  auto &size = pmbp->pmb->mb_size;
+  auto &coord = pmbp->pcoord->coord_data;
   int &ng = indcs.ng;
   int n1 = indcs.nx1 + 2*ng;
   int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
+  int n1m1 = n1 - 1, n2m1 = n2 - 1, n3m1 = n3 - 1;
   int &is = indcs.is;  int &ie  = indcs.ie;
   int &js = indcs.js;  int &je  = indcs.je;
   int &ks = indcs.ks;  int &ke  = indcs.ke;
-  auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
-  auto bondi_ = bondi;
+  auto &mb_bcs = pmbp->pmb->mb_bcs;
+  int nmb = pmbp->nmb_thispack;
 
-  int nmb = pm->pmb_pack->nmb_thispack;
-  auto pmbp = pm->pmb_pack;
-  auto u0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
-  auto u1_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u1 : pmbp->phydro->u1;
-  auto w0_ = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  auto bondi_ = bondi;
+  bool is_mhd = (pmbp->pmhd != nullptr);
+  auto u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  auto u1_ = is_mhd ? pmbp->pmhd->u1 : pmbp->phydro->u1;
+  auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
 
   bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
   bool &multi_zone = pmbp->pcoord->multi_zone;
   auto zone_mask = pmbp->pcoord->zone_mask;
   if (multi_zone && !refining) {
-    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    par_for("fixed_zone", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       if (zone_mask(m,k,j,i)) {
         u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
@@ -590,9 +618,88 @@ void FixedBondiInflow(Mesh *pm) {
     });
   }
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
-  par_for("fixed_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
+  // B-field boundary conditions
+  if (is_mhd) {
+    auto &b0 = pm->pmb_pack->pmhd->b0;
+    // X1-Boundary
+    par_for("noinflow_field_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),
+    KOKKOS_LAMBDA(int m, int k, int j) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
+        for (int i=0; i<ng; ++i) {
+          b0.x1f(m,k,j,is-i-1) = b0.x1f(m,k,j,is);
+          b0.x2f(m,k,j,is-i-1) = b0.x2f(m,k,j,is);
+          if (j == n2-1) {b0.x2f(m,k,j+1,is-i-1) = b0.x2f(m,k,j+1,is);}
+          b0.x3f(m,k,j,is-i-1) = b0.x3f(m,k,j,is);
+          if (k == n3-1) {b0.x3f(m,k+1,j,is-i-1) = b0.x3f(m,k+1,j,is);}
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
+        for (int i=0; i<ng; ++i) {
+          b0.x1f(m,k,j,ie+i+2) = b0.x1f(m,k,j,ie+1);
+          b0.x2f(m,k,j,ie+i+1) = b0.x2f(m,k,j,ie);
+          if (j == n2-1) {b0.x2f(m,k,j+1,ie+i+1) = b0.x2f(m,k,j+1,ie);}
+          b0.x3f(m,k,j,ie+i+1) = b0.x3f(m,k,j,ie);
+          if (k == n3-1) {b0.x3f(m,k+1,j,ie+i+1) = b0.x3f(m,k+1,j,ie);}
+        }
+      }
+    });
+    // X2-Boundary
+    par_for("noinflow_field_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
+        for (int j=0; j<ng; ++j) {
+          b0.x1f(m,k,js-j-1,i) = b0.x1f(m,k,js,i);
+          if (i == n1-1) {b0.x1f(m,k,js-j-1,i+1) = b0.x1f(m,k,js,i+1);}
+          b0.x2f(m,k,js-j-1,i) = b0.x2f(m,k,js,i);
+          b0.x3f(m,k,js-j-1,i) = b0.x3f(m,k,js,i);
+          if (k == n3-1) {b0.x3f(m,k+1,js-j-1,i) = b0.x3f(m,k+1,js,i);}
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
+        for (int j=0; j<ng; ++j) {
+          b0.x1f(m,k,je+j+1,i) = b0.x1f(m,k,je,i);
+          if (i == n1-1) {b0.x1f(m,k,je+j+1,i+1) = b0.x1f(m,k,je,i+1);}
+          b0.x2f(m,k,je+j+2,i) = b0.x2f(m,k,je+1,i);
+          b0.x3f(m,k,je+j+1,i) = b0.x3f(m,k,je,i);
+          if (k == n3-1) {b0.x3f(m,k+1,je+j+1,i) = b0.x3f(m,k+1,je,i);}
+        }
+      }
+    });
+    // X3-Boundary
+    par_for("noinflow_field_x3", DevExeSpace(),0,(nmb-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+        for (int k=0; k<ng; ++k) {
+          b0.x1f(m,ks-k-1,j,i) = b0.x1f(m,ks,j,i);
+          if (i == n1-1) {b0.x1f(m,ks-k-1,j,i+1) = b0.x1f(m,ks,j,i+1);}
+          b0.x2f(m,ks-k-1,j,i) = b0.x2f(m,ks,j,i);
+          if (j == n2-1) {b0.x2f(m,ks-k-1,j+1,i) = b0.x2f(m,ks,j+1,i);}
+          b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i);
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
+        for (int k=0; k<ng; ++k) {
+          b0.x1f(m,ke+k+1,j,i) = b0.x1f(m,ke,j,i);
+          if (i == n1-1) {b0.x1f(m,ke+k+1,j,i+1) = b0.x1f(m,ke,j,i+1);}
+          b0.x2f(m,ke+k+1,j,i) = b0.x2f(m,ke,j,i);
+          if (j == n2-1) {b0.x2f(m,ke+k+1,j+1,i) = b0.x2f(m,ke,j+1,i);}
+          b0.x3f(m,ke+k+2,j,i) = b0.x3f(m,ke+1,j,i);
+        }
+      }
+    });
+  }
+
+  // Primitive boundary conditions
+  if (is_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,is-ng,is-1,0,n2m1,0,n3m1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,ie+1,ie+ng,0,n2m1,0,n3m1);
+  } else {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,n2m1,0,n3m1);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,n2m1,0,n3m1);
+  }
+  par_for("fixed_x1", DevExeSpace(),0,(nmb-1),0,n3m1,0,n2m1,0,(ng-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x1 boundary
     Real &x1min = size.d_view(m).x1min;
@@ -630,12 +737,25 @@ void FixedBondiInflow(Mesh *pm) {
     }
   });
   // PrimToCons on X1 physical boundary ghost zones
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+  if (is_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,is-ng,is-1,0,n2m1,0,n3m1);
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,ie+1,ie+ng,0,n2m1,0,n3m1);
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,n2m1,0,n3m1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,n2m1,0,n3m1);
+  }
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js-1,0,(n3-1));
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je+1,je+ng,0,(n3-1));
-  par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
+  if (is_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,js-ng,js-1,0,n3m1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,je+1,je+ng,0,n3m1);
+  } else {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,js-ng,js-1,0,n3m1);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,je+1,je+ng,0,n3m1);
+  }
+  par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,n3m1,0,(ng-1),0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x2 boundary
     Real &x1min = size.d_view(m).x1min;
@@ -672,12 +792,25 @@ void FixedBondiInflow(Mesh *pm) {
       w0_(m,IM3,k,(je+j+1),i) = uu3;
     }
   });
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+  if (is_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,js-ng,js-1,0,n3m1);
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,je+1,je+ng,0,n3m1);
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,js-ng,js-1,0,n3m1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,je+1,je+ng,0,n3m1);
+  }
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke+1,ke+ng);
-  par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
+  if (is_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,0,n2m1,ks-ng,ks-1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,0,n2m1,ke+1,ke+ng);
+  } else {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,0,n2m1,ks-ng,ks-1);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,0,n2m1,ke+1,ke+ng);
+  }
+  par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,n2m1,0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x3 boundary
     Real &x1min = size.d_view(m).x1min;
@@ -714,8 +847,14 @@ void FixedBondiInflow(Mesh *pm) {
       w0_(m,IM3,(ke+k+1),j,i) = uu3;
     }
   });
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  if (is_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ks-ng,ks-1);
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,0,n2m1,ks-ng,ks-1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
+  }
 
   return;
 }
@@ -744,6 +883,7 @@ void BondiErrors(ParameterInput *pin, Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &size = pmbp->pmb->mb_size;
 
+  // TODO(@mhguo): should we add for mhd?
   // compute errors for Hydro  -----------------------------------------------------------
   if (pmbp->phydro != nullptr) {
     nvars = pmbp->phydro->nhydro;
@@ -1076,7 +1216,7 @@ Real BondiTimeStep(Mesh *pm) {
   Real dt3 = std::numeric_limits<float>::max();
 
   // capture class variables for kernel
-  bool is_mhd = (pmbp->pmhd != nullptr)? true : false;
+  bool is_mhd = (pmbp->pmhd != nullptr);
   auto &w0_ = (is_mhd)? pmbp->pmhd->w0 : pmbp->phydro->w0;
   auto &eos = (is_mhd)? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   auto &size = pmbp->pmb->mb_size;
