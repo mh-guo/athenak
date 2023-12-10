@@ -1274,7 +1274,7 @@ Real BondiTimeStep(Mesh *pm) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
-      } else if (rad >= r_v) {
+      } else {
         Real &w_d = w0_(m,IDN,k,j,i);
         Real &w_bx = bcc0_(m,IBX,k,j,i);
         Real &w_by = bcc0_(m,IBY,k,j,i);
@@ -1301,6 +1301,11 @@ Real BondiTimeStep(Mesh *pm) {
           cf = eos.IdealMHDFastSpeed(w_d, w_bz, w_bx, w_by);
         }
         max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
+      }
+      if (is_gr) {
+        max_dv1 = fmin(max_dv1, 1.0);
+        max_dv2 = fmin(max_dv2, 1.0);
+        max_dv3 = fmin(max_dv3, 1.0);
       }
 
       min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
@@ -1339,7 +1344,7 @@ Real BondiTimeStep(Mesh *pm) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
-      } else if (rad >= r_v) {
+      } else {
         Real cs;
         if (eos.is_ideal) {
           Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
@@ -1347,10 +1352,16 @@ Real BondiTimeStep(Mesh *pm) {
         } else         {
           cs = eos.iso_cs;
         }
-        max_dv1 = fmin(fabs(w0_(m,IVX,k,j,i)) + cs, 1.0);
-        max_dv2 = fmin(fabs(w0_(m,IVY,k,j,i)) + cs, 1.0);
-        max_dv3 = fmin(fabs(w0_(m,IVZ,k,j,i)) + cs, 1.0);
+        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cs;
+        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cs;
+        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cs;
       }
+      if (is_gr) {
+        max_dv1 = fmin(max_dv1, 1.0);
+        max_dv2 = fmin(max_dv2, 1.0);
+        max_dv3 = fmin(max_dv3, 1.0);
+      }
+
       min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
       min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
       min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
