@@ -1572,7 +1572,7 @@ Real AccTimeStep(Mesh *pm) {
         if (eos.is_ideal) {
           Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
           cs = eos.IdealHydroSoundSpeed(w0_(m,IDN,k,j,i), p);
-        } else         {
+        } else {
           cs = eos.iso_cs;
         }
         max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cs;

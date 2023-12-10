@@ -1270,11 +1270,11 @@ Real BondiTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_gr && r_v <= 1.0 && rad < 10.0) {
+      if (is_gr && r_v <= 1.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
-      } else {
+      } else if (rad >= r_v) {
         Real &w_d = w0_(m,IDN,k,j,i);
         Real &w_bx = bcc0_(m,IBX,k,j,i);
         Real &w_by = bcc0_(m,IBY,k,j,i);
@@ -1340,16 +1340,16 @@ Real BondiTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_gr && r_v <= 1.0 && rad < 20.0) {
+      if (is_gr && r_v <= 1.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
-      } else {
+      } else if (rad >= r_v) {
         Real cs;
         if (eos.is_ideal) {
           Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
           cs = eos.IdealHydroSoundSpeed(w0_(m,IDN,k,j,i), p);
-        } else         {
+        } else {
           cs = eos.iso_cs;
         }
         max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cs;
