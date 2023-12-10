@@ -25,12 +25,19 @@ void SingleC2P_IdealMHD(MHDCons1D &u, const EOS_Data &eos,
   Real efloor = eos.pfloor/(eos.gamma - 1.0);
   Real tfloor = eos.tfloor;
   Real sfloor = eos.sfloor;
+  Real tceil  = eos.tceil;
+  Real mceil  = eos.mceil;
   Real gm1 = eos.gamma - 1.0;
 
   // apply density floor, without changing momentum or energy
   if (u.d < dfloor_) {
     u.d = dfloor_;
     dfloor_used = true;
+  }
+  // apply magnetization ceiling
+  Real b2 = SQR(u.bx) + SQR(u.by) + SQR(u.bz);
+  if (b2/u.d > mceil) {
+    u.d = b2/mceil;
   }
   w.d = u.d;
 
@@ -61,6 +68,11 @@ void SingleC2P_IdealMHD(MHDCons1D &u, const EOS_Data &eos,
   if (spe <= sfloor) {
     w.e = w.d*sfloor/spe_over_eps;
     efloor_used = true;
+  }
+  // apply temperature ceiling
+  if (gm1*w.e*di > tceil) {
+    w.e = w.d*tceil/gm1;
+    u.e = w.e + e_k + e_m;
   }
   return;
 }
@@ -136,6 +148,10 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   if (u.d < eos.dfloor) {
     u.d = eos.dfloor;
     dfloor_used = true;
+  }
+  // apply magnetization ceiling
+  if (b2/u.d > eos.mceil) {
+    u.d = b2/eos.mceil;
   }
 
   // apply energy floor
@@ -239,6 +255,8 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   if (max_iter==max_iterations) {
     w.d = eos.dfloor;
     w.e = eos.pfloor/gm1;
+    w.e = fmax(w.e, eos.tfloor*w.d/gm1);
+    w.e = fmax(w.e, eos.sfloor*pow(w.d, eos.gamma)/gm1);
     w.vx = 0.0;
     w.vy = 0.0;
     w.vz = 0.0;
@@ -260,13 +278,19 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
     dens = eos.dfloor;
     dfloor_used = true;
   }
+  // No need to apply magnetization ceiling again, since b2 is ceiled in the first step
 
   // compute specific internal energy density then apply floors
   Real eps = lor*(qbar - mu*rbar) + z2/(lor + 1.0);
   Real epsmin = fmax(eos.pfloor/(dens*gm1), eos.sfloor*pow(dens, gm1)/gm1);
+  epsmin = fmax(epsmin, eos.tfloor/(gm1));
+  Real epsmax = eos.tceil/(gm1);
   if (eps <= epsmin) {
     eps = epsmin;
     efloor_used = true;
+  }
+  if (eps >= epsmax) {
+    eps = epsmax;
   }
 
   // set parameters required for velocity inversion
