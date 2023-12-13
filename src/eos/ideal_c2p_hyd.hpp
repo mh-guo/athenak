@@ -67,6 +67,7 @@ void SingleC2P_IdealHyd(HydCons1D &u, const EOS_Data &eos,
   if (gm1*w.e*di > tceil) {
     w.e = w.d*tceil/gm1;
     u.e = w.e + e_k;
+    tfloor_used = true; // not really, but we need a flag to know if we hit the ceiling
   }
   return;
 }
@@ -219,6 +220,7 @@ void SingleC2P_IdealSRHyd(HydCons1D &u, const EOS_Data &eos, const Real s2, HydP
   }
   if (eps >= epsmax) {
     eps = epsmax;
+    efloor_used = true; // not really, but we want to know if we hit the ceiling
   }
 
   // set parameters required for velocity inversion

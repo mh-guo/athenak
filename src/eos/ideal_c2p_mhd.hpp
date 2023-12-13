@@ -38,6 +38,7 @@ void SingleC2P_IdealMHD(MHDCons1D &u, const EOS_Data &eos,
   Real b2 = SQR(u.bx) + SQR(u.by) + SQR(u.bz);
   if (b2/u.d > mceil) {
     u.d = b2/mceil;
+    dfloor_used = true; // not really, but we need a flag to know if we hit the ceiling
   }
   w.d = u.d;
 
@@ -73,6 +74,7 @@ void SingleC2P_IdealMHD(MHDCons1D &u, const EOS_Data &eos,
   if (gm1*w.e*di > tceil) {
     w.e = w.d*tceil/gm1;
     u.e = w.e + e_k + e_m;
+    tfloor_used =true; // not really, but we need a flag to know if we hit the ceiling
   }
   return;
 }
@@ -152,6 +154,7 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   // apply magnetization ceiling
   if (b2/u.d > eos.mceil) {
     u.d = b2/eos.mceil;
+    dfloor_used = true; // not really, but we need a flag to know if we hit the ceiling
   }
 
   // apply energy floor
@@ -291,6 +294,7 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   }
   if (eps >= epsmax) {
     eps = epsmax;
+    efloor_used = true; // not really, but we need a flag to know if we hit the ceiling
   }
 
   // set parameters required for velocity inversion

@@ -140,6 +140,7 @@ Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
   r = (r<(10*rmin)) ? 0.0 : r;
   return r;
 }
+void Diagnostic(Mesh *pm);
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
@@ -1918,6 +1919,9 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
 //! \brief User-defined time step function
 
 Real UsrTimeStep(Mesh *pm) {
+  if (torus.ndiag>0 && pm->ncycle % torus.ndiag == 0) {
+    Diagnostic(pm);
+  }
   Real dt = pm->dt/pm->cfl_no;
   if (torus.vcycle_n<=0) {
     return dt;
@@ -1992,4 +1996,130 @@ Real UsrTimeStep(Mesh *pm) {
   if (pm->three_d) { dtnew = std::min(dtnew, dt3); }
 
   return dtnew;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Diagnostic()
+//! \brief Compute diagnostics.
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+
+void Diagnostic(Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
+                             pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int is = indcs.is; int nx1 = indcs.nx1;
+  int js = indcs.js; int nx2 = indcs.nx2;
+  int ks = indcs.ks; int nx3 = indcs.nx3;
+  auto &size = pmbp->pmb->mb_size;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji = nx2*nx1;
+
+  Real gamma = eos_data.gamma;
+  Real gm1 = gamma - 1.0;
+
+  Real dtnew = std::numeric_limits<Real>::max();
+
+  Real min_dens = std::numeric_limits<Real>::max();
+  Real min_vtot = std::numeric_limits<Real>::max();
+  Real min_temp = std::numeric_limits<Real>::max();
+  Real min_eint = std::numeric_limits<Real>::max();
+  Real max_dens = std::numeric_limits<Real>::min();
+  Real max_vtot = std::numeric_limits<Real>::min();
+  Real max_temp = std::numeric_limits<Real>::min();
+  Real max_eint = std::numeric_limits<Real>::min();
+  Real max_bfld = std::numeric_limits<Real>::min();
+  Real max_valf = std::numeric_limits<Real>::min();
+  Real min_dtva = std::numeric_limits<Real>::max();
+
+  // find smallest (e/cooling_rate) in each cell
+  Kokkos::parallel_reduce("diagnostic", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &min_dt, Real &min_d, Real &min_v, Real &min_t,
+  Real &min_e, Real &max_d, Real &max_v, Real &max_t, Real &max_e) {
+    // compute m,k,j,i indices of thread and call function
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real dx = fmin(fmin(size.d_view(m).dx1,size.d_view(m).dx2),size.d_view(m).dx3);
+
+    // temperature in cgs unit
+    Real temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+    Real eint = w0(m,IEN,k,j,i);
+
+    Real vtot = sqrt(SQR(w0(m,IVX,k,j,i))+SQR(w0(m,IVY,k,j,i))+SQR(w0(m,IVZ,k,j,i)));
+    min_dt = fmin(dx/sqrt(gamma*temp), min_dt);
+    min_d = fmin(w0(m,IDN,k,j,i), min_d);
+    min_v = fmin(vtot,min_v);
+    min_t = fmin(temp, min_t);
+    min_e = fmin(eint, min_e);
+    max_d = fmax(w0(m,IDN,k,j,i), max_d);
+    max_v = fmax(vtot,max_v);
+    max_t = fmax(temp, max_t);
+    max_e = fmax(eint, max_e);
+  }, Kokkos::Min<Real>(dtnew), Kokkos::Min<Real>(min_dens), Kokkos::Min<Real>(min_vtot),
+  Kokkos::Min<Real>(min_temp), Kokkos::Min<Real>(min_eint), Kokkos::Max<Real>(max_dens),
+  Kokkos::Max<Real>(max_vtot), Kokkos::Max<Real>(max_temp), Kokkos::Max<Real>(max_eint));
+
+  if (pmbp->pmhd != nullptr) {
+    auto bcc = pmbp->pmhd->bcc0;
+    Kokkos::parallel_reduce("diagnostic", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &max_b, Real &max_va, Real &min_dta) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+
+      Real dx = fmin(fmin(size.d_view(m).dx1,size.d_view(m).dx2),size.d_view(m).dx3);
+      Real btot = sqrt(SQR(bcc(m,IBX,k,j,i))+SQR(bcc(m,IBY,k,j,i))+SQR(bcc(m,IBZ,k,j,i)));
+      Real va = btot/sqrt(w0(m,IDN,k,j,i));
+      Real dta = dx/fmax(va,1e-30);
+      max_b = fmax(btot,max_b);
+      max_va = fmax(va,max_va);
+      min_dta = fmin(dta,min_dta);
+    }, Kokkos::Max<Real>(max_bfld), Kokkos::Max<Real>(max_valf),
+    Kokkos::Min<Real>(min_dtva));
+  }
+#if MPI_PARALLEL_ENABLED
+  Real m_min[6] = {dtnew,min_dens,min_vtot,min_temp,min_eint,min_dtva};
+  Real m_max[6] = {max_dens,max_vtot,max_temp,max_eint,max_bfld,max_valf};
+  Real gm_min[6];
+  Real gm_max[6];
+  //MPI_Allreduce(MPI_IN_PLACE, &dtnew, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(m_min, gm_min, 6, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(m_max, gm_max, 6, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+  dtnew = gm_min[0];
+  min_dens = gm_min[1];
+  min_vtot = gm_min[2];
+  min_temp = gm_min[3];
+  min_eint = gm_min[4];
+  min_dtva = gm_min[5];
+  max_dens = gm_max[0];
+  max_vtot = gm_max[1];
+  max_temp = gm_max[2];
+  max_eint = gm_max[3];
+  max_bfld = gm_max[4];
+  max_valf = gm_max[5];
+#endif
+  if (global_variable::my_rank == 0) {
+    std::cout << " min_d=" << min_dens << " max_d=" << max_dens << std::endl
+              << " min_v=" << min_vtot << " max_v=" << max_vtot << std::endl
+              << " min_t=" << min_temp << " max_t=" << max_temp << std::endl
+              << " min_e=" << min_eint << " max_e=" << max_eint << std::endl
+              << " dt_cs=" << dtnew;
+    if (pmbp->pmhd != nullptr) {
+      std::cout << " dt_va=" << min_dtva << std::endl
+                << " max_b=" << max_bfld << " max_va=" << max_valf;
+    }
+    std::cout << std::endl;
+  }
+  return;
 }
