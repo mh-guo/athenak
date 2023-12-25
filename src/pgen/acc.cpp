@@ -79,6 +79,7 @@ struct pgenacc {
   Real rho_0, temp_0;
   Real k0_entry, xi_entry; // Parameters for entropy
   Real rad_entry, dens_entry; // Parameters for entropy
+  Real b_ini; // initial magnetic field
   int  sink_flag; // Sink condition
   Real sink_d, sink_t; // Parameters for sink
   int  user_bc_flag; // Boundary condition
@@ -151,7 +152,7 @@ void AccRefine(MeshBlockPack* pmbp);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
 void AccFinalWork(ParameterInput *pin, Mesh *pm);
 void ReadFromRestart(Mesh *pm, ParameterInput *pin);
-int GIDConvert(int id, Mesh *pm, ParameterInput *pin);
+int GIDConvert(int id, int rst_max_level, Mesh *pm, ParameterInput *pin);
 
 void Diagnostic(Mesh *pm);
 void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
@@ -245,6 +246,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   auto &size = pmbp->pmb->mb_size;
   int nmb1 = (pmbp->nmb_thispack-1);
+  bool is_mhd = (pmbp->pmhd != nullptr);
   bool is_gr = pmbp->pcoord->is_general_relativistic;
 
   // Check if turn on the problem
@@ -320,6 +322,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else {
     return;
   }
+  Real b_ini = acc->b_ini = pin->GetOrAddReal("problem","b_ini",0.0);
   acc->multi_zone = pin->GetOrAddBoolean("coord","multi_zone",false);
   acc->vcycle_n = pin->GetOrAddInteger("problem","vcycle_n",0);
   if (acc->multi_zone) {
@@ -631,6 +634,23 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       w0(m,IEN,k,j,i) = pgas/gm1;
     }
   });
+  // Add magnetic field
+  if (is_mhd && b_ini>0.0) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    par_for("pgen_bondi_bfield", DevExeSpace(), 0,nmb1,0,n3m1,0,n2m1,0,n1m1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      b0_.x1f(m,k,j,i) = 0.0;
+      if (i==n1m1) b0_.x1f(m,k,j,i+1) = 0.0;
+      b0_.x2f(m,k,j,i) = 0.0;
+      if (j==n2m1) b0_.x2f(m,k,j+1,i) = 0.0;
+      b0_.x3f(m,k,j,i) = b_ini;
+      if (k==n3m1) b0_.x3f(m,k+1,j,i) = b_ini;
+      bcc0_(m,IBX,k,j,i) = 0.0;
+      bcc0_(m,IBY,k,j,i) = 0.0;
+      bcc0_(m,IBZ,k,j,i) = b_ini;
+    });
+  }
   // Convert primitives to conserved
   if (pmbp->phydro != nullptr) {
     pmbp->phydro->peos->PrimToCons(w0, u0, 0, n1m1, 0, n2m1, 0, n3m1);
@@ -751,7 +771,7 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
   MPI_Bcast(headerdata, headersize, MPI_CHAR, 0, MPI_COMM_WORLD);
 #endif
 
-  // get old mesh data, time and cycle, actually useless here
+  // get old mesh data, time and cycle, max_level is useful for adaptive mesh
   // Now copy mesh data read from restart file into Mesh variables. Order of variables
   // set by Write()'s in restart.cpp
   // Note this overwrites size and indices initialized in Mesh constructor.
@@ -759,6 +779,9 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
   int nmb_total = 0;
   std::memcpy(&nmb_total, &(headerdata[hdos]), sizeof(int));
   delete [] headerdata;
+
+  // allocate memory for lists read from restart
+  LogicalLocation *lloc_eachmb = new LogicalLocation[nmb_total];
 
   // allocate idlist buffer and read list of logical locations and cost
   IOWrapperSizeT listsize = sizeof(LogicalLocation) + sizeof(float);
@@ -776,6 +799,20 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
   // then broadcast the ID list
   MPI_Bcast(idlist, listsize*nmb_total, MPI_CHAR, 0, MPI_COMM_WORLD);
 #endif
+
+  int current_level = pm->root_level;
+  // everyone sets the logical location and cost lists based on bradcasted data
+  int os = 0;
+  for (int i=0; i<nmb_total; i++) {
+    std::memcpy(&(lloc_eachmb[i]), &(idlist[os]), sizeof(LogicalLocation));
+    os += sizeof(LogicalLocation);
+  }
+  for (int i=0; i<nmb_total; i++) {
+    if (lloc_eachmb[i].level > current_level) current_level = lloc_eachmb[i].level;
+  }
+  delete [] idlist;
+  delete [] lloc_eachmb;
+  Real rst_max_level = current_level;
 
   //--- STEP 3.  All ranks read data over all MeshBlocks (5D arrays) in parallel
   // Similar to data read in ProblemGenerator constructor for restarts
@@ -848,7 +885,8 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
   if (phydro != nullptr) {
     Kokkos::realloc(ccin, nmb, nhydro, nout3, nout2, nout1);
     for (int m=0;  m<noutmbs_max; ++m) {
-      myoffset = headeroffset + var_offset + GIDConvert(mygids+m,pm,pin)*data_size;
+      myoffset = headeroffset + var_offset +
+                 GIDConvert(mygids+m,rst_max_level,pm,pin)*data_size;
       // every rank has a MB to read, so read collectively
       if (m < noutmbs_min) {
         // get ptr to cell-centered MeshBlock data
@@ -889,7 +927,8 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
   if (pmhd != nullptr) {
     Kokkos::realloc(ccin, nmb, nmhd, nout3, nout2, nout1);
     for (int m=0;  m<noutmbs_max; ++m) {
-      myoffset = headeroffset + var_offset + GIDConvert(mygids+m,pm,pin)*data_size;
+      myoffset = headeroffset + var_offset +
+                 GIDConvert(mygids+m,rst_max_level,pm,pin)*data_size;
       // every rank has a MB to read, so read collectively
       if (m < noutmbs_min) {
         // get ptr to cell-centered MeshBlock data
@@ -931,7 +970,8 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
     Kokkos::realloc(fcin.x3f, nmb, nout3+1, nout2, nout1);
     // read FC data into host array, again one MeshBlock at a time
     for (int m=0;  m<noutmbs_max; ++m) {
-      myoffset = headeroffset + var_offset + GIDConvert(mygids+m,pm,pin)*data_size;
+      myoffset = headeroffset + var_offset +
+                 GIDConvert(mygids+m,rst_max_level,pm,pin)*data_size;
       // every rank has a MB to write, so write collectively
       if (m < noutmbs_min) {
         // get ptr to x1-face field
@@ -1027,9 +1067,9 @@ void ReadFromRestart(Mesh *pm, ParameterInput *pin) {
 //----------------------------------------------------------------------------------------
 //! \fn GIDConvert
 //! \brief Converts the global ID of a MeshBlock to a new id for reading restart file
-int GIDConvert(int id, Mesh *pm, ParameterInput *pin) {
+int GIDConvert(int id, int rst_max_level, Mesh *pm, ParameterInput *pin) {
   int rst_level = pin->GetOrAddInteger("problem", "rst_level", 0);
-  int num_level = pm->max_level - pm->root_level;
+  int num_level = rst_max_level - rst_level - pm->root_level;
   int octau = 7*num_level+8; // one eighth of the box
   int newid = id+((id/octau)*6+7)*rst_level;
   // TODO(@mhguo): tmp cout!
@@ -1455,7 +1495,7 @@ Real AccTimeStep(Mesh *pm) {
   Real dt3 = std::numeric_limits<float>::max();
 
   // capture class variables for kernel
-  bool is_mhd = (pmbp->pmhd != nullptr)? true : false;
+  bool is_mhd = (pmbp->pmhd != nullptr);
   auto &w0_ = (is_mhd)? pmbp->pmhd->w0 : pmbp->phydro->w0;
   auto &eos = (is_mhd)? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   auto &size = pmbp->pmb->mb_size;
@@ -2708,6 +2748,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real temp_unit = pmbp->punit->temperature_cgs();
   Real n_h_unit = pmbp->punit->density_cgs()/acc->mu_h/pmbp->punit->atomic_mass_unit_cgs;
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
 
   Real rin = acc->r_in;
   Real rmin_heat = acc->rmin_heat;
@@ -2857,7 +2898,11 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       //if (m==19 && k==4 && j==4 && i==4) {
       //  printf("q_heating: rad=%0.6e q_heating=%0.6e\n",rad,q_heating);
       //}
-      u0(m,IEN,k,j,i) += bdt * q_heating;
+      if (is_gr) {
+        u0(m,IEN,k,j,i) -= bdt * q_heating;
+      } else {
+        u0(m,IEN,k,j,i) += bdt * q_heating;
+      }
     }
   });
   return;

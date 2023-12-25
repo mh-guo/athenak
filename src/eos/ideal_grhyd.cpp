@@ -50,6 +50,9 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   auto &fofc_ = pmy_pack->phydro->fofc;
   auto eos = eos_data;
   Real gm1 = eos_data.gamma - 1.0;
+  Real &rdfloor = eos.rdfloor;
+  Real &rdfl_r0 = eos.rdfloor_r0;
+  Real &rdfl_pow = eos.rdfloor_pow;
 
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
@@ -126,6 +129,13 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       HydCons1D u_sr;
       Real s2;
       TransformToSRHyd(u,glower,gupper,s2,u_sr);
+
+      // apply radius-dependent density floor if necessary
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      if (rdfloor > 0.0 && u_sr.d < rdfloor*pow(rad/rdfl_r0,rdfl_pow)) {
+        u_sr.d = rdfloor*pow(rad/rdfl_r0,rdfl_pow);
+        dfloor_used = true;
+      }
 
       // call c2p function
       // (inline function in ideal_c2p_hyd.hpp file)
