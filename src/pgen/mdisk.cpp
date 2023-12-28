@@ -21,6 +21,7 @@
 
 namespace {
 struct mdisk_pgen {
+  Real iso_cs;              // isothermal sound speed
   Real sink_d;              // sink density
   Real sink_p;              // sink pressure
   Real dens_0;              // gas density
@@ -64,13 +65,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   bool is_mhd = (pmbp->pmhd != nullptr);
   bool is_gr = pmbp->pcoord->is_general_relativistic;
+  auto &eos = is_mhd ? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
 
+  mdisk.iso_cs = eos.iso_cs;
   mdisk.sink_d = pin->GetReal("problem","sink_d");
   mdisk.sink_p = pin->GetReal("problem","sink_p");
   mdisk.dens_0 = pin->GetReal("problem","dens_0");
   mdisk.j_z = pin->GetOrAddReal("problem","j_z",0.0);
   Real b_ini = mdisk.b_ini = pin->GetOrAddReal("problem","b_ini",0.0);
-  auto &eos = is_mhd ? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   mdisk.dt_floor = eos.dt_floor;
   mdisk.ndiag = pin->GetOrAddInteger("problem","ndiag",0);
   mdisk.bc_flag = pin->GetOrAddInteger("problem","bc_flag",0);
@@ -169,8 +171,11 @@ KOKKOS_INLINE_FUNCTION
 static void ComputePrimitiveSingle(Real x, Real y, Real z, struct mdisk_pgen pgen,
                                    Real& rho, Real& uu1, Real& uu2, Real& uu3) {
   Real r = sqrt(SQR(x) + SQR(y) + SQR(z));
+  Real r_cyl = sqrt(SQR(x) + SQR(y));
   Real j_z = pgen.j_z;
-  rho = pgen.dens_0;
+  // gamma = 1.0
+  Real iso_cs = pgen.iso_cs;
+  rho = pgen.dens_0*fmax(exp((1.0/r-SQR(j_z/r_cyl)/2.0)/SQR(iso_cs)),0.01);
   uu1 = - j_z * y / SQR(r);
   uu2 = j_z * x / SQR(r);
   uu3 = 0.0;
@@ -199,7 +204,6 @@ void UserBoundary(Mesh *pm) {
 
   bool is_mhd = (pmbp->pmhd != nullptr);
   auto u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
-  auto u1_ = is_mhd ? pmbp->pmhd->u1 : pmbp->phydro->u1;
   auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
   int nvar = u0_.extent_int(1);
   auto &mdisk_ = mdisk;
@@ -260,7 +264,6 @@ void UserBoundary(Mesh *pm) {
         u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bx/va1_ceil));
         u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(by/va2_ceil));
         u0_(m,IDN,k,j,i) = fmax(u0_(m,IDN,k,j,i),SQR(bz/va3_ceil));
-        Real dens = u0_(m,IDN,k,j,i);
         // TODO(@mhguo): not working for ideal gas!
       }
     });
