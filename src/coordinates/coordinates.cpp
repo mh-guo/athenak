@@ -27,6 +27,7 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
   is_special_relativistic = pin->GetOrAddBoolean("coord","special_rel",false);
   is_general_relativistic = pin->GetOrAddBoolean("coord","general_rel",false);
   multi_zone = pin->GetOrAddBoolean("coord","multi_zone",false);
+  fixed_zone = pin->GetOrAddBoolean("coord","fixed_zone",false);
   if (is_special_relativistic && is_general_relativistic) {
     std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
               << "Cannot specify both SR and GR at same time" << std::endl;
@@ -63,7 +64,7 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
       SetExcisionMasks(excision_floor, excision_flux);
     }
   }
-  if (multi_zone) {
+  if (multi_zone || fixed_zone) {
     // boolean masks allocation
     int nmb = ppack->nmb_thispack;
     auto &indcs = pmy_pack->pmesh->mb_indcs;

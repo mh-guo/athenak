@@ -61,6 +61,9 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
   auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
   auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
+  auto &fixed_zone = pmy_pack->pcoord->fixed_zone;
+  auto &zone_mask = pmy_pack->pcoord->zone_mask;
+  bool refining = (pmy_pack->pmesh->pmr!=nullptr)? pmy_pack->pmesh->pmr->refining : false;
 
   const int ni   = (iu - il + 1);
   const int nji  = (ju - jl + 1)*ni;
@@ -124,7 +127,19 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       }
     }
 
-    if (!(excised)) {
+    bool fixed = false;
+    if (fixed_zone && !refining && !excised) {
+      if (zone_mask(m,k,j,i)) {
+        w.d = prim(m,IDN,k,j,i);
+        w.vx = prim(m,IVX,k,j,i);
+        w.vy = prim(m,IVY,k,j,i);
+        w.vz = prim(m,IVZ,k,j,i);
+        w.e = prim(m,IEN,k,j,i);
+        fixed = true;
+      }
+    }
+
+    if (!(excised) && !(fixed)) {
       // calculate SR conserved quantities
       HydCons1D u_sr;
       Real s2;
@@ -179,7 +194,8 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       prim(m,IEN,k,j,i) = w.e;
 
       // reset conserved variables if floor, ceiling, failure, or excision encountered
-      if (dfloor_used || efloor_used || vceiling_used || c2p_failure || excised) {
+      if (dfloor_used || efloor_used || vceiling_used || c2p_failure || excised
+          || fixed) {
         SingleP2C_IdealGRHyd(glower, gupper, w, eos.gamma, u);
         cons(m,IDN,k,j,i) = u.d;
         cons(m,IM1,k,j,i) = u.mx;

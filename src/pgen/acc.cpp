@@ -485,7 +485,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real hist_amax = acc->hist_amax = pin->GetOrAddReal("problem","hist_amax",0.9);
   for (int i=0; i<hist_nr; i++) {
     Real rmin = hist_amin*acc->r_in;
-    Real rmax = hist_amax*acc->rb_out;
+    Real rmax = hist_amax*std::min(acc->rb_out, pmy_mesh_->mesh_size.x1max);
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rmin;
     if (i==0) {
       r_i = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : r_i;
@@ -1132,7 +1132,7 @@ void RadialBoundary(Mesh *pm) {
 
   //bool tmp = mb_bcs.h_view(0,BoundaryFace::inner_x1)==BoundaryFlag::user;
   //std::cout << tmp << std::endl;
-  if (acc->vcycle_n>0) {
+  if (acc->multi_zone) {
     rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
   }
 
@@ -1475,15 +1475,9 @@ Real AccTimeStep(Mesh *pm) {
   }
 
   Real dt = pm->dt/pm->cfl_no;
-  if (acc->vcycle_n<=0) {
+  if (!acc->multi_zone) {
     return dt;
   }
-
-  Real rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
-  if (global_variable::my_rank == 0 && pm->ncycle % acc->ndiag == 0) {
-    std::cout << "rbin = " << rbin << std::endl;
-  }
-  Real rbout = acc->rb_out;
 
   auto &indcs = pm->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
@@ -1500,10 +1494,16 @@ Real AccTimeStep(Mesh *pm) {
   auto &eos = (is_mhd)? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   auto &size = pmbp->pmb->mb_size;
 
-  auto &is_general_relativistic_ = pmbp->pcoord->is_general_relativistic;
+  auto &is_gr = pmbp->pcoord->is_general_relativistic;
   const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
+
+  Real rbin = VcycleRadius(pm->ncycle, acc->vcycle_n, acc->r_in, acc->rb_in);
+  if (global_variable::my_rank == 0 && pm->ncycle % acc->ndiag == 0) {
+    std::cout << "rbin = " << rbin << std::endl;
+  }
+  Real rbout = acc->rb_out;
 
   if (acc->multi_zone) {
     pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, rbin,
@@ -1538,7 +1538,7 @@ Real AccTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_general_relativistic_ && rbin <= 1.0) {
+      if (is_gr && rbin <= 1.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
@@ -1569,6 +1569,11 @@ Real AccTimeStep(Mesh *pm) {
           cf = eos.IdealMHDFastSpeed(w_d, w_bz, w_bx, w_by);
         }
         max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
+      }
+      if (is_gr) {
+        max_dv1 = fmin(max_dv1, 1.0);
+        max_dv2 = fmin(max_dv2, 1.0);
+        max_dv3 = fmin(max_dv3, 1.0);
       }
 
       min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
@@ -1603,7 +1608,7 @@ Real AccTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_general_relativistic_ && rbin <= 1.0) {
+      if (is_gr && rbin <= 1.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
@@ -1619,6 +1624,12 @@ Real AccTimeStep(Mesh *pm) {
         max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cs;
         max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cs;
       }
+      if (is_gr) {
+        max_dv1 = fmin(max_dv1, 1.0);
+        max_dv2 = fmin(max_dv2, 1.0);
+        max_dv3 = fmin(max_dv3, 1.0);
+      }
+
       min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
       min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
       min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
@@ -1834,6 +1845,11 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[nflux*g+i] = 0.0;
     }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
+    if (pm->adaptive) {
+      grids[g]->SetInterpolationCoordinates();
+      grids[g]->SetInterpolationIndices();
+      grids[g]->SetInterpolationWeights();
+    }
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
       Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
@@ -2530,7 +2546,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     if (is_gr) {
       Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
       // soft function
-      lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
+      lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
       Real cooling_heating = dens * dens * lambda_cooling;
       // conserve energy is minus sign
       u0(m,IEN,k,j,i) += bdt * cooling_heating;
@@ -2538,7 +2554,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       do {
         Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
         // soft function
-        lambda_cooling *= exp(-50.0*pow(tfloor/temp,4.0));
+        lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
         Real cooling_heating = dens * dens * lambda_cooling;
         Real dt_cool = (eint/(FLT_MIN + fabs(cooling_heating)));
         // half of the timestep
@@ -2805,7 +2821,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
         Real lambda_cooling = ISMCoolFn(temp_unit*w_temp)/cooling_unit;
         // soft function
-        lambda_cooling *= exp(-50.0*pow(tfloor/w_temp,4.0));
+        lambda_cooling *= exp(-1.0e1*pow(tfloor/w_temp,4.0));
         Real q_cooling = w_dens*w_dens*lambda_cooling;
         if (w_temp<=t_cold) {
           q_cooling = 0.0;

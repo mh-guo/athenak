@@ -59,17 +59,27 @@ static Real TemperatureBisect(struct bondi_pgen pgen, Real r, Real t_min, Real t
 KOKKOS_INLINE_FUNCTION
 static Real TemperatureResidual(struct bondi_pgen pgen, Real t, Real r);
 
+KOKKOS_INLINE_FUNCTION
+static void CalculatePrimitivesNewtonian(struct bondi_pgen pgen, Real r,
+                                         Real *prho, Real *ppgas, Real *pur);
+
 struct bondi_pgen {
+  bool is_gr = false;       // true if GR
+  Real r_in = 1.0;          // inner radius
   Real spin;                // black hole spin
   Real dexcise, pexcise;    // excision parameters
   Real n_adi, k_adi, gm;    // hydro EOS parameters
   Real r_crit;              // sonic point radius
-  Real b_ini;               // initial magnetic field
+  Real temp_inf, c_s_inf;   // asymptotic temperature and sound speed
+  Real rho_inf, pgas_inf;   // asymptotic density and pressure
+  Real r_bondi;             // Bondi radius
   Real c1, c2;              // useful constants
   Real temp_min, temp_max;  // bounds for temperature root find
+  Real b_ini;               // initial magnetic field
   bool reset_ic = false;    // reset initial conditions after run
   int  ndiag = 0;           // number of cycles between diagnostics
   bool multi_zone = false;  // true if multi-zone
+  bool fixed_zone = false;  // true if fixed-zone
   int  vcycle_n = 0;        // number of cycles in a V-cycle
   Real rv_in = 0.0;         // inner radius of V-cycle
   Real rv_out = 0.0;        // outer radius of V-cycle
@@ -100,6 +110,7 @@ int AMRLevel(int i, int n, int lbeg, int lend) {
 
 // prototypes for user-defined BCs and error functions
 void FixedBondiInflow(Mesh *pm);
+void AddUserSrcs(Mesh *pm, const Real bdt);
 void BondiErrors(ParameterInput *pin, Mesh *pm);
 void BondiFluxes(HistoryData *pdata, Mesh *pm);
 Real BondiTimeStep(Mesh *pm);
@@ -126,19 +137,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
               << "bondi test requires use_e=true" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if (!is_gr) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "GR bondi problem can only be run when GR defined in <coord> block"
-              << std::endl;
-    exit(EXIT_FAILURE);
-  }
 
   // set user-defined BCs and error function pointers
   pgen_final_func = BondiErrors;
   user_bcs_func = FixedBondiInflow;
+  user_srcs_func = AddUserSrcs;
   user_hist_func = BondiFluxes;
   user_dt_func = BondiTimeStep;
   user_ref_func = BondiRefine;
+
+  // Reset time
+  if (pin->GetOrAddBoolean("problem","reset",false)) {
+    pmy_mesh_->ncycle = 0;
+    pmy_mesh_->time = 0.0;
+    for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+      if (it->block_name.compare(0, 6, "output") == 0) {
+        pin->SetInteger(it->block_name,"file_number", 0);
+        pin->SetReal(it->block_name,"last_time", -1.0e+100);
+      }
+    }
+  }
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
@@ -155,13 +173,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Read problem-specific parameters from input file
   // global parameters
+  bondi.is_gr = is_gr;
   bondi.k_adi = pin->GetReal("problem", "k_adi");
-  bondi.r_crit = pin->GetReal("problem", "r_crit");
   Real b_ini = bondi.b_ini = pin->GetOrAddReal("problem", "b_ini", 0.0);
 
   bondi.ndiag = pin->GetOrAddInteger("problem", "ndiag", 0);
 
   bondi.multi_zone = pin->GetOrAddBoolean("coord", "multi_zone", false);
+  bondi.fixed_zone = pin->GetOrAddBoolean("coord", "fixed_zone", false);
   if (bondi.multi_zone) {
     bondi.vcycle_n = pin->GetOrAddInteger("problem", "vcycle_n", 0);
     bondi.rv_in = pin->GetOrAddReal("problem", "rv_in", 0.0);
@@ -179,29 +198,49 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Get ideal gas EOS data
   bondi.gm = peos->eos_data.gamma;
   Real gm1 = bondi.gm - 1.0;
+  // Get ratio of specific heats
+  bondi.n_adi = 1.0/(bondi.gm - 1.0);
 
   // Parameters
   bondi.temp_min = 1.0e-7;  // lesser temperature root must be greater than this
   bondi.temp_max = 1.0e0;   // greater temperature root must be less than this
 
-  // Get spin of black hole
-  bondi.spin = pmbp->pcoord->coord_data.bh_spin;
+  if (bondi.is_gr) {
+    // Get spin of black hole
+    bondi.spin = pmbp->pcoord->coord_data.bh_spin;
 
-  // Get excision parameters
-  bondi.dexcise = pmbp->pcoord->coord_data.dexcise;
-  bondi.pexcise = pmbp->pcoord->coord_data.pexcise;
+    // Get excision parameters
+    bondi.dexcise = pmbp->pcoord->coord_data.dexcise;
+    bondi.pexcise = pmbp->pcoord->coord_data.pexcise;
 
-  // Get ratio of specific heats
-  bondi.n_adi = 1.0/(bondi.gm - 1.0);
+    bondi.r_crit = pin->GetReal("problem", "r_crit");
 
-  // Prepare various constants for determining primitives
-  Real u_crit_sq = 1.0/(2.0*bondi.r_crit);                           // (HSW 71)
-  Real u_crit = -sqrt(u_crit_sq);
-  Real t_crit = (bondi.n_adi/(bondi.n_adi+1.0)
-                 * u_crit_sq/(1.0-(bondi.n_adi+3.0)*u_crit_sq));     // (HSW 74)
-  bondi.c1 = pow(t_crit, bondi.n_adi) * u_crit * SQR(bondi.r_crit);  // (HSW 68)
-  bondi.c2 = (SQR(1.0 + (bondi.n_adi+1.0) * t_crit)
-              * (1.0 - 3.0/(2.0*bondi.r_crit)));                     // (HSW 69)
+    // Prepare various constants for determining primitives
+    Real u_crit_sq = 1.0/(2.0*bondi.r_crit);                           // (HSW 71)
+    Real u_crit = -sqrt(u_crit_sq);
+    Real t_crit = (bondi.n_adi/(bondi.n_adi+1.0)
+                  * u_crit_sq/(1.0-(bondi.n_adi+3.0)*u_crit_sq));      // (HSW 74)
+    bondi.c1 = pow(t_crit, bondi.n_adi) * u_crit * SQR(bondi.r_crit);  // (HSW 68)
+    bondi.c2 = (SQR(1.0 + (bondi.n_adi+1.0) * t_crit)
+                * (1.0 - 3.0/(2.0*bondi.r_crit)));                     // (HSW 69)
+    bondi.temp_inf = (sqrt(bondi.c2)-1.0)/(1.0+bondi.n_adi);           // (HSW 69)
+  } else {
+    bondi.dexcise = pin->GetOrAddReal("coord", "dexcise", 1e-5);
+    bondi.pexcise = pin->GetOrAddReal("coord", "pexcise", 1e-10);
+
+    // Prepare various constants for determining primitives
+    bondi.temp_inf = pin->GetReal("problem", "temp_inf");
+    bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
+    bondi.rho_inf = pow(bondi.temp_inf/bondi.k_adi, bondi.n_adi);
+    bondi.pgas_inf = bondi.rho_inf * bondi.temp_inf;
+    bondi.r_bondi = 1.0/SQR(bondi.c_s_inf);
+    bondi.r_crit = (5.0-3.0*bondi.gm)/4.0;
+    bondi.c1 = 0.25*pow(2.0/(5.0-3.0*bondi.gm), (5.0-3.0*bondi.gm)*0.5*bondi.n_adi);
+    bondi.c2 = -bondi.n_adi; // useless in Newtonian case
+    std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
+    std::cout << " Critical radius = " << bondi.r_crit << std::endl;
+    std::cout << " c1 = " << bondi.c1 << std::endl;
+  }
 
   if (restart) return;
 
@@ -328,6 +367,26 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
                                    struct bondi_pgen pgen,
                                    Real& rho, Real& pgas,
                                    Real& uu1, Real& uu2, Real& uu3) {
+  if (!pgen.is_gr) {
+    // Calculate primitives
+    Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+    Real my_rho, my_pgas, my_ur;
+    CalculatePrimitivesNewtonian(pgen, rad, &my_rho, &my_pgas, &my_ur);
+    if (rad>pgen.r_in) {
+      rho = my_rho;
+      pgas = my_pgas;
+      uu1 = -my_ur * x1v / rad;
+      uu2 = -my_ur * x2v / rad;
+      uu3 = -my_ur * x3v / rad;
+    } else {
+      rho = pgen.dexcise;
+      pgas = pgen.pexcise;
+      uu1 = 0.0;
+      uu2 = 0.0;
+      uu3 = 0.0;
+    }
+    return;
+  }
   // Calculate Boyer-Lindquist coordinates of cell
   Real r, theta, phi;
   GetBoyerLindquistCoordinates(pgen, x1v, x2v, x3v, &r, &theta, &phi);
@@ -574,9 +633,38 @@ static Real TemperatureBisect(struct bondi_pgen pgen, Real r, Real t_min, Real t
 
 KOKKOS_INLINE_FUNCTION
 static Real TemperatureResidual(struct bondi_pgen pgen, Real t, Real r) {
+  if (!pgen.is_gr) {
+    Real rho = pow(t/pgen.k_adi, pgen.n_adi);
+    Real alpha = rho/pgen.rho_inf;
+    Real x = r/pgen.r_bondi;
+    Real v = pgen.c1/alpha/x/x;
+    return 0.5*v*v+pgen.n_adi*(pgen.k_adi*pow(alpha,pgen.gm-1.0)-1.0)-1.0/x;
+  }
   return SQR(1.0 + (pgen.n_adi+1.0) * t)
       * (1.0 - 2.0/r + SQR(pgen.c1)
          / (SQR(SQR(r)) * pow(t, 2.0*pgen.n_adi))) - pgen.c2;
+}
+
+KOKKOS_INLINE_FUNCTION
+static void CalculatePrimitivesNewtonian(struct bondi_pgen pgen, Real r,
+                                         Real *prho, Real *ppgas, Real *pur) {
+  Real temp_neg_res = TemperatureMin(pgen, r, pgen.temp_min, pgen.temp_max);
+  Real temp;
+  if (r <= pgen.r_crit) {  // use lesser of two roots
+    temp = TemperatureBisect(pgen, r, pgen.temp_min, temp_neg_res);
+  } else {  // user greater of two roots
+    temp = TemperatureBisect(pgen, r, temp_neg_res, pgen.temp_max);
+  }
+  // Calculate primitives
+  Real rho = pow(temp/pgen.k_adi, pgen.n_adi);
+  Real pgas = temp * rho;
+  Real ur = pgen.c1 * pgen.c_s_inf * pgen.rho_inf/rho * SQR(pgen.r_bondi/r);
+
+  // Set primitives
+  *prho = rho;
+  *ppgas = pgas;
+  *pur = ur;
+  return;
 }
 
 //----------------------------------------------------------------------------------------
@@ -610,7 +698,7 @@ void FixedBondiInflow(Mesh *pm) {
   bool &multi_zone = pmbp->pcoord->multi_zone;
   auto zone_mask = pmbp->pcoord->zone_mask;
   if (multi_zone && !refining) {
-    par_for("fixed_zone", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    par_for("fixed_zone", DevExeSpace(),0,nmb-1,0,n3m1,0,n2m1,0,n1m1,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       if (zone_mask(m,k,j,i)) {
         u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
@@ -618,6 +706,36 @@ void FixedBondiInflow(Mesh *pm) {
         u0_(m,IM2,k,j,i) = u1_(m,IM2,k,j,i);
         u0_(m,IM3,k,j,i) = u1_(m,IM3,k,j,i);
         u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
+      }
+    });
+  }
+
+  if (!bondi.is_gr) {
+    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    Real gm1 = bondi.gm - 1.0;
+    Real rin = bondi.r_in, dexcise = bondi.dexcise, pexcise = bondi.pexcise;
+    par_for("fixed_rin", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      if (rad < rin) {
+        u0_(m,IDN,k,j,i) = dexcise;
+        u0_(m,IEN,k,j,i) = pexcise/gm1;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
       }
     });
   }
@@ -864,6 +982,63 @@ void FixedBondiInflow(Mesh *pm) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void AddUserSrcs()
+//! \brief Add User Source Terms
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+void AddUserSrcs(Mesh *pm, const Real bdt) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  DvceArray5D<Real> &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
+                             pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
+  if (!bondi.is_gr) {
+    //std::cout << "AddAccel" << std::endl;
+    auto &indcs = pm->mb_indcs;
+    int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+    int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+    int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
+    int nmb1 = pmbp->nmb_thispack - 1;
+    auto size = pmbp->pmb->mb_size;
+    Real rin = bondi.r_in;
+    par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      Real accel = -1.0/rad/rad;
+      if (rad < rin) {
+        // Potential = -GM/(r^2+r_a^2*exp(-r^2/r_a^2))^0.5
+        Real r_a = 0.5*rin;
+        Real fac = exp(-rad*rad/r_a/r_a);
+        accel *= rad*rad*rad*(1-fac)/pow(rad*rad+r_a*r_a*fac,1.5);
+      }
+      Real dmomr = bdt*w0(m,IDN,k,j,i)*accel;
+      Real dmomx1 = dmomr*x1v/rad;
+      Real dmomx2 = dmomr*x2v/rad;
+      Real dmomx3 = dmomr*x3v/rad;
+      Real denergy = bdt*w0(m,IDN,k,j,i)*accel/rad*
+                    (w0(m,IVX,k,j,i)*x1v+w0(m,IVY,k,j,i)*x2v+w0(m,IVZ,k,j,i)*x3v);
+
+      u0(m,IM1,k,j,i) += dmomx1;
+      u0(m,IM2,k,j,i) += dmomx2;
+      u0(m,IM3,k,j,i) += dmomx3;
+      u0(m,IEN,k,j,i) += denergy;
+    });
+  }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::BondiErrors()
 //  \brief Computes errors in linear wave solution and outputs to file.
 
@@ -1073,6 +1248,11 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[nflux*g+i] = 0.0;
     }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
+    if (pm->adaptive) {
+      grids[g]->SetInterpolationCoordinates();
+      grids[g]->SetInterpolationIndices();
+      grids[g]->SetInterpolationWeights();
+    }
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
       Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
@@ -1083,118 +1263,185 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
     grids[g]->InterpolateToSphere(nvars, w0_);
 
     // compute fluxes
-    for (int n=0; n<grids[g]->nangles; ++n) {
-      // extract coordinate data at this angle
-      Real r = grids[g]->radius;
-      Real theta = grids[g]->polar_pos.h_view(n,0);
-      Real phi = grids[g]->polar_pos.h_view(n,1);
-      Real x1 = grids[g]->interp_coord.h_view(n,0);
-      Real x2 = grids[g]->interp_coord.h_view(n,1);
-      Real x3 = grids[g]->interp_coord.h_view(n,2);
-      Real glower[4][4], gupper[4][4];
-      ComputeMetricAndInverse(x1,x2,x3,flat,spin,glower,gupper);
+    bool is_gr = pmbp->pcoord->is_general_relativistic;
+    if (is_gr) {
+      for (int n=0; n<grids[g]->nangles; ++n) {
+        // extract coordinate data at this angle
+        Real r = grids[g]->radius;
+        Real theta = grids[g]->polar_pos.h_view(n,0);
+        Real phi = grids[g]->polar_pos.h_view(n,1);
+        Real x1 = grids[g]->interp_coord.h_view(n,0);
+        Real x2 = grids[g]->interp_coord.h_view(n,1);
+        Real x3 = grids[g]->interp_coord.h_view(n,2);
+        Real glower[4][4], gupper[4][4];
+        ComputeMetricAndInverse(x1,x2,x3,flat,spin,glower,gupper);
 
-      // extract interpolated primitives
-      Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
-      Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
-      Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
-      Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
-      Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+        // extract interpolated primitives
+        Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+        Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+        Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+        Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+        Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
 
-      // extract interpolated field components (iff is_mhd)
-      Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
-      if (is_mhd) {
-        int_bx = interpolated_bcc.h_view(n,IBX);
-        int_by = interpolated_bcc.h_view(n,IBY);
-        int_bz = interpolated_bcc.h_view(n,IBZ);
+        // extract interpolated field components (iff is_mhd)
+        Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
+        if (is_mhd) {
+          int_bx = interpolated_bcc.h_view(n,IBX);
+          int_by = interpolated_bcc.h_view(n,IBY);
+          int_bz = interpolated_bcc.h_view(n,IBZ);
+        }
+
+        // Compute interpolated u^\mu in CKS
+        Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
+                2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
+                2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
+        Real alpha = sqrt(-1.0/gupper[0][0]);
+        Real lor = sqrt(1.0 + q);
+        Real u0 = lor/alpha;
+        Real u1 = int_vx - alpha * lor * gupper[0][1];
+        Real u2 = int_vy - alpha * lor * gupper[0][2];
+        Real u3 = int_vz - alpha * lor * gupper[0][3];
+
+        // Lower vector indices
+        Real u_0 = glower[0][0]*u0 + glower[0][1]*u1 + glower[0][2]*u2 + glower[0][3]*u3;
+        Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
+        Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
+        Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
+
+        // Calculate 4-magnetic field (returns zero if not MHD)
+        Real b0 = u_1*int_bx + u_2*int_by + u_3*int_bz;
+        Real b1 = (int_bx + b0 * u1) / u0;
+        Real b2 = (int_by + b0 * u2) / u0;
+        Real b3 = (int_bz + b0 * u3) / u0;
+
+        // compute b_\mu in CKS and b_sq (returns zero if not MHD)
+        Real b_0 = glower[0][0]*b0 + glower[0][1]*b1 + glower[0][2]*b2 + glower[0][3]*b3;
+        Real b_1 = glower[1][0]*b0 + glower[1][1]*b1 + glower[1][2]*b2 + glower[1][3]*b3;
+        Real b_2 = glower[2][0]*b0 + glower[2][1]*b1 + glower[2][2]*b2 + glower[2][3]*b3;
+        Real b_3 = glower[3][0]*b0 + glower[3][1]*b1 + glower[3][2]*b2 + glower[3][3]*b3;
+        Real b_sq = b0*b_0 + b1*b_1 + b2*b_2 + b3*b_3;
+
+        // Transform CKS 4-velocity and 4-magnetic field to spherical KS
+        Real a2 = SQR(spin);
+        Real rad2 = SQR(x1)+SQR(x2)+SQR(x3);
+        Real r2 = SQR(r);
+        Real sth = sin(theta);
+        Real sph = sin(phi);
+        Real cph = cos(phi);
+        Real drdx = r*x1/(2.0*r2 - rad2 + a2);
+        Real drdy = r*x2/(2.0*r2 - rad2 + a2);
+        Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
+        // contravariant r component of 4-velocity
+        Real ur = drdx *u1 + drdy *u2 + drdz *u3;
+        // contravariant r component of 4-magnetic field (returns zero if not MHD)
+        Real br = drdx *b1 + drdy *b2 + drdz *b3;
+        // covariant phi component of 4-velocity
+        Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
+        // covariant phi component of 4-magnetic field (returns zero if not MHD)
+        Real b_ph = (-r*sph-spin*cph)*sth*b_1 + (r*cph-spin*sph)*sth*b_2;
+
+        // integration params
+        Real &domega = grids[g]->solid_angles.h_view(n);
+        Real sqrtmdet = (r2+SQR(spin*cos(theta)));
+
+        Real is_out = (ur>0.0)? 1.0 : 0.0;
+        Real int_temp = (gamma-1.0)*int_ie/int_dn;
+        Real is_hot = (int_temp>0.1/r)? 1.0 : 0.0;
+
+        // compute mass density
+        pdata->hdata[nflux*g+0] += int_dn*sqrtmdet*domega;
+
+        // compute mass flux
+        pdata->hdata[nflux*g+1] += 1.0*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+2] += is_out*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+3] += is_hot*int_dn*ur*sqrtmdet*domega;
+
+        // compute energy flux
+        Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
+        pdata->hdata[nflux*g+4] += 1.0*t1_0*sqrtmdet*domega;
+        pdata->hdata[nflux*g+5] += is_out*t1_0*sqrtmdet*domega;
+
+        // compute angular momentum flux
+        // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
+        Real t1_1 = 0.0;
+        Real t1_2 = 0.0;
+        Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
+        pdata->hdata[nflux*g+6] += t1_1*sqrtmdet*domega;
+        pdata->hdata[nflux*g+7] += t1_2*sqrtmdet*domega;
+        pdata->hdata[nflux*g+8] += t1_3*sqrtmdet*domega;
+
+        // compute magnetic flux
+        if (is_mhd) {
+          pdata->hdata[nflux*g+9] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+        }
       }
+    } else {
+      for (int n=0; n<grids[g]->nangles; ++n) {
+        // extract coordinate data at this angle
+        Real r = grids[g]->radius;
+        Real x1 = grids[g]->interp_coord.h_view(n,0);
+        Real x2 = grids[g]->interp_coord.h_view(n,1);
+        Real x3 = grids[g]->interp_coord.h_view(n,2);
+        // extract interpolated primitives
+        Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+        Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+        Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+        Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+        Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+        // extract interpolated field components (iff is_mhd)
+        Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
+        if (is_mhd) {
+          int_bx = interpolated_bcc.h_view(n,IBX);
+          int_by = interpolated_bcc.h_view(n,IBY);
+          int_bz = interpolated_bcc.h_view(n,IBZ);
+        }
 
-      // Compute interpolated u^\mu in CKS
-      Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
-               2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
-               2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
-      Real alpha = sqrt(-1.0/gupper[0][0]);
-      Real lor = sqrt(1.0 + q);
-      Real u0 = lor/alpha;
-      Real u1 = int_vx - alpha * lor * gupper[0][1];
-      Real u2 = int_vy - alpha * lor * gupper[0][2];
-      Real u3 = int_vz - alpha * lor * gupper[0][3];
+        Real v1 = int_vx, v2 = int_vy, v3 = int_vz;
+        Real e_k = 0.5*int_dn*(v1*v1+v2*v2+v3*v3);
+        Real b1 = int_bx, b2 = int_by, b3 = int_bz;
+        Real b_sq = b1*b1 + b2*b2 + b3*b3;
+        Real r_sq = SQR(r);
+        Real drdx = x1/r;
+        Real drdy = x2/r;
+        Real drdz = x3/r;
+        // v_r
+        Real vr = drdx*v1 + drdy*v2 + drdz*v3;
+        // b_r
+        Real br = drdx*b1 + drdy*b2 + drdz*b3;
+        // integration params
+        Real &domega = grids[g]->solid_angles.h_view(n);
 
-      // Lower vector indices
-      Real u_0 = glower[0][0]*u0 + glower[0][1]*u1 + glower[0][2]*u2 + glower[0][3]*u3;
-      Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
-      Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
-      Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
+        Real is_out = (vr>0.0)? 1.0 : 0.0;
+        Real int_temp = (gamma-1.0)*int_ie/int_dn;
+        Real is_hot = (int_temp>0.1/r)? 1.0 : 0.0;
 
-      // Calculate 4-magnetic field (returns zero if not MHD)
-      Real b0 = u_1*int_bx + u_2*int_by + u_3*int_bz;
-      Real b1 = (int_bx + b0 * u1) / u0;
-      Real b2 = (int_by + b0 * u2) / u0;
-      Real b3 = (int_bz + b0 * u3) / u0;
+        // compute mass density
+        pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
 
-      // compute b_\mu in CKS and b_sq (returns zero if not MHD)
-      Real b_0 = glower[0][0]*b0 + glower[0][1]*b1 + glower[0][2]*b2 + glower[0][3]*b3;
-      Real b_1 = glower[1][0]*b0 + glower[1][1]*b1 + glower[1][2]*b2 + glower[1][3]*b3;
-      Real b_2 = glower[2][0]*b0 + glower[2][1]*b1 + glower[2][2]*b2 + glower[2][3]*b3;
-      Real b_3 = glower[3][0]*b0 + glower[3][1]*b1 + glower[3][2]*b2 + glower[3][3]*b3;
-      Real b_sq = b0*b_0 + b1*b_1 + b2*b_2 + b3*b_3;
+        // compute mass flux
+        pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+2] += is_out*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+3] += is_hot*int_dn*vr*r_sq*domega;
 
-      // Transform CKS 4-velocity and 4-magnetic field to spherical KS
-      Real a2 = SQR(spin);
-      Real rad2 = SQR(x1)+SQR(x2)+SQR(x3);
-      Real r2 = SQR(r);
-      Real sth = sin(theta);
-      Real sph = sin(phi);
-      Real cph = cos(phi);
-      Real drdx = r*x1/(2.0*r2 - rad2 + a2);
-      Real drdy = r*x2/(2.0*r2 - rad2 + a2);
-      Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
-      // contravariant r component of 4-velocity
-      Real ur = drdx *u1 + drdy *u2 + drdz *u3;
-      // contravariant r component of 4-magnetic field (returns zero if not MHD)
-      Real br = drdx *b1 + drdy *b2 + drdz *b3;
-      // covariant phi component of 4-velocity
-      Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
-      // covariant phi component of 4-magnetic field (returns zero if not MHD)
-      Real b_ph = (-r*sph-spin*cph)*sth*b_1 + (r*cph-spin*sph)*sth*b_2;
+        // compute energy flux
+        // TODO(@mhguo): check whether this is correct!
+        Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
+        pdata->hdata[nflux*g+4] += 1.0*t1_0*r_sq*domega;
+        pdata->hdata[nflux*g+5] += is_out*t1_0*r_sq*domega;
 
-      // integration params
-      Real &domega = grids[g]->solid_angles.h_view(n);
-      Real sqrtmdet = (r2+SQR(spin*cos(theta)));
+        // compute angular momentum flux
+        // TODO(@mhguo): check whether this is correct!
+        pdata->hdata[nflux*g+6] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+        pdata->hdata[nflux*g+7] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+        pdata->hdata[nflux*g+8] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
 
-      Real is_out = (ur>0.0)? 1.0 : 0.0;
-      Real int_temp = (gamma-1.0)*int_ie/int_dn;
-      Real is_hot = (int_temp>0.1/r)? 1.0 : 0.0;
-
-      // compute mass density
-      pdata->hdata[nflux*g+0] += int_dn*sqrtmdet*domega;
-
-      // compute mass flux
-      pdata->hdata[nflux*g+1] += 1.0*int_dn*ur*sqrtmdet*domega;
-      pdata->hdata[nflux*g+2] += is_out*int_dn*ur*sqrtmdet*domega;
-      pdata->hdata[nflux*g+3] += is_hot*int_dn*ur*sqrtmdet*domega;
-
-      // compute energy flux
-      Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
-      pdata->hdata[nflux*g+4] += 1.0*t1_0*sqrtmdet*domega;
-      pdata->hdata[nflux*g+5] += is_out*t1_0*sqrtmdet*domega;
-
-      // compute angular momentum flux
-      // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
-      Real t1_1 = 0.0;
-      Real t1_2 = 0.0;
-      Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
-      pdata->hdata[nflux*g+6] += t1_1*sqrtmdet*domega;
-      pdata->hdata[nflux*g+7] += t1_2*sqrtmdet*domega;
-      pdata->hdata[nflux*g+8] += t1_3*sqrtmdet*domega;
-
-      // compute magnetic flux
-      if (is_mhd) {
-        pdata->hdata[nflux*g+9] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+        // compute magnetic flux
+        if (is_mhd) {
+          pdata->hdata[nflux*g+9] += 0.5*fabs(br)*r_sq*domega;
+        }
       }
     }
   }
-
   // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
   for (int n=pdata->nhist; n<NHISTORY_VARIABLES; ++n) {
     pdata->hdata[n] = 0.0;
@@ -1212,7 +1459,7 @@ Real BondiTimeStep(Mesh *pm) {
     Diagnostic(pm);
   }
   Real dt = pm->dt/pm->cfl_no;
-  if (!bondi.multi_zone && !bondi.is_amr) {
+  if (!bondi.multi_zone && !bondi.fixed_zone && !bondi.is_amr) {
     return dt;
   }
 
@@ -1241,6 +1488,19 @@ Real BondiTimeStep(Mesh *pm) {
   if (bondi.multi_zone) {
     r_v = VcycleRadius(pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
     pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, r_v,
+                               std::numeric_limits<Real>::max());
+  }
+
+  Real r_f = 0.0;
+  if (bondi.fixed_zone) {
+    int ncycle = pm->ncycle;
+    int nc_amr = bondi.ncycle_amr;
+    int old_level = AMRLevel(ncycle-nc_amr, nc_amr, bondi.beg_level, bondi.end_level);
+    int new_level = AMRLevel(ncycle, nc_amr, bondi.beg_level, bondi.end_level);
+    Real dx = (pm->mesh_size.x1max - pm->mesh_size.x1min)/pm->mesh_indcs.nx1
+              /pow(2.0, new_level);
+    r_f = (new_level <= old_level) ? 2.0*dx : 0.0;
+    pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, r_f,
                                std::numeric_limits<Real>::max());
   }
 
@@ -1277,7 +1537,7 @@ Real BondiTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_gr && r_v <= 1.0) {
+      if (is_gr && r_v <= 1.0 && rad <=1.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
@@ -1347,7 +1607,7 @@ Real BondiTimeStep(Mesh *pm) {
 
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-      if (is_gr && r_v <= 1.0) {
+      if (is_gr && r_v <= 1.0 && rad <=1.0) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
