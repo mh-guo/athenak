@@ -61,7 +61,7 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
   auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
   auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
-  auto &fixed_zone = pmy_pack->pcoord->fixed_zone;
+  bool zone_flag = (pmy_pack->pcoord->fixed_zone || pmy_pack->pcoord->multi_zone);
   auto &zone_mask = pmy_pack->pcoord->zone_mask;
   bool refining = (pmy_pack->pmesh->pmr!=nullptr)? pmy_pack->pmesh->pmr->refining : false;
 
@@ -128,7 +128,7 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
     }
 
     bool fixed = false;
-    if (fixed_zone && !refining && !excised) {
+    if (zone_flag && !refining && !excised) {
       if (zone_mask(m,k,j,i)) {
         w.d = prim(m,IDN,k,j,i);
         w.vx = prim(m,IVX,k,j,i);

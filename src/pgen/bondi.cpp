@@ -96,6 +96,8 @@ KOKKOS_INLINE_FUNCTION
 Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
   Real x = static_cast<Real>(i%n)/static_cast<Real>(n-1);
   Real r = rmin*std::pow(rmax/rmin,fabs(1.0-2.0*x));
+  int level = static_cast<int>(std::log2(r/rmin));
+  r = rmin*std::pow(2.0,static_cast<Real>(level));
   r = (r<(10*rmin)) ? 0.0 : r;
   return r;
 }
@@ -694,22 +696,6 @@ void FixedBondiInflow(Mesh *pm) {
   auto u1_ = is_mhd ? pmbp->pmhd->u1 : pmbp->phydro->u1;
   auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
 
-  bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
-  bool &multi_zone = pmbp->pcoord->multi_zone;
-  auto zone_mask = pmbp->pcoord->zone_mask;
-  if (multi_zone && !refining) {
-    par_for("fixed_zone", DevExeSpace(),0,nmb-1,0,n3m1,0,n2m1,0,n1m1,
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      if (zone_mask(m,k,j,i)) {
-        u0_(m,IDN,k,j,i) = u1_(m,IDN,k,j,i);
-        u0_(m,IM1,k,j,i) = u1_(m,IM1,k,j,i);
-        u0_(m,IM2,k,j,i) = u1_(m,IM2,k,j,i);
-        u0_(m,IM3,k,j,i) = u1_(m,IM3,k,j,i);
-        u0_(m,IEN,k,j,i) = u1_(m,IEN,k,j,i);
-      }
-    });
-  }
-
   if (!bondi.is_gr) {
     int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
     Real gm1 = bondi.gm - 1.0;
@@ -989,8 +975,6 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   DvceArray5D<Real> &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
   DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
-  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
-                             pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   if (!bondi.is_gr) {
     //std::cout << "AddAccel" << std::endl;
     auto &indcs = pm->mb_indcs;
@@ -1487,6 +1471,10 @@ Real BondiTimeStep(Mesh *pm) {
   Real r_v = 0.0;
   if (bondi.multi_zone) {
     r_v = VcycleRadius(pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
+    if (pm->ncycle%10 == 0) {
+      std::cout << "Vcycle radius = " << r_v << std::endl;
+    }
+    pmbp->pcoord->zone_r = r_v;
     pmbp->pcoord->SetZoneMasks(pmbp->pcoord->zone_mask, r_v,
                                std::numeric_limits<Real>::max());
   }

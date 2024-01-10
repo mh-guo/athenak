@@ -48,6 +48,7 @@ class Coordinates {
   bool is_general_relativistic = false;
   bool multi_zone = false;
   bool fixed_zone = false;
+  Real zone_r = 0.0;
 
   // data needed to compute metric in GR
   CoordData coord_data;
