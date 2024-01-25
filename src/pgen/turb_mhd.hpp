@@ -280,6 +280,46 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
     force_new_(m,2,k,j,i) = 0.0;
   });
 
+  // turb_flag == 2 : toroidal field
+  if (turb_flag == 2) {
+    auto &eos = pmy_pack->pmhd->peos->eos_data;
+    auto &mbsize = pmy_pack->pmb->mb_size;
+    Real &amin = turb_amin;
+    Real rmin = amin*eos.r_in;
+    par_for("a_toro", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real x1v = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+      Real r_cyl = sqrt(SQR(x1v)+SQR(x2v));
+      force_new_(m,0,k,j,i) = 0.0;
+      force_new_(m,1,k,j,i) = 0.0;
+      force_new_(m,2,k,j,i) = fmax(r_cyl-rmin,0.0);
+    });
+    return TaskStatus::complete;
+  }
+
+  // turb_flag == 3 : poloidal field but slight radial within rmin
+  if (turb_flag == 3) {
+    auto &eos = pmy_pack->pmhd->peos->eos_data;
+    auto &mbsize = pmy_pack->pmb->mb_size;
+    Real &amin = turb_amin;
+    Real rmin = amin*eos.r_in;
+    par_for("a_polo_rad", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real x1v = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+      Real r_cyl = sqrt(SQR(x1v)+SQR(x2v));
+      Real a_phi = (rad+rmin)*(r_cyl/rad);
+      force_new_(m,0,k,j,i) = -a_phi*x2v/r_cyl;
+      force_new_(m,1,k,j,i) = a_phi*x1v/r_cyl;
+      force_new_(m,2,k,j,i) = 0.0;
+    });
+    return TaskStatus::complete;
+  }
+
   int nlow_sq  = SQR(nlow);
   int nhigh_sq = SQR(nhigh);
 

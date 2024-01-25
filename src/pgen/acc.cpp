@@ -1832,6 +1832,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
     pdata->label[nflux*g+7] = "ly" + rstr;
     pdata->label[nflux*g+8] = "lz" + rstr;
     pdata->label[nflux*g+9] = "phi" + rstr;
+    // TODO(@mhguo): similar to bondi.cpp, add more variables!
   }
   for (int n=0; n<nreduce; ++n) {
     pdata->label[n+nsph] = data_label[n];
@@ -2546,7 +2547,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     if (is_gr) {
       Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
       // soft function
-      lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
+      // lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
       Real cooling_heating = dens * dens * lambda_cooling;
       // conserve energy is minus sign
       u0(m,IEN,k,j,i) += bdt * cooling_heating;
@@ -2554,7 +2555,11 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       do {
         Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
         // soft function
-        lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
+        // TODO(@mhguo): need to check whether this works for higher tfloor
+        // lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
+        if (temp<=tfloor) {
+          lambda_cooling = 0.0;
+        }
         Real cooling_heating = dens * dens * lambda_cooling;
         Real dt_cool = (eint/(FLT_MIN + fabs(cooling_heating)));
         // half of the timestep
@@ -2681,21 +2686,21 @@ void AddAnaHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     Real temp = 1.0;
     Real eint = 1.0;
     if (use_e) {
-      temp = temp_unit*w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+      temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
       eint = w0(m,IEN,k,j,i);
     } else {
-      temp = temp_unit*w0(m,ITM,k,j,i);
+      temp = w0(m,ITM,k,j,i);
       eint = w0(m,ITM,k,j,i)*w0(m,IDN,k,j,i)/gm1;
     }
 
     Real hnorm = w0(m,IDN,k,j,i)*pow(rad,radpow);
-    Real lambda_cooling = ISMCoolFn(temp)/cooling_unit;
+    Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
     Real q_cooling = w0(m,IDN,k,j,i)*w0(m,IDN,k,j,i)*lambda_cooling;
     Real dens = w0(m,IDN,k,j,i);
     if (gm1*(eint-q_cooling*bdt)/dens<tfloor) {
       q_cooling = (eint-dens*tfloor/gm1)/bdt;
     }
-    if (temp/temp_unit<=tfloor) {
+    if (temp<=tfloor) {
       q_cooling = 0.0;
     }
 
@@ -2758,7 +2763,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   const int nkji = nx3*nx2*nx1;
   const int nji = nx2*nx1;
   Real use_e = eos_data.use_e;
-  Real tfloor = eos_data.tfloor;
+  // Real tfloor = eos_data.tfloor;
   Real t_cold = acc->t_cold;
   Real gm1 = eos_data.gamma - 1.0;
   Real temp_unit = pmbp->punit->temperature_cgs();
@@ -2821,7 +2826,8 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
         Real lambda_cooling = ISMCoolFn(temp_unit*w_temp)/cooling_unit;
         // soft function
-        lambda_cooling *= exp(-1.0e1*pow(tfloor/w_temp,4.0));
+        // TODO(@mhguo): need to check whether this works for higher tfloor
+        //lambda_cooling *= exp(-1.0e1*pow(tfloor/w_temp,4.0));
         Real q_cooling = w_dens*w_dens*lambda_cooling;
         if (w_temp<=t_cold) {
           q_cooling = 0.0;
@@ -2896,13 +2902,14 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       Real var = GetRadialVar(logcoolarr,rad,logr0,logh,bins);
       Real q_heating = (weight == 0)? var : var*w0(m,IDN,k,j,i);
       // soft function
-      Real w_dens = w0(m,IDN,k,j,i);
+      // TODO(@mhguo): need to check whether this works for higher tfloor
+      /*Real w_dens = w0(m,IDN,k,j,i);
       Real w_temp = 1.0;
       if (use_e) {
         w_temp = w0(m,IEN,k,j,i)/w_dens*gm1;
       } else {
         w_temp = w0(m,ITM,k,j,i);
-      }
+      }*/
       // add soft radius
       if (rad < 3.0*rmin_heat) {
         q_heating *= SQR(sin(0.25*M_PI*(rad/rmin_heat-1.0)));
@@ -2910,7 +2917,7 @@ void AddEquHeating(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       // add soft ceiling
       // q_heating *= exp(-1.0e1*pow(w_temp/2.0e1,4.0));
       // Stop heating when T>1 in code unit (T>7e7K in cgs)
-      q_heating *= exp(-1.0e1*pow(w_temp/2.0e0,4.0));
+      // q_heating *= exp(-1.0e1*pow(w_temp/2.0e0,4.0));
       //if (m==19 && k==4 && j==4 && i==4) {
       //  printf("q_heating: rad=%0.6e q_heating=%0.6e\n",rad,q_heating);
       //}

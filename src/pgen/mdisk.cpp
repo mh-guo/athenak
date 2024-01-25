@@ -19,17 +19,30 @@
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
 
+#include "pgen/turb_init.hpp"
+#include "pgen/turb_mhd.hpp"
+
+
 namespace {
 struct mdisk_pgen {
+  Real gm;                  // adiabatic index
   Real iso_cs;              // isothermal sound speed
+  Real r_in = 1.0;          // inner radius
   Real sink_d;              // sink density
   Real sink_p;              // sink pressure
   Real dens_0;              // gas density
+  Real dens_min;            // minimum gas density
+  Real r_in_disk;           // inner edge of disk
+  Real cs_inf;              // sound speed at infinity
   Real j_z;                 // specific angular momentum
+  Real r_bondi, r_circ;     // Bondi radius and circularization radius
+  Real scale_h;             // scale height of disk
   Real b_ini;               // initial magnetic field strength
   Real dt_floor;            // minimum time step
   int  ndiag = 0;           // number of cycles between diagnostics
   bool bc_flag = 0;         // boundary condition flag
+  bool cooling = false;     // cooling flag
+  Real invcool = 0.0;       // inverse cooling time
 };
 
   mdisk_pgen mdisk;
@@ -40,7 +53,8 @@ static Real Acceleration(const Real r) {
 }
 KOKKOS_INLINE_FUNCTION
 static void ComputePrimitiveSingle(Real x, Real y, Real z, struct mdisk_pgen pgen,
-                                   Real& rho, Real& uu1, Real& uu2, Real& uu3);
+                                   Real& rho, Real& pgas,
+                                   Real& uu1, Real& uu2, Real& uu3);
 
 // prototypes for user-defined BCs and srcterm functions
 void UserBoundary(Mesh *pm);
@@ -67,15 +81,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bool is_gr = pmbp->pcoord->is_general_relativistic;
   auto &eos = is_mhd ? pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
 
+  // Get ideal gas EOS data
+  mdisk.gm = eos.gamma;
+  Real gm1 = mdisk.gm - 1.0;
   mdisk.iso_cs = eos.iso_cs;
   mdisk.sink_d = pin->GetReal("problem","sink_d");
   mdisk.sink_p = pin->GetReal("problem","sink_p");
   mdisk.dens_0 = pin->GetReal("problem","dens_0");
-  mdisk.j_z = pin->GetOrAddReal("problem","j_z",0.0);
+  mdisk.dens_min = pin->GetReal("problem","dens_min");
+  mdisk.r_in_disk = pin->GetReal("problem","r_in_disk");
+  mdisk.r_bondi = pin->GetReal("problem","r_bondi");
+  mdisk.r_circ = pin->GetReal("problem","r_circ");
+  mdisk.cs_inf = sqrt(1.0/mdisk.r_bondi); //pin->GetReal("problem","cs_inf");
+  mdisk.j_z = sqrt(mdisk.r_circ); //pin->GetOrAddReal("problem","j_z",0.0);
+  mdisk.scale_h = pin->GetReal("problem","scale_h");
   Real b_ini = mdisk.b_ini = pin->GetOrAddReal("problem","b_ini",0.0);
   mdisk.dt_floor = eos.dt_floor;
   mdisk.ndiag = pin->GetOrAddInteger("problem","ndiag",0);
   mdisk.bc_flag = pin->GetOrAddInteger("problem","bc_flag",0);
+  mdisk.cooling = pin->GetOrAddBoolean("problem","cooling",false);
+  mdisk.invcool = pin->GetOrAddReal("problem","invcool",0.0);
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
@@ -111,7 +136,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // set initial conditions
   par_for("pgen_mdisk", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real rho, uu1, uu2, uu3;
+    Real rho, pgas, uu1, uu2, uu3;
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
@@ -124,11 +149,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-    ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,uu1,uu2,uu3);
+    ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
     w0(m,IDN,k,j,i) = rho;
     w0(m,IM1,k,j,i) = uu1;
     w0(m,IM2,k,j,i) = uu2;
     w0(m,IM3,k,j,i) = uu3;
+    w0(m,IEN,k,j,i) = pgas/gm1;
   });
 
   // Add magnetic field
@@ -155,6 +181,33 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0, bcc0_, u0, 0, n1m1, 0, n2m1, 0, n3m1);
   }
+  // Add turbulence
+  for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+    if (it->block_name.compare(0, 9, "turb_init") == 0) {
+      TurbulenceInit *pturb;
+      pturb = new TurbulenceInit(it->block_name,pmbp, pin);
+      pturb->InitializeModes(1);
+      pturb->AddForcing(1);
+      delete pturb;
+    }
+    if (it->block_name.compare(0, 8, "turb_mhd") == 0) {
+      TurbulenceMhd *pturb;
+      pturb = new TurbulenceMhd(it->block_name,pmbp, pin);
+      pturb->InitializeModes(1);
+      pturb->AddForcing(1);
+      delete pturb;
+    }
+  }
+  // Convert conserved to primitives
+  if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->ConsToPrim(u0, w0, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    pmbp->phydro->CopyCons(nullptr,1);
+  } else if (pmbp->pmhd != nullptr) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0, b0_, w0, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
+    pmbp->pmhd->CopyCons(nullptr,1);
+  }
 
   return;
 }
@@ -169,15 +222,45 @@ namespace {
 
 KOKKOS_INLINE_FUNCTION
 static void ComputePrimitiveSingle(Real x, Real y, Real z, struct mdisk_pgen pgen,
-                                   Real& rho, Real& uu1, Real& uu2, Real& uu3) {
+                                   Real& rho, Real& pgas,
+                                   Real& uu1, Real& uu2, Real& uu3) {
   Real r = sqrt(SQR(x) + SQR(y) + SQR(z));
   Real r_cyl = sqrt(SQR(x) + SQR(y));
-  Real j_z = pgen.j_z;
-  // gamma = 1.0
-  Real iso_cs = pgen.iso_cs;
-  rho = pgen.dens_0*fmax(exp((1.0/r-SQR(j_z/r_cyl)/2.0)/SQR(iso_cs)),0.01);
-  uu1 = - j_z * y / SQR(r);
-  uu2 = j_z * x / SQR(r);
+  Real jz_0 = pgen.j_z;
+  //Real gm1 = pgen.gm - 1.0;
+  //Real &rb = pgen.r_bondi;
+  Real &rin_disk = pgen.r_in_disk;
+  Real &rc = pgen.r_circ;
+  Real &cs_0 = pgen.cs_inf;
+  Real &rho0 = pgen.dens_0;
+  Real &rho_min = pgen.dens_min;
+  Real &h = pgen.scale_h;
+  Real temp_0 = cs_0*cs_0/pgen.gm;
+  Real temp = fmin(fmax(h*h/r_cyl/pgen.gm, temp_0), 1.0/pgen.r_in/pgen.gm);
+  Real jz = 0.0;
+  //rho=fmax(rho0*pow(1.0+gm1*(1.0/r-SQR(j_z/r_cyl)/2.0)/SQR(cs_0),1.0/gm1),pgen.sink_d);
+  //pgas = pow(rho/rho0,pgen.gm) * rho0 * SQR(cs_0) / pgen.gm;
+  if (r_cyl>rc) {
+    rho = rho0;
+    jz = jz_0 * pow(r_cyl/rc, 0.25);
+    uu1 = - jz * y / SQR(r_cyl);
+    uu2 = jz * x / SQR(r_cyl);
+  } else if (r_cyl>rin_disk) {
+    Real f = log(r_cyl/rin_disk)/log(rc/rin_disk);
+    Real log_rho = (1.0-f) * log(rho_min) + f * log(rho0);
+    rho = exp(log_rho);
+    jz = jz_0 * pow(r_cyl/rc, 0.5);
+    uu1 = - jz * y / SQR(r_cyl);
+    uu2 = jz * x / SQR(r_cyl);
+  } else {
+    // Calculate background primitives
+    rho = pgen.dens_min;
+    jz = jz_0 * pow(r_cyl/rc, 0.5);
+    // Use spherical radius
+    uu1 = - jz * y / SQR(r);
+    uu2 = jz * x / SQR(r);
+  }
+  pgas = rho * temp;
   uu3 = 0.0;
   return;
 }
@@ -208,7 +291,10 @@ void UserBoundary(Mesh *pm) {
   int nvar = u0_.extent_int(1);
   auto &mdisk_ = mdisk;
 
+  Real gm1 = mdisk.gm - 1.0;
   Real sink_d = mdisk.sink_d;
+  Real sink_e = mdisk.sink_p/gm1;
+  Real &rin = mdisk.r_in;
   bool bc_flag = mdisk.bc_flag;
   par_for("initial_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -226,11 +312,18 @@ void UserBoundary(Mesh *pm) {
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-    if (rad < 1.0) {
+    //if (true) {
+    if (rad < rin) {
       u0_(m,IDN,k,j,i) = sink_d;
+      u0_(m,IEN,k,j,i) = sink_e;
       u0_(m,IM1,k,j,i) = 0.0;
       u0_(m,IM2,k,j,i) = 0.0;
       u0_(m,IM3,k,j,i) = 0.0;
+      w0_(m,IDN,k,j,i) = sink_d;
+      w0_(m,IEN,k,j,i) = sink_e;
+      w0_(m,IVX,k,j,i) = 0.0;
+      w0_(m,IVX,k,j,i) = 0.0;
+      w0_(m,IVX,k,j,i) = 0.0;
     }
   });
 
@@ -376,10 +469,11 @@ void UserBoundary(Mesh *pm) {
       Real &x3max = size.d_view(m).x3max;
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-      Real rho, uu1, uu2, uu3;
+      Real rho, pgas, uu1, uu2, uu3;
       if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
-        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
         w0_(m,IDN,k,j,i) = rho;
+        w0_(m,IEN,k,j,i) = pgas/gm1;
         w0_(m,IM1,k,j,i) = uu1;
         w0_(m,IM2,k,j,i) = uu2;
         w0_(m,IM3,k,j,i) = uu3;
@@ -389,8 +483,9 @@ void UserBoundary(Mesh *pm) {
       x1v = CellCenterX((ie+i+1)-is, indcs.nx1, x1min, x1max);
 
       if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
-        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_, rho,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
         w0_(m,IDN,k,j,(ie+i+1)) = rho;
+        w0_(m,IEN,k,j,(ie+i+1)) = pgas/gm1;
         w0_(m,IM1,k,j,(ie+i+1)) = uu1;
         w0_(m,IM2,k,j,(ie+i+1)) = uu2;
         w0_(m,IM3,k,j,(ie+i+1)) = uu3;
@@ -447,10 +542,11 @@ void UserBoundary(Mesh *pm) {
       Real &x3max = size.d_view(m).x3max;
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-      Real rho, uu1, uu2, uu3;
+      Real rho, pgas, uu1, uu2, uu3;
       if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
-        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
         w0_(m,IDN,k,j,i) = rho;
+        w0_(m,IEN,k,j,i) = pgas/gm1;
         w0_(m,IM1,k,j,i) = uu1;
         w0_(m,IM2,k,j,i) = uu2;
         w0_(m,IM3,k,j,i) = uu3;
@@ -460,8 +556,9 @@ void UserBoundary(Mesh *pm) {
       x2v = CellCenterX((je+j+1)-js, indcs.nx2, x2min, x2max);
 
       if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
-        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
         w0_(m,IDN,k,(je+j+1),i) = rho;
+        w0_(m,IEN,k,(je+j+1),i) = pgas/gm1;
         w0_(m,IM1,k,(je+j+1),i) = uu1;
         w0_(m,IM2,k,(je+j+1),i) = uu2;
         w0_(m,IM3,k,(je+j+1),i) = uu3;
@@ -517,10 +614,11 @@ void UserBoundary(Mesh *pm) {
       Real &x3max = size.d_view(m).x3max;
       Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-      Real rho, uu1, uu2, uu3;
+      Real rho, pgas, uu1, uu2, uu3;
       if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
-        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
         w0_(m,IDN,k,j,i) = rho;
+        w0_(m,IEN,k,j,i) = pgas/gm1;
         w0_(m,IM1,k,j,i) = uu1;
         w0_(m,IM2,k,j,i) = uu2;
         w0_(m,IM3,k,j,i) = uu3;
@@ -530,8 +628,9 @@ void UserBoundary(Mesh *pm) {
       x3v = CellCenterX((ke+k+1)-ks, indcs.nx3, x3min, x3max);
 
       if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
-        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,mdisk_,rho,pgas,uu1,uu2,uu3);
         w0_(m,IDN,(ke+k+1),j,i) = rho;
+        w0_(m,IEN,(ke+k+1),j,i) = pgas/gm1;
         w0_(m,IM1,(ke+k+1),j,i) = uu1;
         w0_(m,IM2,(ke+k+1),j,i) = uu2;
         w0_(m,IM3,(ke+k+1),j,i) = uu3;
@@ -562,17 +661,13 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   // capture variables for the kernel
   auto &indcs = pm->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
-  int &ng = indcs.ng;
-  int n1 = indcs.nx1 + 2*ng;
-  int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
-  int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
-  int n1m1 = n1 - 1, n2m1 = n2 - 1, n3m1 = n3 - 1;
-  int is = indcs.is, nx1 = indcs.nx1;
-  int js = indcs.js, nx2 = indcs.nx2;
-  int ks = indcs.ks, nx3 = indcs.nx3;
-  int nmb = pmbp->nmb_thispack;
-  par_for("add_accel", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
-  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  Real rin = mdisk.r_in;
+  par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
@@ -588,11 +683,50 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
     Real accel = Acceleration(rad);
+    if (rad < rin) {
+      // Potential = -GM/(r^2+r_a^2*exp(-r^2/r_a^2))^0.5
+      Real r_a = 0.5*rin;
+      Real fac = exp(-rad*rad/r_a/r_a);
+      accel *= rad*rad*rad*(1-fac)/pow(rad*rad+r_a*r_a*fac,1.5);
+    }
     Real dmomr = bdt*w0(m,IDN,k,j,i)*accel;
+    Real denergy = bdt*w0(m,IDN,k,j,i)*accel/rad*
+                  (w0(m,IVX,k,j,i)*x1v+w0(m,IVY,k,j,i)*x2v+w0(m,IVZ,k,j,i)*x3v);
     u0(m,IM1,k,j,i) += dmomr*x1v/rad;
     u0(m,IM2,k,j,i) += dmomr*x2v/rad;
     u0(m,IM3,k,j,i) += dmomr*x3v/rad;
+    u0(m,IEN,k,j,i) += denergy;
   });
+  // Update temperature and pressure
+  if (mdisk.cooling) {
+    Real &cfl_no = pm->cfl_no;
+    Real &gm = mdisk.gm;
+    Real gm1 = mdisk.gm - 1.0;
+    Real &cs_0 = mdisk.cs_inf;
+    Real &h = mdisk.scale_h;
+    Real &invcool = mdisk.invcool;
+    par_for("temp", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real r_cyl = sqrt(SQR(x1v)+SQR(x2v));
+
+      Real temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+      Real temp_0 = cs_0*cs_0/gm;
+      temp_0 = fmin(fmax(h*h/r_cyl/gm, temp_0),1.0/rin/gm);
+      Real ep_cool = invcool*pow(fmax(r_cyl,rin),-1.5); // inverse cooling time
+      Real denergy = -fmin(bdt*ep_cool,cfl_no)*w0(m,IDN,k,j,i)*(temp-temp_0)/gm1;
+      if (r_cyl >= 0.5*rin) {
+        u0(m,IEN,k,j,i) += denergy;
+      }
+    });
+  }
   return;
 }
 
@@ -602,6 +736,7 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
 
 void MDiskHistory(HistoryData *pdata, Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
+  // set nvars, adiabatic index, primitive array w0, and field array bcc0 if is_mhd
   int nvars; bool is_ideal = false; Real gamma; bool is_mhd = false;
   DvceArray5D<Real> w0_, bcc0_;
   if (pmbp->phydro != nullptr) {
@@ -617,10 +752,11 @@ void MDiskHistory(HistoryData *pdata, Mesh *pm) {
     w0_ = pmbp->pmhd->w0;
     bcc0_ = pmbp->pmhd->bcc0;
   }
+
   // extract grids, number of radii, number of fluxes, and history appending index
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
-  //const int nflux = (is_mhd) ? 7 : 6;
+  //int nflux = (is_mhd) ? 4 : 3;
   const int nflux = 10;
   // set number of and names of history variables for hydro or mhd
   //  (0) mass
@@ -628,9 +764,13 @@ void MDiskHistory(HistoryData *pdata, Mesh *pm) {
   //  (2) energy flux
   //  (3) angular momentum flux * 3
   //  (4) magnetic flux (iff MHD)
-  int nsph = nradii * nflux;
-  int nuser = nsph;
-  pdata->nhist = nuser;
+  pdata->nhist = nradii * nflux;
+  if (pdata->nhist > NHISTORY_VARIABLES) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "User history function specified pdata->nhist larger than"
+              << " NHISTORY_VARIABLES" << std::endl;
+    exit(EXIT_FAILURE);
+  }
   for (int g=0; g<nradii; ++g) {
     std::string rstr = std::to_string(g);
     pdata->label[nflux*g+0] = "m_" + rstr;
@@ -653,6 +793,11 @@ void MDiskHistory(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[nflux*g+i] = 0.0;
     }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
+    if (pm->adaptive) {
+      grids[g]->SetInterpolationCoordinates();
+      grids[g]->SetInterpolationIndices();
+      grids[g]->SetInterpolationWeights();
+    }
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
       Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
@@ -843,6 +988,11 @@ void MDiskHistory(HistoryData *pdata, Mesh *pm) {
       }
     }
   }
+  // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
+  for (int n=pdata->nhist; n<NHISTORY_VARIABLES; ++n) {
+    pdata->hdata[n] = 0.0;
+  }
+
   return;
 }
 

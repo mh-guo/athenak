@@ -80,7 +80,17 @@ struct bondi_pgen {
   int  ndiag = 0;           // number of cycles between diagnostics
   bool multi_zone = false;  // true if multi-zone
   bool fixed_zone = false;  // true if fixed-zone
+  int  mz_type = 0;         // type of multi-zone
   int  vcycle_n = 0;        // number of cycles in a V-cycle
+  int  mz_beg_level = 0;    // beg level of multi-zone
+  int  mz_end_level = 0;    // end level of multi-zone
+  int  mz_max_level = 0;    // max level of multi-zone
+  int  mz_level = 0;        // current level in multi-zone
+  int  mz_dir = 0;          // direction to move level, -1 for down, 1 for up
+  Real mz_tf = 0.0;         // fraction of dynamical time spent at current level
+  Real mz_t_beg = 0.0;      // beg time of current level in multi-zone
+  Real mz_t_end = 0.0;      // end time of current level in multi-zone
+  Real mz_end_duration = 0.0; // duration of end level in multi-zone
   Real rv_in = 0.0;         // inner radius of V-cycle
   Real rv_out = 0.0;        // outer radius of V-cycle
   bool is_amr = false;      // true if AMR
@@ -88,17 +98,45 @@ struct bondi_pgen {
   int  beg_level = 0;       // beginning level for AMR
   int  end_level = 0;       // ending level for AMR
   Real r_refine = 0.0;      // mesh refinement radius
+  Real slope = 0.0;         // slope of density and pressure
 };
 
   bondi_pgen bondi;
 
 KOKKOS_INLINE_FUNCTION
-Real VcycleRadius(int i, int n, Real rmin, Real rmax) {
+Real VcycleRadius(struct bondi_pgen pgen, int i, int n, Real rmin, Real rmax) {
   Real x = static_cast<Real>(i%n)/static_cast<Real>(n-1);
-  Real r = rmin*std::pow(rmax/rmin,fabs(1.0-2.0*x));
+  Real y=0;
+  if (pgen.mz_type==0) {
+    y = fabs(1.0-2.0*x);
+  } else {
+    y = fmin(fmax(10.0*(fabs(2.0*x-1.0)-1.0)+1.0,0.0),1.0);
+  }
+  Real r = rmin*std::pow(rmax/rmin,y);
   int level = static_cast<int>(std::log2(r/rmin));
   r = rmin*std::pow(2.0,static_cast<Real>(level));
-  r = (r<(10*rmin)) ? 0.0 : r;
+  r = (r<(10.0*pgen.r_in)) ? 0.0 : r;
+  return r;
+}
+
+Real MultiZoneRadius(Real time) {
+  Real r = std::pow(2.0,static_cast<Real>(bondi.mz_max_level-bondi.mz_level));
+  r = (r<(12.0*bondi.r_in)) ? 0.0 : r;
+  if (time>=bondi.mz_t_end) {
+    std::cout << "MultiZoneRadius: old level = " << bondi.mz_level;
+    bondi.mz_level += bondi.mz_dir;
+    bondi.mz_dir = (bondi.mz_level==bondi.mz_beg_level) ? 1 : bondi.mz_dir;
+    bondi.mz_dir = (bondi.mz_level==bondi.mz_end_level) ? -1 : bondi.mz_dir;
+    bondi.mz_t_beg = time;
+    r = bondi.r_in*std::pow(2.0,static_cast<Real>(bondi.mz_max_level-bondi.mz_level));
+    r = (r<(12.0*bondi.r_in)) ? 0.0 : r;
+    Real duration = bondi.mz_tf*pow(r/bondi.r_in,1.5);
+    duration = (bondi.mz_level==bondi.mz_beg_level)? 1.5*duration : duration;
+    duration = (bondi.mz_level==bondi.mz_end_level)? bondi.mz_end_duration : duration;
+    bondi.mz_t_end = bondi.mz_t_beg + duration;
+    std::cout << ", new level = " << bondi.mz_level << ", radius = " << r
+              << ", duration = " << duration << std::endl;
+  }
   return r;
 }
 KOKKOS_INLINE_FUNCTION
@@ -164,12 +202,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &grids = spherical_grids;
   int hist_nr = pin->GetOrAddInteger("problem","hist_nr",4);
   for (int i=0; i<hist_nr; i++) {
-    Real rmin = 1.0;
+    Real rmin = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : 1.0;
     Real rmax = pin->GetReal("mesh","x1max");
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rmin;
-    if (i==0) {
-      r_i = is_gr ? 1.0+sqrt(1.0-SQR(pmbp->pcoord->coord_data.bh_spin)) : r_i;
-    }
     grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, r_i));
   }
 
@@ -184,16 +219,29 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bondi.multi_zone = pin->GetOrAddBoolean("coord", "multi_zone", false);
   bondi.fixed_zone = pin->GetOrAddBoolean("coord", "fixed_zone", false);
   if (bondi.multi_zone) {
-    bondi.vcycle_n = pin->GetOrAddInteger("problem", "vcycle_n", 0);
-    bondi.rv_in = pin->GetOrAddReal("problem", "rv_in", 0.0);
-    bondi.rv_out = pin->GetOrAddReal("problem", "rv_out", 0.0);
+    bondi.mz_type = pin->GetOrAddInteger("problem", "mz_type", 0);
+    if (bondi.mz_type>1) {
+      bondi.mz_beg_level = pin->GetInteger("problem", "beg_level");
+      bondi.mz_end_level = pin->GetInteger("problem", "end_level");
+      bondi.mz_max_level = pmy_mesh_->max_level;
+      bondi.mz_dir = (bondi.mz_beg_level<bondi.mz_end_level) ? 1 : -1;
+      bondi.mz_level = bondi.mz_beg_level - bondi.mz_dir;
+      bondi.mz_tf = pin->GetReal("problem", "mz_tf");
+      bondi.mz_end_duration = pin->GetReal("problem", "end_duration");
+      bondi.mz_t_beg = 0.0;
+      bondi.mz_t_end = 0.0;
+    } else {
+      bondi.vcycle_n = pin->GetInteger("problem", "vcycle_n");
+      bondi.rv_in = pin->GetReal("problem", "rv_in");
+      bondi.rv_out = pin->GetReal("problem", "rv_out");
+    }
   }
 
   bondi.is_amr = pmy_mesh_->adaptive;
   if (bondi.is_amr) {
-    bondi.ncycle_amr = pin->GetOrAddInteger("problem","ncycle_amr",0);
-    bondi.beg_level = pin->GetOrAddInteger("problem","beg_level",0);
-    bondi.end_level = pin->GetOrAddInteger("problem","end_level",0);
+    bondi.ncycle_amr = pin->GetInteger("problem","ncycle_amr");
+    bondi.beg_level = pin->GetInteger("problem","beg_level");
+    bondi.end_level = pin->GetInteger("problem","end_level");
     bondi.r_refine = pin->GetOrAddReal("problem","r_refine",0.0);
   }
 
@@ -226,6 +274,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     bondi.c2 = (SQR(1.0 + (bondi.n_adi+1.0) * t_crit)
                 * (1.0 - 3.0/(2.0*bondi.r_crit)));                     // (HSW 69)
     bondi.temp_inf = (sqrt(bondi.c2)-1.0)/(1.0+bondi.n_adi);           // (HSW 69)
+    bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
+    bondi.r_bondi = 1.0/SQR(bondi.c_s_inf);
   } else {
     bondi.dexcise = pin->GetOrAddReal("coord", "dexcise", 1e-5);
     bondi.pexcise = pin->GetOrAddReal("coord", "pexcise", 1e-10);
@@ -243,6 +293,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << " Critical radius = " << bondi.r_crit << std::endl;
     std::cout << " c1 = " << bondi.c1 << std::endl;
   }
+  bondi.slope = pin->GetOrAddReal("problem", "slope", 0.0); // slope change of density
 
   if (restart) return;
 
@@ -412,6 +463,10 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
   if (r > 1.0) {
     rho = my_rho;
     pgas = my_pgas;
+    if (pgen.slope>0.0) {
+      rho = my_rho/pow(1.0+pgen.r_bondi/r,pgen.slope);
+      pgas = my_pgas/pow(1.0+pgen.r_bondi/r,pgen.slope);
+    }
     uu1 = u1 - gupper[0][1]/gupper[0][0] * u0;
     uu2 = u2 - gupper[0][2]/gupper[0][0] * u0;
     uu3 = u3 - gupper[0][3]/gupper[0][0] * u0;
@@ -693,7 +748,6 @@ void FixedBondiInflow(Mesh *pm) {
   auto bondi_ = bondi;
   bool is_mhd = (pmbp->pmhd != nullptr);
   auto u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
-  auto u1_ = is_mhd ? pmbp->pmhd->u1 : pmbp->phydro->u1;
   auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
 
   if (!bondi.is_gr) {
@@ -978,11 +1032,11 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   if (!bondi.is_gr) {
     //std::cout << "AddAccel" << std::endl;
     auto &indcs = pm->mb_indcs;
+    auto &size = pmbp->pmb->mb_size;
     int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
     int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
     int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
     int nmb1 = pmbp->nmb_thispack - 1;
-    auto size = pmbp->pmb->mb_size;
     Real rin = bondi.r_in;
     par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -1171,11 +1225,6 @@ void BondiErrors(ParameterInput *pin, Mesh *pm) {
 
 void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
-
-  // extract BH parameters
-  bool &flat = pmbp->pcoord->coord_data.is_minkowski;
-  Real &spin = pmbp->pcoord->coord_data.bh_spin;
-
   // set nvars, adiabatic index, primitive array w0, and field array bcc0 if is_mhd
   int nvars; Real gamma; bool is_mhd = false;
   DvceArray5D<Real> w0_, bcc0_;
@@ -1195,15 +1244,14 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   //int nflux = (is_mhd) ? 4 : 3;
-  const int nflux = 10;
-
+  const int nflux = 15;
   // set number of and names of history variables for hydro or mhd
   //  (0) mass
   //  (1) mass accretion rate
   //  (2) energy flux
   //  (3) angular momentum flux * 3
   //  (4) magnetic flux (iff MHD)
-  pdata->nhist = nradii*nflux;
+  pdata->nhist = nradii * nflux;
   if (pdata->nhist > NHISTORY_VARIABLES) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "User history function specified pdata->nhist larger than"
@@ -1212,16 +1260,21 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   }
   for (int g=0; g<nradii; ++g) {
     std::string rstr = std::to_string(g);
-    pdata->label[nflux*g+0] = "m_" + rstr;
-    pdata->label[nflux*g+1] = "mdot" + rstr;
-    pdata->label[nflux*g+2] = "mdout" + rstr;
-    pdata->label[nflux*g+3] = "mdh" + rstr;
-    pdata->label[nflux*g+4] = "edot" + rstr;
-    pdata->label[nflux*g+5] = "edout" + rstr;
-    pdata->label[nflux*g+6] = "lx" + rstr;
-    pdata->label[nflux*g+7] = "ly" + rstr;
-    pdata->label[nflux*g+8] = "lz" + rstr;
-    pdata->label[nflux*g+9] = "phi" + rstr;
+    pdata->label[nflux*g+0] = "r_" + rstr;
+    pdata->label[nflux*g+1] = "m_" + rstr;
+    pdata->label[nflux*g+2] = "mdot" + rstr;
+    pdata->label[nflux*g+3] = "mdout" + rstr;
+    pdata->label[nflux*g+4] = "mdh" + rstr;
+    pdata->label[nflux*g+5] = "edot" + rstr;
+    pdata->label[nflux*g+6] = "edout" + rstr;
+    pdata->label[nflux*g+7] = "lx" + rstr;
+    pdata->label[nflux*g+8] = "ly" + rstr;
+    pdata->label[nflux*g+9] = "lz" + rstr;
+    pdata->label[nflux*g+10] = "phi" + rstr;
+    pdata->label[nflux*g+11] = "edot_hyd" + rstr;
+    pdata->label[nflux*g+12] = "edotout_hyd" + rstr;
+    pdata->label[nflux*g+13] = "edot_adv" + rstr;
+    pdata->label[nflux*g+14] = "edotout_adv" + rstr;
   }
 
   // go through angles at each radii:
@@ -1248,10 +1301,14 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
 
     // compute fluxes
     bool is_gr = pmbp->pcoord->is_general_relativistic;
+    Real r = grids[g]->radius;
+    pdata->hdata[nflux*g+0] = r;
     if (is_gr) {
+      // extract BH parameters
+      bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+      Real &spin = pmbp->pcoord->coord_data.bh_spin;
       for (int n=0; n<grids[g]->nangles; ++n) {
         // extract coordinate data at this angle
-        Real r = grids[g]->radius;
         Real theta = grids[g]->polar_pos.h_view(n,0);
         Real phi = grids[g]->polar_pos.h_view(n,1);
         Real x1 = grids[g]->interp_coord.h_view(n,0);
@@ -1277,8 +1334,8 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
 
         // Compute interpolated u^\mu in CKS
         Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
-                2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
-                2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
+                 2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
+                 2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
         Real alpha = sqrt(-1.0/gupper[0][0]);
         Real lor = sqrt(1.0 + q);
         Real u0 = lor/alpha;
@@ -1333,36 +1390,42 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
         Real is_hot = (int_temp>0.1/r)? 1.0 : 0.0;
 
         // compute mass density
-        pdata->hdata[nflux*g+0] += int_dn*sqrtmdet*domega;
+        pdata->hdata[nflux*g+1] += int_dn*sqrtmdet*domega;
 
         // compute mass flux
-        pdata->hdata[nflux*g+1] += 1.0*int_dn*ur*sqrtmdet*domega;
-        pdata->hdata[nflux*g+2] += is_out*int_dn*ur*sqrtmdet*domega;
-        pdata->hdata[nflux*g+3] += is_hot*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+2] += 1.0*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+3] += is_out*int_dn*ur*sqrtmdet*domega;
+        pdata->hdata[nflux*g+4] += is_hot*int_dn*ur*sqrtmdet*domega;
 
         // compute energy flux
         Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
-        pdata->hdata[nflux*g+4] += 1.0*t1_0*sqrtmdet*domega;
-        pdata->hdata[nflux*g+5] += is_out*t1_0*sqrtmdet*domega;
+        pdata->hdata[nflux*g+5] += 1.0*t1_0*sqrtmdet*domega;
+        pdata->hdata[nflux*g+6] += is_out*t1_0*sqrtmdet*domega;
 
         // compute angular momentum flux
         // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
         Real t1_1 = 0.0;
         Real t1_2 = 0.0;
         Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
-        pdata->hdata[nflux*g+6] += t1_1*sqrtmdet*domega;
-        pdata->hdata[nflux*g+7] += t1_2*sqrtmdet*domega;
-        pdata->hdata[nflux*g+8] += t1_3*sqrtmdet*domega;
+        pdata->hdata[nflux*g+7] += t1_1*sqrtmdet*domega;
+        pdata->hdata[nflux*g+8] += t1_2*sqrtmdet*domega;
+        pdata->hdata[nflux*g+9] += t1_3*sqrtmdet*domega;
 
         // compute magnetic flux
         if (is_mhd) {
-          pdata->hdata[nflux*g+9] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+          pdata->hdata[nflux*g+10] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
         }
+
+        Real t1_0_hyd = (int_dn + gamma*int_ie)*ur*u_0;
+        Real bernl_hyd = -(1.0 + gamma*int_ie/int_dn)*u_0-1.0;
+        pdata->hdata[nflux*g+11] += 1.0*t1_0_hyd*sqrtmdet*domega;
+        pdata->hdata[nflux*g+12] += is_out*t1_0_hyd*sqrtmdet*domega;
+        pdata->hdata[nflux*g+13] += 1.0*bernl_hyd*sqrtmdet*domega;
+        pdata->hdata[nflux*g+14] += is_out*bernl_hyd*sqrtmdet*domega;
       }
     } else {
       for (int n=0; n<grids[g]->nangles; ++n) {
         // extract coordinate data at this angle
-        Real r = grids[g]->radius;
         Real x1 = grids[g]->interp_coord.h_view(n,0);
         Real x2 = grids[g]->interp_coord.h_view(n,1);
         Real x3 = grids[g]->interp_coord.h_view(n,2);
@@ -1400,29 +1463,38 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
         Real is_hot = (int_temp>0.1/r)? 1.0 : 0.0;
 
         // compute mass density
-        pdata->hdata[nflux*g+0] += int_dn*r_sq*domega;
+        pdata->hdata[nflux*g+1] += int_dn*r_sq*domega;
 
         // compute mass flux
-        pdata->hdata[nflux*g+1] += 1.0*int_dn*vr*r_sq*domega;
-        pdata->hdata[nflux*g+2] += is_out*int_dn*vr*r_sq*domega;
-        pdata->hdata[nflux*g+3] += is_hot*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+2] += 1.0*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+3] += is_out*int_dn*vr*r_sq*domega;
+        pdata->hdata[nflux*g+4] += is_hot*int_dn*vr*r_sq*domega;
 
         // compute energy flux
-        // TODO(@mhguo): check whether this is correct!
-        Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
-        pdata->hdata[nflux*g+4] += 1.0*t1_0*r_sq*domega;
-        pdata->hdata[nflux*g+5] += is_out*t1_0*r_sq*domega;
+        // TODO(@mhguo): this should be correct now but need to check more carefully
+        // total enthalpy
+        Real t1_0 = (gamma*int_ie + e_k + 0.5*b_sq)*vr;
+        pdata->hdata[nflux*g+5] += 1.0*t1_0*r_sq*domega;
+        pdata->hdata[nflux*g+6] += is_out*t1_0*r_sq*domega;
 
         // compute angular momentum flux
         // TODO(@mhguo): check whether this is correct!
-        pdata->hdata[nflux*g+6] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
-        pdata->hdata[nflux*g+7] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
-        pdata->hdata[nflux*g+8] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
+        pdata->hdata[nflux*g+7] += int_dn*(x2*v3-x3*v2)*r_sq*domega;
+        pdata->hdata[nflux*g+8] += int_dn*(x3*v1-x1*v3)*r_sq*domega;
+        pdata->hdata[nflux*g+9] += int_dn*(x1*v2-x2*v1)*r_sq*domega;
 
         // compute magnetic flux
         if (is_mhd) {
-          pdata->hdata[nflux*g+9] += 0.5*fabs(br)*r_sq*domega;
+          pdata->hdata[nflux*g+10] += 0.5*fabs(br)*r_sq*domega;
         }
+
+        // TODO(@mhguo): this needs to be checked, assuming GM=1, adding potential term?
+        Real t1_0_hyd = (gamma*int_ie + e_k)*vr;
+        Real bernl_hyd = (gamma*int_ie + e_k)/int_dn - 1.0/r;
+        pdata->hdata[nflux*g+11] += 1.0*t1_0_hyd*r_sq*domega;
+        pdata->hdata[nflux*g+12] += is_out*t1_0_hyd*r_sq*domega;
+        pdata->hdata[nflux*g+13] += 1.0*bernl_hyd*r_sq*domega;
+        pdata->hdata[nflux*g+14] += is_out*bernl_hyd*r_sq*domega;
       }
     }
   }
@@ -1470,7 +1542,11 @@ Real BondiTimeStep(Mesh *pm) {
 
   Real r_v = 0.0;
   if (bondi.multi_zone) {
-    r_v = VcycleRadius(pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
+    if (bondi.mz_type<2) {
+      r_v = VcycleRadius(bondi, pm->ncycle, bondi.vcycle_n, bondi.rv_in, bondi.rv_out);
+    } else {
+      r_v = MultiZoneRadius(pm->time);
+    }
     if (pm->ncycle%10 == 0) {
       std::cout << "Vcycle radius = " << r_v << std::endl;
     }
@@ -1529,7 +1605,7 @@ Real BondiTimeStep(Mesh *pm) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
-      } else if (rad >= r_v) {
+      } else if (rad >= 0.88*r_v) {
         Real &w_d = w0_(m,IDN,k,j,i);
         Real &w_bx = bcc0_(m,IBX,k,j,i);
         Real &w_by = bcc0_(m,IBY,k,j,i);
@@ -1599,7 +1675,7 @@ Real BondiTimeStep(Mesh *pm) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
-      } else if (rad >= r_v) {
+      } else if (rad >= 0.88*r_v) {
         Real cs;
         if (eos.is_ideal) {
           Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
