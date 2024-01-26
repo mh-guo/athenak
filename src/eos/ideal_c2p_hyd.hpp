@@ -26,6 +26,7 @@ void SingleC2P_IdealHyd(HydCons1D &u, const EOS_Data &eos,
   Real efloor = eos.pfloor/(eos.gamma - 1.0);
   Real tfloor = eos.tfloor;
   Real sfloor = eos.sfloor;
+  Real tceil  = eos.tceil;
   Real gm1 = eos.gamma - 1.0;
 
   // apply density floor, without changing momentum or energy
@@ -61,6 +62,12 @@ void SingleC2P_IdealHyd(HydCons1D &u, const EOS_Data &eos,
   if (spe <= sfloor) {
     w.e = w.d*sfloor/spe_over_eps;
     efloor_used = true;
+  }
+  // apply temperature ceiling
+  if (gm1*w.e*di > tceil) {
+    w.e = w.d*tceil/gm1;
+    u.e = w.e + e_k;
+    tfloor_used = true; // not really, but we need a flag to know if we hit the ceiling
   }
   return;
 }
@@ -183,6 +190,8 @@ void SingleC2P_IdealSRHyd(HydCons1D &u, const EOS_Data &eos, const Real s2, HydP
   if (iter_used==max_iterations) {
     w.d = eos.dfloor;
     w.e = eos.pfloor/gm1;
+    w.e = fmax(w.e, eos.tfloor*w.d/gm1);
+    w.e = fmax(w.e, eos.sfloor*pow(w.d, eos.gamma)/gm1);
     w.vx = 0.0;
     w.vy = 0.0;
     w.vz = 0.0;
@@ -203,9 +212,15 @@ void SingleC2P_IdealSRHyd(HydCons1D &u, const EOS_Data &eos, const Real s2, HydP
   // compute specific internal energy density then apply floor
   Real eps = lor*q - z*r + (z*z)/(1.0 + lor);   // (C16)
   Real epsmin = fmax(eos.pfloor/(dens*gm1), eos.sfloor*pow(dens, gm1)/gm1);
+  epsmin = fmax(epsmin, eos.tfloor/(gm1));
+  Real epsmax = eos.tceil/(gm1);
   if (eps <= epsmin) {
     eps = epsmin;
     efloor_used = true;
+  }
+  if (eps >= epsmax) {
+    eps = epsmax;
+    efloor_used = true; // not really, but we want to know if we hit the ceiling
   }
 
   // set parameters required for velocity inversion

@@ -46,6 +46,9 @@ class Coordinates {
   // flags to denote relativistic dynamics in these coordinates
   bool is_special_relativistic = false;
   bool is_general_relativistic = false;
+  bool multi_zone = false;
+  bool fixed_zone = false;
+  Real zone_r = 0.0;
 
   // data needed to compute metric in GR
   CoordData coord_data;
@@ -54,12 +57,16 @@ class Coordinates {
   DvceArray4D<bool> excision_floor;  // cell-centered mask for C2P flooring about horizon
   DvceArray4D<bool> excision_flux;   // cell-centered mask for FOFC about horizon
 
+  // zone masks
+  DvceArray4D<bool> zone_mask;       // cell-centered mask for zones
+
   // functions
   void AddCoordTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos, const Real dt,
                      DvceArray5D<Real> &u0);
   void AddCoordTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc,
                      const EOS_Data &eos, const Real dt, DvceArray5D<Real> &u0);
   void SetExcisionMasks(DvceArray4D<bool> &floor, DvceArray4D<bool> &flux);
+  void SetZoneMasks(DvceArray4D<bool> &zone_mask, Real rmin, Real rmax);
 
  private:
   MeshBlockPack* pmy_pack;

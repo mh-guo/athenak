@@ -29,7 +29,15 @@ struct EOS_Data {
   bool is_ideal;     // flag to denote ideal gas EOS
   bool use_e, use_t; // use internal energy density (e) or temperature (t) as primitive
   Real dfloor, pfloor, tfloor, sfloor;  // density, pressure, temperature, entropy floors
+  Real tceil, mceil; // ceiling on temperature and magnetization
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
+  Real daverage;     // density floor for averaging
+  Real rdfloor;      // r-dependent dfloor
+  Real rdfloor_r0;   // r0 for r-dependent dfloor
+  Real rdfloor_pow;  // power law index for r-dependent dfloor
+  Real dt_floor;     // floor of timestep
+  Real r_in;         // inner radius
+  Real a_excise;     // excision radius relative to r_in
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
   // or temperature e/d) into pressure.

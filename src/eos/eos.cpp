@@ -23,6 +23,15 @@ EquationOfState::EquationOfState(std::string bk, MeshBlockPack* pp, ParameterInp
   eos_data.pfloor = pin->GetOrAddReal(bk,"pfloor",(FLT_MIN));
   eos_data.tfloor = pin->GetOrAddReal(bk,"tfloor",(FLT_MIN));
   eos_data.sfloor = pin->GetOrAddReal(bk,"sfloor",(FLT_MIN));
+  eos_data.tceil  = pin->GetOrAddReal(bk,"tceil", (FLT_MAX));
+  eos_data.mceil  = pin->GetOrAddReal(bk,"mceil", (FLT_MAX));
+  eos_data.daverage = pin->GetOrAddReal(bk,"daverage",(FLT_MIN));
+  eos_data.rdfloor = pin->GetOrAddReal(bk,"rdfloor",0.0);
+  eos_data.rdfloor_r0 = pin->GetOrAddReal(bk,"rdfloor_r0",1.0);
+  eos_data.rdfloor_pow = pin->GetOrAddReal(bk,"rdfloor_pow",-1.0);
+  eos_data.dt_floor = pin->GetOrAddReal(bk,"dt_floor",0.0);
+  eos_data.r_in = pin->GetOrAddReal("problem","r_in",0.0);
+  eos_data.a_excise = pin->GetOrAddReal("problem","a_excise",0.0);
 }
 
 //----------------------------------------------------------------------------------------

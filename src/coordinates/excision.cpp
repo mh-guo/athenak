@@ -153,3 +153,32 @@ void Coordinates::SetExcisionMasks(DvceArray4D<bool> &excision_floor,
 
   return;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void Coordinates::SetZoneMasks()
+//  \brief Sets boolean masks for the inactive zones
+
+void Coordinates::SetZoneMasks(DvceArray4D<bool> &zone_mask, Real rmin, Real rmax) {
+  // capture variables for kernel
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+  int &ng = indcs.ng;
+  int n1 = nx1 + 2*ng;
+  int n2 = (nx2 > 1)? (nx2 + 2*ng) : 1;
+  int n3 = (nx3 > 1)? (nx3 + 2*ng) : 1;
+  int nmb1 = pmy_pack->nmb_thispack - 1;
+  auto &size = pmy_pack->pmb->mb_size;
+
+  // set inactive masks
+  par_for("set_zone_masks", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    zone_mask(m,k,j,i) = (rad < rmin || rad > rmax);
+  });
+  return;
+}

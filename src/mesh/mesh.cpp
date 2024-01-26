@@ -576,6 +576,11 @@ void Mesh::NewTimeStep(const Real tlim) {
     dt = std::min(dt, (cfl_no)*(pmb_pack->prad->dtnew) );
   }
 
+  // User-defined timestep
+  if (pgen->user_dt_func != nullptr) {
+    dt = (cfl_no)*(pgen->user_dt_func)(this);
+  }
+
 #if MPI_PARALLEL_ENABLED
   // get minimum dt over all MPI ranks
   MPI_Allreduce(MPI_IN_PLACE, &dt, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);

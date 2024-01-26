@@ -49,6 +49,9 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
   auto &fofc_ = pmy_pack->pmhd->fofc;
   auto eos = eos_data;
   Real gm1 = eos_data.gamma - 1.0;
+  Real &rdfloor = eos.rdfloor;
+  Real &rdfl_r0 = eos.rdfloor_r0;
+  Real &rdfl_pow = eos.rdfloor_pow;
 
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
@@ -57,6 +60,9 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
   auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
   auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
   auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
+  bool zone_flag = (pmy_pack->pcoord->fixed_zone || pmy_pack->pcoord->multi_zone);
+  auto &zone_mask = pmy_pack->pcoord->zone_mask;
+  bool refining = (pmy_pack->pmesh->pmr!=nullptr)? pmy_pack->pmesh->pmr->refining : false;
 
   const int ni   = (iu - il + 1);
   const int nji  = (ju - jl + 1)*ni;
@@ -133,11 +139,30 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       }
     }
 
-    if (!(excised)) {
+    bool fixed = false;
+    if (zone_flag && !refining && !excised) {
+      if (zone_mask(m,k,j,i)) {
+        w.d = prim(m,IDN,k,j,i);
+        w.vx = prim(m,IVX,k,j,i);
+        w.vy = prim(m,IVY,k,j,i);
+        w.vz = prim(m,IVZ,k,j,i);
+        w.e = prim(m,IEN,k,j,i);
+        fixed = true;
+      }
+    }
+
+    if (!(excised) && !(fixed)) {
       // calculate SR conserved quantities
       MHDCons1D u_sr;
       Real s2, b2, rpar;
       TransformToSRMHD(u,glower,gupper,s2,b2,rpar,u_sr);
+
+      // apply radius-dependent density floor if necessary
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      if (rdfloor > 0.0 && u_sr.d < rdfloor*pow(rad/rdfl_r0,rdfl_pow)) {
+        u_sr.d = rdfloor*pow(rad/rdfl_r0,rdfl_pow);
+        dfloor_used = true;
+      }
 
       // call c2p function
       // (inline function in ideal_c2p_mhd.hpp file)
@@ -186,7 +211,8 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       bcc(m,IBZ,k,j,i) = u.bz;
 
       // reset conserved variables if floor, ceiling, failure, or excision encountered
-      if (dfloor_used || efloor_used || vceiling_used || c2p_failure || excised) {
+      if (dfloor_used || efloor_used || vceiling_used || c2p_failure || excised
+          || fixed) {
         MHDPrim1D w_in;
         w_in.d  = w.d;
         w_in.vx = w.vx;
