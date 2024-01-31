@@ -88,6 +88,7 @@ struct bondi_pgen {
   int  mz_level = 0;        // current level in multi-zone
   int  mz_dir = 0;          // direction to move level, -1 for down, 1 for up
   Real mz_tf = 0.0;         // fraction of dynamical time spent at current level
+  Real mz_tpow = 0.0;       // power law for duration of level
   Real mz_t_beg = 0.0;      // beg time of current level in multi-zone
   Real mz_t_end = 0.0;      // end time of current level in multi-zone
   Real mz_end_duration = 0.0; // duration of end level in multi-zone
@@ -130,7 +131,7 @@ Real MultiZoneRadius(Real time) {
     bondi.mz_t_beg = time;
     r = bondi.r_in*std::pow(2.0,static_cast<Real>(bondi.mz_max_level-bondi.mz_level));
     r = (r<(12.0*bondi.r_in)) ? 0.0 : r;
-    Real duration = bondi.mz_tf*pow(r/bondi.r_in,1.5);
+    Real duration = bondi.mz_tf*pow(r/bondi.r_in,bondi.mz_tpow);
     duration = (bondi.mz_level==bondi.mz_beg_level)? 1.5*duration : duration;
     duration = (bondi.mz_level==bondi.mz_end_level)? bondi.mz_end_duration : duration;
     bondi.mz_t_end = bondi.mz_t_beg + duration;
@@ -227,6 +228,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       bondi.mz_dir = (bondi.mz_beg_level<bondi.mz_end_level) ? 1 : -1;
       bondi.mz_level = bondi.mz_beg_level - bondi.mz_dir;
       bondi.mz_tf = pin->GetReal("problem", "mz_tf");
+      bondi.mz_tpow = pin->GetReal("problem", "mz_tpow");
       bondi.mz_end_duration = pin->GetReal("problem", "end_duration");
       bondi.mz_t_beg = 0.0;
       bondi.mz_t_end = 0.0;
@@ -1285,11 +1287,6 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[nflux*g+i] = 0.0;
     }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
-    if (pm->adaptive) {
-      grids[g]->SetInterpolationCoordinates();
-      grids[g]->SetInterpolationIndices();
-      grids[g]->SetInterpolationWeights();
-    }
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
       Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);

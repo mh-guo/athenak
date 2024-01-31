@@ -35,8 +35,9 @@ struct mdisk_pgen {
   Real r_in_disk;           // inner edge of disk
   Real cs_inf;              // sound speed at infinity
   Real j_z;                 // specific angular momentum
-  Real r_bondi, r_circ;     // Bondi radius and circularization radius
-  Real scale_h;             // scale height of disk
+  Real r_circ;              // circularization radius
+  Real temp_inf;            // temperature at infinity
+  Real disk_h;              // scale height of disk
   Real b_ini;               // initial magnetic field strength
   Real dt_floor;            // minimum time step
   int  ndiag = 0;           // number of cycles between diagnostics
@@ -90,11 +91,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   mdisk.dens_0 = pin->GetReal("problem","dens_0");
   mdisk.dens_min = pin->GetReal("problem","dens_min");
   mdisk.r_in_disk = pin->GetReal("problem","r_in_disk");
-  mdisk.r_bondi = pin->GetReal("problem","r_bondi");
   mdisk.r_circ = pin->GetReal("problem","r_circ");
-  mdisk.cs_inf = sqrt(1.0/mdisk.r_bondi); //pin->GetReal("problem","cs_inf");
+  mdisk.temp_inf = pin->GetReal("problem","temp_inf");
+  mdisk.cs_inf = sqrt(eos.gamma*mdisk.temp_inf);
+  //sqrt(1.0/mdisk.r_bondi); //pin->GetReal("problem","cs_inf");
   mdisk.j_z = sqrt(mdisk.r_circ); //pin->GetOrAddReal("problem","j_z",0.0);
-  mdisk.scale_h = pin->GetReal("problem","scale_h");
+  mdisk.disk_h = pin->GetReal("problem","disk_h");
   Real b_ini = mdisk.b_ini = pin->GetOrAddReal("problem","b_ini",0.0);
   mdisk.dt_floor = eos.dt_floor;
   mdisk.ndiag = pin->GetOrAddInteger("problem","ndiag",0);
@@ -231,18 +233,17 @@ static void ComputePrimitiveSingle(Real x, Real y, Real z, struct mdisk_pgen pge
   //Real &rb = pgen.r_bondi;
   Real &rin_disk = pgen.r_in_disk;
   Real &rc = pgen.r_circ;
-  Real &cs_0 = pgen.cs_inf;
   Real &rho0 = pgen.dens_0;
   Real &rho_min = pgen.dens_min;
-  Real &h = pgen.scale_h;
-  Real temp_0 = cs_0*cs_0/pgen.gm;
+  Real &h = pgen.disk_h;
+  Real temp_0 = pgen.temp_inf;
   Real temp = fmin(fmax(h*h/r_cyl/pgen.gm, temp_0), 1.0/pgen.r_in/pgen.gm);
   Real jz = 0.0;
   //rho=fmax(rho0*pow(1.0+gm1*(1.0/r-SQR(j_z/r_cyl)/2.0)/SQR(cs_0),1.0/gm1),pgen.sink_d);
   //pgas = pow(rho/rho0,pgen.gm) * rho0 * SQR(cs_0) / pgen.gm;
   if (r_cyl>rc) {
     rho = rho0;
-    jz = jz_0 * pow(r_cyl/rc, 0.25);
+    jz = jz_0; // * pow(r_cyl/rc, 0.25);
     uu1 = - jz * y / SQR(r_cyl);
     uu2 = jz * x / SQR(r_cyl);
   } else if (r_cyl>rin_disk) {
@@ -703,7 +704,7 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
     Real &gm = mdisk.gm;
     Real gm1 = mdisk.gm - 1.0;
     Real &cs_0 = mdisk.cs_inf;
-    Real &h = mdisk.scale_h;
+    Real &h = mdisk.disk_h;
     Real &invcool = mdisk.invcool;
     par_for("temp", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -793,11 +794,6 @@ void MDiskHistory(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[nflux*g+i] = 0.0;
     }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
-    if (pm->adaptive) {
-      grids[g]->SetInterpolationCoordinates();
-      grids[g]->SetInterpolationIndices();
-      grids[g]->SetInterpolationWeights();
-    }
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
       Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);

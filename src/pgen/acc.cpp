@@ -1846,11 +1846,6 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[nflux*g+i] = 0.0;
     }
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
-    if (pm->adaptive) {
-      grids[g]->SetInterpolationCoordinates();
-      grids[g]->SetInterpolationIndices();
-      grids[g]->SetInterpolationWeights();
-    }
     if (is_mhd) {
       grids[g]->InterpolateToSphere(3, bcc0_);
       Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
