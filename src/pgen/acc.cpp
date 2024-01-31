@@ -687,7 +687,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // TODO(@mhguo): read and interpolate data
-  // TODO(@mhguo): now only work for hydro!!!
   if (rst_flag) {
     ReadFromRestart(pmy_mesh_,pin);
     // Convert conserved to primitives

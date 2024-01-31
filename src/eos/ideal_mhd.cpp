@@ -149,6 +149,23 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     j += jl;
     k += kl;
 
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    int nx1 = indcs.nx1;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    int nx2 = indcs.nx2;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    int nx3 = indcs.nx3;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
     // load single state conserved variables
     MHDCons1D u;
     u.d  = cons(m,IDN,k,j,i);
@@ -181,23 +198,6 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     bool fofc_flag = false;
     bool rdf_flag = false, ave_flag = false, ceil_flag = false;
     if (only_testfloors) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
-      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
-      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
-      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-
       if (rdfloor>0.0) {
         if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad > r_in) {
           sum0++;
@@ -224,23 +224,6 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     } else {
       Real dave = daverage;
       // (@mhguo) r-dependent floor
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
-      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
-      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
-      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
-
-      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-
       if (rdfloor>0.0) {
         if (u.d < rdfloor*pow(rad/rdfl_r0, rdfl_pow) && rad > r_in) {
           u.d = rdfloor*pow(rad/rdfl_r0, rdfl_pow);
