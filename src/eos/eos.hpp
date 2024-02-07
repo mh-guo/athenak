@@ -38,6 +38,8 @@ struct EOS_Data {
   Real dt_floor;     // floor of timestep
   Real r_in;         // inner radius
   Real a_excise;     // excision radius relative to r_in
+  Real temp_inf;     // temperature at infinity
+  Real disk_h;       // scale height of disk
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
   // or temperature e/d) into pressure.

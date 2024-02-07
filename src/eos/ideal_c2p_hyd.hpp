@@ -347,4 +347,68 @@ void SingleP2C_IdealGRHyd(const Real glower[][4], const Real gupper[][4],
   return;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void SingleC2P_DiskHyd()
+//! \brief Converts single state of conserved variables into primitive variables for
+//! non-relativistic hydrodynamics with an ideal gas EOS.
+//! Conserved = (d,M1,M2,M3,E), Primitive = (d,vx,vy,vz,e)
+//! where E=total energy density and e=internal energy density
+
+KOKKOS_INLINE_FUNCTION
+void SingleC2P_DiskHyd(HydCons1D &u, const EOS_Data &eos,
+                        HydPrim1D &w, Real r,
+                        bool &dfloor_used, bool &efloor_used, bool &tfloor_used) {
+  const Real &dfloor_ = eos.dfloor;
+  Real efloor = eos.pfloor/(eos.gamma - 1.0);
+  Real tfloor = eos.tfloor;
+  Real sfloor = eos.sfloor;
+  Real tceil  = eos.tceil;
+  Real gm = eos.gamma;
+  Real gm1 = eos.gamma - 1.0;
+
+  // apply density floor, without changing momentum or energy
+  if (u.d < dfloor_) {
+    u.d = dfloor_;
+    dfloor_used = true;
+  }
+  w.d = u.d;
+
+  // compute velocities
+  Real di = 1.0/u.d;
+  w.vx = di*u.mx;
+  w.vy = di*u.my;
+  w.vz = di*u.mz;
+
+  // set internal energy, apply floor, correct total energy (if needed)
+  Real e_k = 0.5*di*(SQR(u.mx) + SQR(u.my) + SQR(u.mz));
+  Real temp = fmin(fmax(SQR(eos.disk_h)/r/gm,eos.temp_inf),1.0/eos.r_in/gm);
+  w.e = w.d*temp/(gm1);
+  u.e = w.e + e_k;
+  if (w.e < efloor) {
+    w.e = efloor;
+    u.e = efloor + e_k;
+    efloor_used = true;
+  }
+  // apply temperature floor
+  if (gm1*w.e*di < tfloor) {
+    w.e = w.d*tfloor/gm1;
+    u.e = w.e + e_k;
+    tfloor_used = true;
+  }
+  // apply entropy floor
+  Real spe_over_eps = gm1/pow(w.d, gm1);
+  Real spe = spe_over_eps*w.e*di;
+  if (spe <= sfloor) {
+    w.e = w.d*sfloor/spe_over_eps;
+    efloor_used = true;
+  }
+  // apply temperature ceiling
+  if (gm1*w.e*di > tceil) {
+    w.e = w.d*tceil/gm1;
+    u.e = w.e + e_k;
+    tfloor_used = true; // not really, but we need a flag to know if we hit the ceiling
+  }
+  return;
+}
+
 #endif // EOS_IDEAL_C2P_HYD_HPP_
