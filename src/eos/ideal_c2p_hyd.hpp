@@ -357,13 +357,14 @@ void SingleP2C_IdealGRHyd(const Real glower[][4], const Real gupper[][4],
 KOKKOS_INLINE_FUNCTION
 void SingleC2P_DiskHyd(HydCons1D &u, const EOS_Data &eos,
                         HydPrim1D &w, Real r,
-                        bool &dfloor_used, bool &efloor_used, bool &tfloor_used) {
+                        bool &dfloor_used, bool &efloor_used, bool &tfloor_used,
+                        bool &vceil_used) {
   const Real &dfloor_ = eos.dfloor;
   Real efloor = eos.pfloor/(eos.gamma - 1.0);
   Real tfloor = eos.tfloor;
   Real sfloor = eos.sfloor;
   Real tceil  = eos.tceil;
-  Real gm = eos.gamma;
+  Real vceil  = eos.vceil;
   Real gm1 = eos.gamma - 1.0;
 
   // apply density floor, without changing momentum or energy
@@ -379,9 +380,22 @@ void SingleC2P_DiskHyd(HydCons1D &u, const EOS_Data &eos,
   w.vy = di*u.my;
   w.vz = di*u.mz;
 
+  // apply velocity ceiling
+  Real vtot = sqrt(SQR(w.vx) + SQR(w.vy) + SQR(w.vz));
+  if (vtot > vceil) {
+    Real vfac = vceil/vtot;
+    w.vx *= vfac;
+    w.vy *= vfac;
+    w.vz *= vfac;
+    u.mx = w.d*w.vx;
+    u.my = w.d*w.vy;
+    u.mz = w.d*w.vz;
+    vceil_used = true;
+  }
+
   // set internal energy, apply floor, correct total energy (if needed)
   Real e_k = 0.5*di*(SQR(u.mx) + SQR(u.my) + SQR(u.mz));
-  Real temp = fmin(fmax(SQR(eos.disk_h)/r/gm,eos.temp_inf),1.0/eos.r_in/gm);
+  Real temp = fmin(fmax(SQR(eos.disk_h)/r,eos.temp_inf),1.0/eos.r_in);
   w.e = w.d*temp/(gm1);
   u.e = w.e + e_k;
   if (w.e < efloor) {

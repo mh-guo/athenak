@@ -96,7 +96,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     // call c2p function
     // (inline function in ideal_c2p_mhd.hpp file)
     HydPrim1D w;
-    bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+    bool dfloor_used=false, efloor_used=false, tfloor_used=false, vceil_used=false;
     if (h > 0.0) {
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
@@ -116,7 +116,7 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
       Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
       Real r_cyl = sqrt(SQR(x1v)+SQR(x2v));
       r_cyl = fmax(r_cyl, eos.r_in);
-      SingleC2P_DiskMHD(u, eos, w, r_cyl, dfloor_used, efloor_used, tfloor_used);
+      SingleC2P_DiskMHD(u,eos,w,r_cyl,dfloor_used,efloor_used,tfloor_used,vceil_used);
     } else {
       SingleC2P_IdealMHD(u, eos, w, dfloor_used, efloor_used, tfloor_used);
     }
@@ -143,6 +143,11 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
       }
       if (h > 0.0) {
         cons(m,IEN,k,j,i) = u.e;
+      }
+      if (vceil_used) {
+        cons(m,IM1,k,j,i) = u.mx;
+        cons(m,IM2,k,j,i) = u.my;
+        cons(m,IM3,k,j,i) = u.mz;
       }
       // store primitive state in 3D array
       prim(m,IDN,k,j,i) = w.d;
