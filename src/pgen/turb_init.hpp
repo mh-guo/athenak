@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <iostream>
 #include <string>
+#include <cstdio>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -20,7 +21,7 @@
 #include "mesh/mesh.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
-#include "ion-neutral/ion_neutral.hpp"
+#include "ion-neutral/ion-neutral.hpp"
 #include "driver/driver.hpp"
 #include "utils/random.hpp"
 

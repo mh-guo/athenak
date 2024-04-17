@@ -6,6 +6,11 @@
 //! \file mdisk.cpp
 //! \brief (@mhguo) A model of Magnetized Disk Accretion onto Black Holes
 
+#include <memory>
+#include <string>
+#include <limits>
+#include <iostream>
+
 // Athena++ headers
 #include "athena.hpp"
 #include "globals.hpp"

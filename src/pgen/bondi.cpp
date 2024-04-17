@@ -11,6 +11,11 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <memory>
+#include <cstdio>
+#include <string>
+#include <algorithm>
+#include <limits>
 
 #include "athena.hpp"
 #include "globals.hpp"

@@ -6,6 +6,14 @@
 //! \file acc.cpp
 //! \brief (@mhguo) A model of Accretion onto Black Holes in Elliptical Galaxies
 
+#include <memory>
+#include <utility>
+#include <cstdio>
+#include <string>
+#include <algorithm>
+#include <limits>
+#include <iostream>
+
 // Athena++ headers
 #include "athena.hpp"
 #include "parameter_input.hpp"
