@@ -2002,6 +2002,7 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
         Real e_k = 0.5*int_dn*(v1*v1+v2*v2+v3*v3);
         Real b1 = int_bx, b2 = int_by, b3 = int_bz;
         Real b_sq = b1*b1 + b2*b2 + b3*b3;
+        Real bdotv = b1*v1 + b2*v2 + b3*v3;
         Real r_sq = SQR(r);
         Real drdx = x1/r;
         Real drdy = x2/r;
@@ -2030,7 +2031,8 @@ void AccHistOutput(HistoryData *pdata, Mesh *pm) {
 
         // compute energy flux
         // TODO(@mhguo): check whether this is correct!
-        Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
+        //Real t1_0 = (int_ie + e_k + 0.5*b_sq)*vr;
+        Real t1_0 = (gamma*int_ie + e_k + b_sq)*vr - br*bdotv;
         pdata->hdata[nflux*g+4] += 1.0*t1_0*r_sq*domega;
         pdata->hdata[nflux*g+5] += is_out*t1_0*r_sq*domega;
 
