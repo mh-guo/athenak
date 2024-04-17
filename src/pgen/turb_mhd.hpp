@@ -294,7 +294,7 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
       Real r_cyl = sqrt(SQR(x1v)+SQR(x2v));
       force_new_(m,0,k,j,i) = 0.0;
       force_new_(m,1,k,j,i) = 0.0;
-      force_new_(m,2,k,j,i) = fmax(r_cyl-rmin,0.0);
+      force_new_(m,2,k,j,i) = -fmax(r_cyl-rmin,0.0);
     });
     return TaskStatus::complete;
   }

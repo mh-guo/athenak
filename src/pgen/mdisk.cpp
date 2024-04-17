@@ -42,7 +42,8 @@ struct mdisk_pgen {
   Real r_circ;              // circularization radius
   Real temp_inf;            // temperature at infinity
   Real disk_h;              // scale height of disk
-  Real b_ini;               // initial magnetic field strength
+  Real bz_ini;              // initial magnetic field strength
+  Real bz_amin;             // minimum radius of b_z to r_in
   Real dt_floor;            // minimum time step
   int  ndiag = 0;           // number of cycles between diagnostics
   bool bc_flag = 0;         // boundary condition flag
@@ -117,7 +118,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   //sqrt(1.0/mdisk.r_bondi); //pin->GetReal("problem","cs_inf");
   mdisk.j_z = sqrt(mdisk.r_circ); //pin->GetOrAddReal("problem","j_z",0.0);
   mdisk.disk_h = pin->GetReal("problem","disk_h");
-  Real b_ini = mdisk.b_ini = pin->GetOrAddReal("problem","b_ini",0.0);
+  Real bz_ini = mdisk.bz_ini = pin->GetOrAddReal("problem","bz_ini",0.0);
+  Real bz_amin = mdisk.bz_amin = pin->GetOrAddReal("problem","bz_amin",0.0);
   mdisk.dt_floor = eos.dt_floor;
   mdisk.ndiag = pin->GetOrAddInteger("problem","ndiag",0);
   mdisk.bc_flag = pin->GetOrAddInteger("problem","bc_flag",0);
@@ -180,7 +182,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   });
 
   // Add magnetic field
-  if (is_mhd && b_ini>0.0) {
+  if (is_mhd) { // Zero out magnetic field
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
     par_for("pgen_mdisk_bfield", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
@@ -189,11 +191,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       if (i==n1m1) b0_.x1f(m,k,j,i+1) = 0.0;
       b0_.x2f(m,k,j,i) = 0.0;
       if (j==n2m1) b0_.x2f(m,k,j+1,i) = 0.0;
-      b0_.x3f(m,k,j,i) = b_ini;
-      if (k==n3m1) b0_.x3f(m,k+1,j,i) = b_ini;
+      b0_.x3f(m,k,j,i) = 0.0;
+      if (k==n3m1) b0_.x3f(m,k+1,j,i) = 0.0;
       bcc0_(m,IBX,k,j,i) = 0.0;
       bcc0_(m,IBY,k,j,i) = 0.0;
-      bcc0_(m,IBZ,k,j,i) = b_ini;
+      bcc0_(m,IBZ,k,j,i) = 0.0;
     });
   }
   // Convert primitives to conserved
@@ -219,6 +221,28 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       pturb->AddForcing(1);
       delete pturb;
     }
+  }
+  // Add vertical magnetic field
+  if (is_mhd && bz_ini!=0.0) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    auto &b0_ = pmbp->pmhd->b0;
+    par_for("pgen_mdisk_bfield", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      
+      Real rad_cyl = fmax(fabs(x1v),fabs(x2v));
+
+      if (rad_cyl > bz_amin*mdisk.r_in) {
+        b0_.x3f(m,k,j,i) += bz_ini;
+        if (k==n3m1) b0_.x3f(m,k+1,j,i) += bz_ini;
+      }
+    });
   }
   // Convert conserved to primitives
   if (pmbp->phydro != nullptr) {
