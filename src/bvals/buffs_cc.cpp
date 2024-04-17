@@ -25,7 +25,7 @@
 //! relative to center of MeshBlock (0,0,0).  The arguments f1/2 are the coordinates
 //! of subblocks within faces/edges (only relevant with SMR/AMR)
 
-void BoundaryValuesCC::InitSendIndices(BoundaryBuffer &buf,
+void BoundaryValuesCC::InitSendIndices(MeshBoundaryBuffer &buf,
                                        int ox1, int ox2, int ox3, int f1, int f2) {
   auto &mb_indcs  = pmy_pack->pmesh->mb_indcs;
   int ng  = mb_indcs.ng;
@@ -44,6 +44,20 @@ void BoundaryValuesCC::InitSendIndices(BoundaryBuffer &buf,
     buf.isame_ndat = (isame.bie - isame.bis + 1)*(isame.bje - isame.bjs + 1)*
                      (isame.bke - isame.bks + 1);
   }
+
+  // set indices for sends of COARSE data to neighbors on SAME level (needed for Z4c)
+  if ((f1 == 0) && (f2 == 0)) {  // this buffer used for same level (e.g. #0,4,8,12,...)
+    auto &isame = buf.isame_z4c;
+    isame.bis = (ox1 > 0) ? (mb_indcs.cie - ng1) : mb_indcs.cis;
+    isame.bie = (ox1 < 0) ? (mb_indcs.cis + ng1) : mb_indcs.cie;
+    isame.bjs = (ox2 > 0) ? (mb_indcs.cje - ng1) : mb_indcs.cjs;
+    isame.bje = (ox2 < 0) ? (mb_indcs.cjs + ng1) : mb_indcs.cje;
+    isame.bks = (ox3 > 0) ? (mb_indcs.cke - ng1) : mb_indcs.cks;
+    isame.bke = (ox3 < 0) ? (mb_indcs.cks + ng1) : mb_indcs.cke;
+    buf.isame_z4c_ndat = buf.isame_ndat +
+      (isame.bie - isame.bis + 1)*(isame.bje - isame.bjs + 1)*(isame.bke - isame.bks + 1);
+  }
+
 
   // set indices for sends to neighbors on COARSER level (matches recvs from FINER)
   // Formulae taken from LoadBoundaryBufferToCoarser() in src/bvals/cc/bvals_cc.cpp
@@ -147,7 +161,7 @@ void BoundaryValuesCC::InitSendIndices(BoundaryBuffer &buf,
 //! relative to center of MeshBlock (0,0,0).  The arguments f1/2 are the coordinates
 //! of subblocks within faces/edges (only relevant with SMR/AMR)
 
-void BoundaryValuesCC::InitRecvIndices(BoundaryBuffer &buf,
+void BoundaryValuesCC::InitRecvIndices(MeshBoundaryBuffer &buf,
                                        int ox1, int ox2, int ox3, int f1, int f2) {
   auto &mb_indcs  = pmy_pack->pmesh->mb_indcs;
   int ng = mb_indcs.ng;
@@ -181,6 +195,37 @@ void BoundaryValuesCC::InitRecvIndices(BoundaryBuffer &buf,
     }
     buf.isame_ndat = (isame.bie - isame.bis + 1)*(isame.bje - isame.bjs + 1)*
                      (isame.bke - isame.bks + 1);
+  }
+
+  // set indices for receives of COARSE data from neighbors on SAME level
+  // Needed for Z4c with higher-order prolongation/restriction
+  if ((f1 == 0) && (f2 == 0)) {  // this buffer used for same level (e.g. #0,4,8,12,...)
+    auto &isame = buf.isame_z4c;
+    if (ox1 == 0) {
+      isame.bis = mb_indcs.cis;          isame.bie = mb_indcs.cie;
+    } else if (ox1 > 0) {
+      isame.bis = mb_indcs.cie + 1;      isame.bie = mb_indcs.cie + ng;
+    } else {
+      isame.bis = mb_indcs.cis - ng;     isame.bie = mb_indcs.cis - 1;
+    }
+
+    if (ox2 == 0) {
+      isame.bjs = mb_indcs.cjs;          isame.bje = mb_indcs.cje;
+    } else if (ox2 > 0) {
+      isame.bjs = mb_indcs.cje + 1;      isame.bje = mb_indcs.cje + ng;
+    } else {
+      isame.bjs = mb_indcs.cjs - ng;     isame.bje = mb_indcs.cjs - 1;
+    }
+
+    if (ox3 == 0) {
+      isame.bks = mb_indcs.cks;          isame.bke = mb_indcs.cke;
+    } else if (ox3 > 0) {
+      isame.bks = mb_indcs.cke + 1;      isame.bke = mb_indcs.cke + ng;
+    } else {
+      isame.bks = mb_indcs.cks - ng;     isame.bke = mb_indcs.cks - 1;
+    }
+    buf.isame_z4c_ndat = buf.isame_ndat +
+      (isame.bie - isame.bis + 1)*(isame.bje - isame.bjs + 1)*(isame.bke - isame.bks + 1);
   }
 
   // set indices for receives from neighbors on COARSER level (matches send to FINER)

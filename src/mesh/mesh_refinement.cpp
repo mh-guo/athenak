@@ -11,6 +11,7 @@
 
 #include <cstdint>   // int32_t
 #include <iostream>
+#include <cmath>     // abs
 #include <algorithm> // sort
 #include <utility>   // pair
 
@@ -22,7 +23,11 @@
 
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "radiation/radiation.hpp"
+#include "z4c/z4c.hpp"
+#include "z4c/z4c_amr.hpp"
 #include "prolongation.hpp"
+#include "restriction.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -90,6 +95,9 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
 
+  // initialize interpolation weights for prolongation and restriction
+  InitInterpWghts();
+
 #if MPI_PARALLEL_ENABLED
   // create unique communicators for AMR
   MPI_Comm_dup(MPI_COMM_WORLD, &amr_comm);
@@ -112,20 +120,34 @@ MeshRefinement::~MeshRefinement() {
 //! \fn void MeshRefinement::AdaptiveMeshRefinement()
 //! \brief Simple driver function for adaptive mesh refinement
 
-void MeshRefinement::AdaptiveMeshRefinement(Driver *pdrive, ParameterInput *pin) {
+void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin) {
   // first check refinement criteria
-  MeshBlockPack* pmbp = pmy_mesh->pmb_pack;
-  CheckForRefinement(pmbp);
+  CheckForRefinement(pmy_mesh->pmb_pack);
 
   // then update mesh tree if MeshBlock anywhere (on any rank) is flagged for refinement
   int nnew = 0, ndel = 0;
   UpdateMeshBlockTree(nnew, ndel);
 
-  // Refine/derefine mesh and eveolved data, set boundary conditions on new mesh
+  // Refine/derefine mesh and evolved data, set boundary conditions/timestep on new mesh
   if (nnew != 0 || ndel != 0) { // at least one (de)refinement flagged
     refining = true;
     RedistAndRefineMeshBlocks(pin, nnew, ndel);
-    pdrive->InitBoundaryValuesAndPrimitives(pmy_mesh);
+    pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh);
+
+    MeshBlockPack* pmbp = pmy_mesh->pmb_pack;
+    if (pmbp->phydro != nullptr) {
+      (void) pmbp->phydro->NewTimeStep(pdriver, pdriver->nexp_stages);
+    }
+    if (pmbp->pmhd != nullptr) {
+      (void) pmbp->pmhd->NewTimeStep(pdriver, pdriver->nexp_stages);
+    }
+    if (pmbp->prad != nullptr) {
+      (void) pmbp->prad->NewTimeStep(pdriver, pdriver->nexp_stages);
+    }
+    if (pmbp->pz4c != nullptr) {
+      (void) pmbp->pz4c->NewTimeStep(pdriver, pdriver->nexp_stages);
+    }
+
     nmb_created += nnew;
     nmb_deleted += ndel;
     refining = false;
@@ -148,18 +170,19 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdrive, ParameterInput *pin)
 //! pointer in the problem generator.
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
-  // increment cycle counter for each MB
-  for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
-    ncyc_since_ref(m) += 1;
-  }
-  if ((pmbp->pmesh->ncycle)%(ncyc_check_amr) != 0) {return;}  // not cycle to check
-
-  // zero refine_flag in host space and sync with device
+  // reallocate and zero refine_flag in host space and sync with device
+  Kokkos::realloc(refine_flag, pmy_mesh->nmb_total);
   for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
     refine_flag.h_view(m) = 0;
   }
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
+
+  // increment cycle counter for each MB
+  for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
+    ncyc_since_ref(m) += 1;
+  }
+  if ((pmbp->pmesh->ncycle)%(ncyc_check_amr) != 0) {return;}  // not cycle to check
 
   // capture variables for kernels
   auto &multi_d = pmy_mesh->multi_d;
@@ -266,7 +289,7 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
     if (ncyc_since_ref(m+mbs) < refinement_interval) {refine_flag.h_view(m+mbs) = 0;}
   }
 #if MPI_PARALLEL_ENABLED
-  // Pass refine_glag between all ranks
+  // Pass refine_flag between all ranks
     MPI_Allgatherv(MPI_IN_PLACE, pmy_mesh->nmb_eachrank[global_variable::my_rank],
                    MPI_INT, refine_flag.h_view.data(), pmy_mesh->nmb_eachrank,
                    pmy_mesh->gids_eachrank, MPI_INT, MPI_COMM_WORLD);
@@ -407,7 +430,8 @@ void MeshRefinement::UpdateMeshBlockTree(int &nnew, int &ndel) {
   }
 
   // Now the lists of the blocks to be refined and derefined are completed
-  // Start tree manipulation
+  // Start tree manipulation.  Note all ranks manipulate entire tree, so each rank has
+  // a complete and updated copy of the entire tree.
   // Step 1. perform refinement
   for (int n=0; n<tnref; n++) {
     MeshBlockTree *bt = pmy_mesh->ptree->FindMeshBlock(llref[n]);
@@ -421,11 +445,7 @@ void MeshRefinement::UpdateMeshBlockTree(int &nnew, int &ndel) {
   for (int n=0; n<ctnd; n++) {
     MeshBlockTree *bt = pmy_mesh->ptree->FindMeshBlock(cllderef[n]);
     bt->Derefine(ndel);
-    refine_flag.h_view(bt->GetGID()) = -nleaf; // flag root node of derefinements
   }
-  // sync host view with device
-  refine_flag.template modify<HostMemSpace>();
-  refine_flag.template sync<DevExeSpace>();
 
   if (tnderef >= nleaf) {
     delete [] cllderef;
@@ -509,7 +529,8 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   }
 
   // UpdateMeshBlockTree function can refine/de-refine MBs to ensure resolution jump is
-  // no more than 2x at boundaries.  Reset refine_flag for these MBs.
+  // no more than 2x at boundaries, even if refine flag not set in these MBs.  So loop
+  // over entire list of MBs on all ranks, reset refine_flag
   for (int oldm=0; oldm<old_nmb; oldm++) {
     int newm = oldtonew[oldm];
     LogicalLocation &old_lloc = pmy_mesh->lloc_eachmb[oldm];
@@ -518,9 +539,11 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
       refine_flag.h_view(oldm) = -nleaf;
     } else if (old_lloc.level < new_lloc.level) {   // old MB was refined
       refine_flag.h_view(oldm) = 1;
+    } else {
+      refine_flag.h_view(oldm) = 0;
     }
   }
-  // sync host view with device
+  //  All ranks have copy of refine_flag over all MBs. So just sync host view with device
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
 
@@ -539,6 +562,7 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   // array in target MB.
   hydro::Hydro* phydro = pm->pmb_pack->phydro;
   mhd::MHD* pmhd = pm->pmb_pack->pmhd;
+  z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   // derefine (if needed)
   if (ndel > 0) {
     if (phydro != nullptr) {
@@ -547,6 +571,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (pmhd != nullptr) {
       DerefineCCSameRank(pmhd->u0, pmhd->coarse_u0);
       DerefineFCSameRank(pmhd->b0, pmhd->coarse_b0);
+    }
+    if (pz4c != nullptr) {
+      DerefineCCSameRank(pz4c->u0, pz4c->coarse_u0);
     }
   }
 
@@ -560,7 +587,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     CopyCC(pmhd->u0);
     CopyFC(pmhd->b0);
   }
-
+  if (pz4c != nullptr) {
+    CopyCC(pz4c->u0);
+  }
   // Step 7.
   // Copy evolved physics variables for MBs flagged for refinement from source fine array
   // to target coarse array, when both are on same rank.
@@ -572,13 +601,16 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
       CopyForRefinementCC(pmhd->u0, pmhd->coarse_u0);
       CopyForRefinementFC(pmhd->b0, pmhd->coarse_b0);
     }
+    if (pz4c != nullptr) {
+      CopyForRefinementCC(pz4c->u0, pz4c->coarse_u0);
+    }
   }
 
   // Step 8.
   // Wait for all MPI load balancing communications to finish.  Unpack data.
 #if MPI_PARALLEL_ENABLED
-  if (nmb_recv > 0) {RecvAndUnpackAMR();}
   if (nmb_send > 0) {ClearSendAMR();}
+  if (nmb_recv > 0) {ClearRecvAndUnpackAMR();}
 #endif
 
   // copy newtoold array to DualView so that it can be accessed in kernel
@@ -601,6 +633,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
       RefineCC(new_to_old, pmhd->u0, pmhd->coarse_u0);
       RefineFC(new_to_old, pmhd->b0, pmhd->coarse_b0);
     }
+    if (pz4c != nullptr) {
+      RefineCC(new_to_old, pz4c->u0, pz4c->coarse_u0);
+    }
   }
 
   // Update new number of cycles since refinement
@@ -615,8 +650,6 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   }
   Kokkos::realloc(ncyc_since_ref, new_nmb_total);
   Kokkos::deep_copy(ncyc_since_ref, new_ncyc_since_ref);
-  // reallocate refine_flag, will be zeroed out at start of CheckForRefinement
-  Kokkos::realloc(refine_flag, new_nmb_total);
 
   // Step 10.
   // Update data in Mesh/MeshBlockPack/MeshBlock classes with new grid properties
@@ -999,11 +1032,18 @@ void MeshRefinement::CopyForRefinementFC(DvceFaceFld4D<Real> &b,DvceFaceFld4D<Re
 void MeshRefinement::RefineCC(DualArray1D<int> &n2o, DvceArray5D<Real> &a,
                               DvceArray5D<Real> &ca) {
   int nvar = a.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
-  auto &new_nmb = new_nmb_eachrank[global_variable::my_rank];;
+  auto &new_nmb = new_nmb_eachrank[global_variable::my_rank];
+  MeshBlockPack* pmbp = pmy_mesh->pmb_pack;
+  bool not_z4c = (pmbp->pz4c == nullptr)? true : false;
   auto &indcs = pmy_mesh->mb_indcs;
   auto &cis = indcs.cis, &cie = indcs.cie;
   auto &cjs = indcs.cjs, &cje = indcs.cje;
   auto &cks = indcs.cks, &cke = indcs.cke;
+  auto &nx1 = indcs.nx1;
+  auto &nx2 = indcs.nx2;
+  auto &nx3 = indcs.nx3;
+  auto& prolong_2nd = weights.prolong_2nd;
+  auto& prolong_4th = weights.prolong_4th;
 
   auto &refine_flag_ = refine_flag;
   bool &multi_d = pmy_mesh->multi_d;
@@ -1037,7 +1077,18 @@ void MeshRefinement::RefineCC(DualArray1D<int> &n2o, DvceArray5D<Real> &a,
         int fk = 2*k - cks;  // correct when cks=ks
 
         // call inlined prolongation operator for CC variables
-        ProlongCC(m,v,k,j,i,fk,fj,fi,multi_d,three_d,ca,a);
+        if (not_z4c) {
+          ProlongCC(m,v,k,j,i,fk,fj,fi,multi_d,three_d,ca,a);
+        } else {
+          switch (indcs.ng) {
+            case 2: HighOrderProlongCC<2>(m,v,k,j,i,fk,fj,fi,nx1,nx2,nx3,
+                                          ca,a,prolong_2nd);
+                    break;
+            case 4: HighOrderProlongCC<4>(m,v,k,j,i,fk,fj,fi,nx1,nx2,nx3,
+                                          ca,a,prolong_4th);
+                    break;
+          }
+        }
       });
     }
   });
@@ -1134,13 +1185,18 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu) {
   int nmb  = u.extent_int(0);  // TODO(@user): 1st index from L of in array must be NMB
   int nvar = u.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
 
-  auto &cis = pmy_mesh->mb_indcs.cis;
-  auto &cie = pmy_mesh->mb_indcs.cie;
-  auto &cjs = pmy_mesh->mb_indcs.cjs;
-  auto &cje = pmy_mesh->mb_indcs.cje;
-  auto &cks = pmy_mesh->mb_indcs.cks;
-  auto &cke = pmy_mesh->mb_indcs.cke;
-
+  MeshBlockPack* pmbp = pmy_mesh->pmb_pack;
+  bool not_z4c = (pmbp->pz4c == nullptr)? true : false;
+  auto &indcs = pmy_mesh->mb_indcs;
+  auto &cis = indcs.cis, &cie = indcs.cie;
+  auto &cjs = indcs.cjs, &cje = indcs.cje;
+  auto &cks = indcs.cks, &cke = indcs.cke;
+  auto &nx1 = indcs.nx1;
+  auto &nx2 = indcs.nx2;
+  auto &nx3 = indcs.nx3;
+  auto& restrict_2nd = weights.restrict_2nd;
+  auto& restrict_4th = weights.restrict_4th;
+  auto& restrict_4th_edge = weights.restrict_4th_edge;
   // restrict in 1D
   if (pmy_mesh->one_d) {
     par_for("restrictCC-1D",DevExeSpace(), 0,nmb-1, 0,nvar-1, cis,cie,
@@ -1165,11 +1221,22 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu) {
       int finei = 2*i - cis;  // correct when cis=is
       int finej = 2*j - cjs;  // correct when cjs=js
       int finek = 2*k - cks;  // correct when cks=ks
-      cu(m,n,k,j,i) =
-          0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
-               + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
-               + u(m,n,finek+1,finej,  finei) + u(m,n,finek+1,finej,  finei+1)
-               + u(m,n,finek+1,finej+1,finei) + u(m,n,finek+1,finej+1,finei+1));
+      if (not_z4c) {
+        cu(m,n,k,j,i) =
+            0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
+                + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
+                + u(m,n,finek+1,finej,  finei) + u(m,n,finek+1,finej,  finei+1)
+                + u(m,n,finek+1,finej+1,finei) + u(m,n,finek+1,finej+1,finei+1));
+      } else {
+        switch (indcs.ng) {
+          case 2: cu(m,n,k,j,i) = RestrictInterpolation<2>(m,n,finek,finej,finei,
+                          nx1,nx2,nx3,u,restrict_2nd,restrict_4th,restrict_4th_edge);
+                  break;
+          case 4: cu(m,n,k,j,i) = RestrictInterpolation<4>(m,n,finek,finej,finei,
+                          nx1,nx2,nx3,u,restrict_2nd,restrict_4th,restrict_4th_edge);
+                  break;
+        }
+      }
     });
   }
   return;
@@ -1271,4 +1338,83 @@ void MeshRefinement::RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb)
     });
   }
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MeshRefinement::InitInterpWghts()
+//! \brief interpolation weights for prolongation and restriction
+//
+void MeshRefinement::InitInterpWghts() {
+  auto &pro_2nd = weights.prolong_2nd;
+  auto &res_2nd = weights.restrict_2nd;
+  auto &pro_4th = weights.prolong_4th;
+  auto &res_4th = weights.restrict_4th;
+  auto &res_4th_e = weights.restrict_4th_edge;
+
+  // Allocate memory for the arrays
+  Kokkos::realloc(pro_2nd,3,3,3);
+  Kokkos::realloc(res_2nd,3);
+  Kokkos::realloc(pro_4th,5,5,5);
+  Kokkos::realloc(res_4th,5);
+  Kokkos::realloc(res_4th_e,5);
+
+  // 2nd order prolongation weights
+  const Real wght2[3] = {0.15625, 0.9375, -0.09375};
+  for (int k = 0; k < 3; k++) {
+    for (int j = 0; j < 3; j++) {
+      for (int i = 0; i < 3; i++) {
+        pro_2nd.h_view(k,j,i) = wght2[k]*wght2[j]*wght2[i];
+      }
+    }
+  }
+  /*pro_2nd.h_view(0) = 0.15625;
+  pro_2nd.h_view(1) = 0.9375;
+  pro_2nd.h_view(2) = -0.09375;*/
+
+  // 2nd order restriction weights
+  res_2nd.h_view(0) = 0.375;
+  res_2nd.h_view(1) = 0.75;
+  res_2nd.h_view(2) = -0.125;
+
+  // 4th order prolongation weights
+  const Real wght4[5] = {-0.02197265625, 0.205078125, 0.9228515625,
+                         -0.123046875, 0.01708984375};
+  for (int k = 0; k < 5; k++) {
+    for (int j = 0; j < 5; j++) {
+      for (int i = 0; i < 5; i++) {
+        pro_4th.h_view(k,j,i) = wght4[k]*wght4[j]*wght4[i];
+      }
+    }
+  }
+  /*pro_4th.h_view(0) = -0.02197265625;
+  pro_4th.h_view(1) = 0.205078125;
+  pro_4th.h_view(2) = 0.9228515625;
+  pro_4th.h_view(3) = -0.123046875;
+  pro_4th.h_view(4) = 0.01708984375;*/
+
+  // 4th order restriction weights
+  res_4th.h_view(0) = -0.0390625;
+  res_4th.h_view(1) = 0.46875;
+  res_4th.h_view(2) = 0.703125;
+  res_4th.h_view(3) = -0.15625;
+  res_4th.h_view(4) = 0.0234375;
+
+  // 4th order restriction weights at edge
+  res_4th_e.h_view(0) = 0.2734375;
+  res_4th_e.h_view(1) = 1.09375;
+  res_4th_e.h_view(2) = -0.546875;
+  res_4th_e.h_view(3) = 0.21875;
+  res_4th_e.h_view(4) = -0.0390625;
+
+  // sync dual arrays
+  pro_2nd.template modify<HostMemSpace>();
+  pro_2nd.template sync<DevExeSpace>();
+  res_2nd.template modify<HostMemSpace>();
+  res_2nd.template sync<DevExeSpace>();
+  pro_4th.template modify<HostMemSpace>();
+  pro_4th.template sync<DevExeSpace>();
+  res_4th.template modify<HostMemSpace>();
+  res_4th.template sync<DevExeSpace>();
+  res_4th_e.template modify<HostMemSpace>();
+  res_4th_e.template sync<DevExeSpace>();
 }
