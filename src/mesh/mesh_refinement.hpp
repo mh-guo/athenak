@@ -26,15 +26,11 @@ static int CreateAMR_MPI_Tag(int lid, int ox1, int ox2, int ox3) {
 #if MPI_PARALLEL_ENABLED
 struct AMRBuffer {
   int bis, bie, bjs, bje, bks, bke;  // start/end indices of data to be packed/unpacked
-  int cntcc, cntfc;                  // number of elements in CC and FC arrays
-  int cnt;                           // total number of elements stored in buffer
-  int lid;                           // local ID (gid - gids) of MeshBlock on this rank
-  bool refine=false, derefine=false;
-
-  DvceArray1D<Real> vars;               // View that stores buffer data on device
-  MPI_Request req;
-
-  AMRBuffer() : vars("amr_vars",1), req(MPI_REQUEST_NULL) {}
+  int cntcc, cntfc;          // number of CC and FC array elements to be sent/recv per var
+  int cnt;                   // total number of elements stored in buffer incl all vars
+  int offset=0;              // starting index of data for this buffer
+  int lid;                   // local ID (gid - gids) of MeshBlock on this rank
+  bool use_coarse=false;     // pack/unpack from coarse array when true
 };
 #endif
 
@@ -78,10 +74,23 @@ class MeshRefinement {
   int *new_gids_eachrank;      // starting global ID of MeshBlocks in each rank
   int *new_nmb_eachrank;       // number of MeshBlocks on each rank
 
+  // Lagrange Interpolation weights for prolongation and restriction operators
+  // naming convention: {prolong/restrict}_{order of interpolation}_{optional index}
+  struct InterpWeight {
+    DualArray3D<Real> prolong_2nd;
+    DualArray1D<Real> restrict_2nd;
+    DualArray3D<Real> prolong_4th;
+    DualArray1D<Real> restrict_4th_edge;
+    DualArray1D<Real> restrict_4th;
+  };
+  InterpWeight weights;
+
 #if MPI_PARALLEL_ENABLED
   int nmb_send, nmb_recv;
-  MPI_Comm amr_comm;                  // unique communicator for AMR
-  AMRBuffer *send_buf, *recv_buf;     // send/recv buffers (dimensioned nsend/nrecv)
+  MPI_Comm amr_comm;                         // unique communicator for AMR
+  DualArray1D<AMRBuffer> send_buf, recv_buf; // send/recv buffers
+  MPI_Request *send_req, *recv_req;
+  DvceArray1D<Real> send_data, recv_data;    // send/recv device data
 #endif
 
   // functions
@@ -104,21 +113,25 @@ class MeshRefinement {
 
   void RestrictCC(DvceArray5D<Real> &a, DvceArray5D<Real> &ca);
   void RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb);
+  void HighOrderRestrictCC(DvceArray5D<Real> &a, DvceArray5D<Real> &ca);
 
   // functions for load balancing (in file load_balance.cpp)
   void InitRecvAMR(int nleaf);
   void PackAndSendAMR(int nleaf);
   void PackAMRBuffersCC(DvceArray5D<Real> &a, DvceArray5D<Real> &ca, int ncc, int nfc);
   void PackAMRBuffersFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb, int ncc,int nfc);
-  void RecvAndUnpackAMR();
+  void ClearRecvAndUnpackAMR();
   void UnpackAMRBuffersCC(DvceArray5D<Real> &a, DvceArray5D<Real> &ca, int ncc,int nfc);
   void UnpackAMRBuffersFC(DvceFaceFld4D<Real> &b,DvceFaceFld4D<Real> &cb,int ncc,int nfc);
   void ClearSendAMR();
 
+  // initialize interpolation weights
+  void InitInterpWghts();
+
  private:
   // data
   Mesh *pmy_mesh;
-  Real d_threshold_, dd_threshold_, dp_threshold_, dv_threshold_;
+  Real d_threshold_, dd_threshold_, dp_threshold_, dv_threshold_, chi_threshold_;
   bool check_cons_;
 };
 #endif // MESH_MESH_REFINEMENT_HPP_
