@@ -21,7 +21,7 @@
 #include "eos/eos.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
-#include "ion-neutral/ion_neutral.hpp"
+#include "ion-neutral/ion-neutral.hpp"
 #include "driver/driver.hpp"
 #include "utils/random.hpp"
 
@@ -604,13 +604,16 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
   if (pmy_pack->pionn == nullptr) {
     // modify conserved variables
     DvceArray5D<Real> u,w;
+    Real gm1 = 0.0;
     if (pmy_pack->phydro != nullptr) {
       u = (pmy_pack->phydro->u0);
       w = (pmy_pack->phydro->w0);
+      gm1 = pmy_pack->phydro->peos->eos_data.gamma - 1.0;
     }
     if (pmy_pack->pmhd != nullptr) {
       u = (pmy_pack->pmhd->u0);
       w = (pmy_pack->pmhd->w0);
+      gm1 = pmy_pack->pmhd->peos->eos_data.gamma - 1.0;
     }
 
     auto force_ = force;
@@ -669,7 +672,7 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
       Real dx2 = size.d_view(m).dx2;
       Real dx3 = size.d_view(m).dx3;
       Real dvol = dx1*dx2*dx3;
-      sum_m0 += dvol*w(m,IEN,k,j,i);
+      sum_m0 += dvol*w(m,IEN,k,j,i)*gm1;
       sum_m1 += dvol*(SQR(b0.x1f(m,k,j,i)+b0.x1f(m,k,j,i+1))
                      +SQR(b0.x2f(m,k,j,i)+b0.x2f(m,k,j+1,i))
                      +SQR(b0.x3f(m,k,j,i)+b0.x3f(m,k+1,j,i)));

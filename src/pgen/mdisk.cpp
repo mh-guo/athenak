@@ -111,6 +111,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       std::cout << "Refinement res region: " << mdisk.refine_res_r << std::endl;
     }
   }
+  Real rin = mdisk.r_in;
   mdisk.r_in_disk = pin->GetReal("problem","r_in_disk");
   mdisk.r_circ = pin->GetReal("problem","r_circ");
   mdisk.temp_inf = pin->GetReal("problem","temp_inf");
@@ -238,7 +239,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       
       Real rad_cyl = fmax(fabs(x1v),fabs(x2v));
 
-      if (rad_cyl > bz_amin*mdisk.r_in) {
+      if (rad_cyl > bz_amin*rin) {
         b0_.x3f(m,k,j,i) += bz_ini;
         if (k==n3m1) b0_.x3f(m,k+1,j,i) += bz_ini;
       }
@@ -339,7 +340,7 @@ void UserBoundary(Mesh *pm) {
   Real gm1 = mdisk.gm - 1.0;
   Real sink_d = mdisk.sink_d;
   Real sink_e = mdisk.sink_p/gm1;
-  Real &rin = mdisk.r_in;
+  Real rin = mdisk.r_in;
   bool bc_flag = mdisk.bc_flag;
   par_for("initial_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -745,11 +746,11 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   // Update temperature and pressure
   if (mdisk.cooling) {
     Real &cfl_no = pm->cfl_no;
-    Real &gm = mdisk.gm;
+    Real gm = mdisk.gm;
     Real gm1 = mdisk.gm - 1.0;
-    Real &cs_0 = mdisk.cs_inf;
-    Real &h = mdisk.disk_h;
-    Real &invcool = mdisk.invcool;
+    Real cs_0 = mdisk.cs_inf;
+    Real h = mdisk.disk_h;
+    Real invcool = mdisk.invcool;
     par_for("temp", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       Real &x1min = size.d_view(m).x1min;
@@ -1066,7 +1067,7 @@ void UserRefine(MeshBlockPack* pmbp) {
 
   // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
   auto refine_flag_ = pm->pmr->refine_flag;
-  Real &rad_thresh  = mdisk.r_refine;
+  Real rad_thresh  = mdisk.r_refine;
   int nmb = pmbp->nmb_thispack;
   int mbs = pm->gids_eachrank[global_variable::my_rank];
   if (global_variable::my_rank == 0) {printf("UserRefine\n");}
