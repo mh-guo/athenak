@@ -506,23 +506,34 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       // values at fine grid resolution.  This guarantees flux on shared fine/coarse
       // faces is identical.
 
-      // Correct A1 at x2-faces, x3-faces, and x2x3-edges
-      if ((nghbr.d_view(m,8 ).lev > mblev.d_view(m) && j==js) ||
+      bool is_finer_iedge = (nghbr.d_view(m,0 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,1 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,2 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,3 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,4 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,5 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,6 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,7 ).lev > mblev.d_view(m) && i==ie+1);
+      bool is_finer_jedge = (nghbr.d_view(m,8 ).lev > mblev.d_view(m) && j==js) ||
           (nghbr.d_view(m,9 ).lev > mblev.d_view(m) && j==js) ||
           (nghbr.d_view(m,10).lev > mblev.d_view(m) && j==js) ||
           (nghbr.d_view(m,11).lev > mblev.d_view(m) && j==js) ||
           (nghbr.d_view(m,12).lev > mblev.d_view(m) && j==je+1) ||
           (nghbr.d_view(m,13).lev > mblev.d_view(m) && j==je+1) ||
           (nghbr.d_view(m,14).lev > mblev.d_view(m) && j==je+1) ||
-          (nghbr.d_view(m,15).lev > mblev.d_view(m) && j==je+1) ||
-          (nghbr.d_view(m,24).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,15).lev > mblev.d_view(m) && j==je+1);
+      bool is_finer_kedge = (nghbr.d_view(m,24).lev > mblev.d_view(m) && k==ks) ||
           (nghbr.d_view(m,25).lev > mblev.d_view(m) && k==ks) ||
           (nghbr.d_view(m,26).lev > mblev.d_view(m) && k==ks) ||
           (nghbr.d_view(m,27).lev > mblev.d_view(m) && k==ks) ||
           (nghbr.d_view(m,28).lev > mblev.d_view(m) && k==ke+1) ||
           (nghbr.d_view(m,29).lev > mblev.d_view(m) && k==ke+1) ||
           (nghbr.d_view(m,30).lev > mblev.d_view(m) && k==ke+1) ||
-          (nghbr.d_view(m,31).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,31).lev > mblev.d_view(m) && k==ke+1);
+
+      // Correct A1 at x2-faces, x3-faces, and x2x3-edges
+      if (is_finer_jedge ||
+          is_finer_kedge ||
           (nghbr.d_view(m,40).lev > mblev.d_view(m) && j==js && k==ks) ||
           (nghbr.d_view(m,41).lev > mblev.d_view(m) && j==js && k==ks) ||
           (nghbr.d_view(m,42).lev > mblev.d_view(m) && j==je+1 && k==ks) ||
@@ -537,22 +548,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       }
 
       // Correct A2 at x1-faces, x3-faces, and x1x3-edges
-      if ((nghbr.d_view(m,0 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,1 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,2 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,3 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,4 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,5 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,6 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,7 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,24).lev > mblev.d_view(m) && k==ks) ||
-          (nghbr.d_view(m,25).lev > mblev.d_view(m) && k==ks) ||
-          (nghbr.d_view(m,26).lev > mblev.d_view(m) && k==ks) ||
-          (nghbr.d_view(m,27).lev > mblev.d_view(m) && k==ks) ||
-          (nghbr.d_view(m,28).lev > mblev.d_view(m) && k==ke+1) ||
-          (nghbr.d_view(m,29).lev > mblev.d_view(m) && k==ke+1) ||
-          (nghbr.d_view(m,30).lev > mblev.d_view(m) && k==ke+1) ||
-          (nghbr.d_view(m,31).lev > mblev.d_view(m) && k==ke+1) ||
+      if (is_finer_iedge ||
+          is_finer_kedge ||
           (nghbr.d_view(m,32).lev > mblev.d_view(m) && i==is && k==ks) ||
           (nghbr.d_view(m,33).lev > mblev.d_view(m) && i==is && k==ks) ||
           (nghbr.d_view(m,34).lev > mblev.d_view(m) && i==ie+1 && k==ks) ||
@@ -567,22 +564,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       }
 
       // Correct A3 at x1-faces, x2-faces, and x1x2-edges
-      if ((nghbr.d_view(m,0 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,1 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,2 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,3 ).lev > mblev.d_view(m) && i==is) ||
-          (nghbr.d_view(m,4 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,5 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,6 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,7 ).lev > mblev.d_view(m) && i==ie+1) ||
-          (nghbr.d_view(m,8 ).lev > mblev.d_view(m) && j==js) ||
-          (nghbr.d_view(m,9 ).lev > mblev.d_view(m) && j==js) ||
-          (nghbr.d_view(m,10).lev > mblev.d_view(m) && j==js) ||
-          (nghbr.d_view(m,11).lev > mblev.d_view(m) && j==js) ||
-          (nghbr.d_view(m,12).lev > mblev.d_view(m) && j==je+1) ||
-          (nghbr.d_view(m,13).lev > mblev.d_view(m) && j==je+1) ||
-          (nghbr.d_view(m,14).lev > mblev.d_view(m) && j==je+1) ||
-          (nghbr.d_view(m,15).lev > mblev.d_view(m) && j==je+1) ||
+      if (is_finer_iedge ||
+          is_finer_jedge ||
           (nghbr.d_view(m,16).lev > mblev.d_view(m) && i==is && j==js) ||
           (nghbr.d_view(m,17).lev > mblev.d_view(m) && i==is && j==js) ||
           (nghbr.d_view(m,18).lev > mblev.d_view(m) && i==ie+1 && j==js) ||
