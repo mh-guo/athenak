@@ -3,7 +3,7 @@
 // Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
-//! \file gr_torus.cpp
+//! \file cycle_gr_torus.cpp
 //! \brief Problem generator to initialize rotational equilibrium tori in GR, using either
 //! Fishbone-Moncrief (1976) or Chakrabarti (1985) ICs, specialized for cartesian
 //! Kerr-Schild coordinates.  Based on gr_torus.cpp in Athena++, with edits by CJW and SR.
@@ -42,6 +42,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "pgen/zoom.hpp"
 
 #include <Kokkos_Random.hpp>
 
@@ -161,13 +162,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  const Real rflux =
+  const Real rflx =
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(torus.spin));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rflux));
-  // NOTE(@pdmullen): Enroll additional radii for flux analysis by
-  // pushing back the grids vector with additional SphericalGrid instances
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
+  int hist_nr = pin->GetOrAddInteger("problem","hist_nr",4);
+  Real rmax = pin->GetReal("mesh","x1max");
+  for (int i=0; i<hist_nr; i++) {
+    Real r_i = std::pow(rmax/rflx,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rflx;
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, r_i));
+  }
   user_hist_func = TorusFluxes;
 
   // return if restart
@@ -1652,12 +1654,17 @@ void NoInflowTorus(Mesh *pm) {
     pm->pmb_pack->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
   }
 
+  if (pm->pmb_pack->pzoom != nullptr && pm->pmb_pack->pzoom->is_set) {
+    pm->pmb_pack->pzoom->ZoomBoundaryConditions();
+  }
+
   return;
 }
 
 //----------------------------------------------------------------------------------------
 // Function for computing accretion fluxes through constant spherical KS radius surfaces
 
+// TODO(@mhguo): add history showing current level
 void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
 
@@ -1683,7 +1690,8 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   // extract grids, number of radii, number of fluxes, and history appending index
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
-  int nflux = (is_mhd) ? 4 : 3;
+  // int nflux = (is_mhd) ? 4 : 3;
+  const int nflux = 24;
 
   // set number of and names of history variables for hydro or mhd
   //  (1) mass accretion rate
@@ -1697,15 +1705,15 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
               << " NHISTORY_VARIABLES" << std::endl;
     exit(EXIT_FAILURE);
   }
+  // no more than 7 characters per label
+  std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
+    "lx","ly","lz","lzout","phi","eint","b^2","u0","ur","uph","br","bph",
+    "edothyd","edho","edotadv","edao"
+  };
   for (int g=0; g<nradii; ++g) {
-    std::stringstream stream;
-    stream << std::fixed << std::setprecision(1) << grids[g]->radius;
-    std::string rad_str = stream.str();
-    pdata->label[nflux*g+0] = "mdot_" + rad_str;
-    pdata->label[nflux*g+1] = "edot_" + rad_str;
-    pdata->label[nflux*g+2] = "ldot_" + rad_str;
-    if (is_mhd) {
-      pdata->label[nflux*g+3] = "phi_" + rad_str;
+    std::string gstr = std::to_string(g);
+    for (int i=0; i<nflux; ++i) {
+      pdata->label[nflux*g+i] = data_label[i] + "_" + gstr;
     }
   }
 
@@ -1713,10 +1721,9 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   DualArray2D<Real> interpolated_bcc;  // needed for MHD
   for (int g=0; g<nradii; ++g) {
     // zero fluxes at this radius
-    pdata->hdata[nflux*g+0] = 0.0;
-    pdata->hdata[nflux*g+1] = 0.0;
-    pdata->hdata[nflux*g+2] = 0.0;
-    if (is_mhd) pdata->hdata[nflux*g+3] = 0.0;
+    for (int i=0; i<nflux; ++i) {
+      pdata->hdata[nflux*g+i] = 0.0;
+    }
 
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
     if (is_mhd) {
@@ -1808,20 +1815,28 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Real &domega = grids[g]->solid_angles.h_view(n);
       Real sqrtmdet = (r2+SQR(spin*cos(theta)));
 
-      // compute mass flux
-      pdata->hdata[nflux*g+0] += -1.0*int_dn*ur*sqrtmdet*domega;
+      Real is_out = (ur>0.0)? 1.0 : 0.0;
 
       // compute energy flux
       Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
-      pdata->hdata[nflux*g+1] += -1.0*t1_0*sqrtmdet*domega;
-
       // compute angular momentum flux
+      // TODO(@mhguo): write a correct function to compute x,y angular momentum flux
+      Real t1_1 = 0.0;
+      Real t1_2 = 0.0;
       Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
-      pdata->hdata[nflux*g+2] += t1_3*sqrtmdet*domega;
+      Real phi_flx = (is_mhd) ? 0.5*fabs(br*u0 - b0*ur) : 0.0;
+      Real t1_0_hyd = (int_dn + gamma*int_ie)*ur*u_0;
+      Real bernl_hyd = -(1.0 + gamma*int_ie/int_dn)*u_0-1.0;
 
-      // compute magnetic flux
-      if (is_mhd) {
-        pdata->hdata[nflux*g+3] += 0.5*fabs(br*u0 - b0*ur)*sqrtmdet*domega;
+      Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, int_dn*ur, int_dn*ur*is_out,
+        t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
+        int_ie, b_sq, u0, ur, u_ph, br, b_ph,
+        t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
+      };
+
+      pdata->hdata[nflux*g+0] = flux_data[0];
+      for (int i=1; i<nflux; ++i) {
+        pdata->hdata[nflux*g+i] += flux_data[i]*sqrtmdet*domega;
       }
     }
   }
