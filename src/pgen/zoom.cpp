@@ -7,6 +7,7 @@
 //  \brief implementation of constructor and functions in Zoom class
 
 #include "athena.hpp"
+#include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -15,6 +16,10 @@
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
 #include "pgen/zoom.hpp"
+
+namespace zoom {
+//----------------------------------------------------------------------------------------
+// constructor, initializes data structures and parameters
 
 Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     pmy_pack(ppack) {
@@ -84,3 +89,59 @@ void Zoom::ZoomBoundaryConditions()
   });
   return;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::ZoomRefine()
+//! \brief User-defined refinement condition(s)
+
+// TODO(@mhguo): Implement this function
+void Zoom::ZoomRefine() {
+  auto &size = pmy_pack->pmb->mb_size;
+
+  // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
+  auto refine_flag_ = pmy_pack->pmesh->pmr->refine_flag;
+  int nmb = pmy_pack->nmb_thispack;
+  int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
+
+  // TODO(@mhguo): write this as a parameter
+  int target_level = 20;
+
+  if (pmy_pack->pmesh->adaptive) {
+    int root_level = pmy_pack->pmesh->root_level;
+    int ncycle=pmy_pack->pmesh->ncycle;
+    int old_level = 0;
+    int new_level = target_level;
+    Real rin  = this->r_in;
+    DualArray1D<int> levels_thisrank("levels_thisrank", nmb);
+    for (int m=0; m<nmb; ++m) {
+      levels_thisrank.h_view(m) = pmy_pack->pmesh->lloc_eachmb[m+mbs].level;
+    }
+    levels_thisrank.template modify<HostMemSpace>();
+    levels_thisrank.template sync<DevExeSpace>();
+    par_for_outer("RefineLevel",DevExeSpace(), 0, 0, 0, (nmb-1),
+    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
+      Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
+      Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
+      Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
+      if (levels_thisrank.d_view(m+mbs) > old_level+root_level) {
+        if (new_level > old_level) {
+          if (rad_min < rin) {
+            refine_flag_.d_view(m+mbs) = 1;
+          }
+        } else if (new_level < old_level) {
+          refine_flag_.d_view(m+mbs) = -1;
+        }
+      }
+    });
+  }
+  return;
+}
+
+} // namespace zoom
