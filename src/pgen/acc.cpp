@@ -159,6 +159,7 @@ void AddUserSrcs(Mesh *pm, const Real bdt);
 void AccRefine(MeshBlockPack* pmbp);
 void AccHistOutput(HistoryData *pdata, Mesh *pm);
 void AccFinalWork(ParameterInput *pin, Mesh *pm);
+void ReadFromBinary(Mesh *pm, ParameterInput *pin);
 void ReadFromRestart(Mesh *pm, ParameterInput *pin);
 int GIDConvert(int id, int rst_max_level, Mesh *pm, ParameterInput *pin);
 
@@ -294,6 +295,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   acc->ndiag = pin->GetOrAddInteger("problem","ndiag",-1);
   acc->rho_0 = pin->GetOrAddReal("problem","dens",1.0);
   Real temp_kelvin = pin->GetOrAddReal("problem","temp",1.0);
+  bool bin_flag = pin->GetOrAddBoolean("problem","bin",false);
   bool rst_flag = pin->GetOrAddBoolean("problem","rst",false);
 
   if (acc->potential) {
@@ -642,6 +644,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       w0(m,IEN,k,j,i) = pgas/gm1;
     }
   });
+  // Use binary file to set initial conditions
+  if (bin_flag) {
+    ReadFromBinary(pmy_mesh_,pin);
+  }
   // Add magnetic field
   if (is_mhd && b_ini>0.0) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
@@ -735,6 +741,105 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 }
 
 namespace {
+//----------------------------------------------------------------------------------------
+//! \fn ReadFromBinary
+//! \brief Read data from binary file
+
+void ReadFromBinary(Mesh *pm, ParameterInput *pin) {
+  std::cout << "Read data from binary file ..." << std::endl;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  IOWrapper binfile;
+  // read parameters from binary file
+  std::string bin_file = pin->GetString("problem", "bin_file");
+  binfile.Open(bin_file.c_str(), IOWrapper::FileMode::read);
+
+  //--- STEP 1.  All ranks read data over all MeshBlocks (5D arrays) in parallel
+  std::cout << "Read data" << std::endl;
+  // capture variables for kernel
+  auto &indcs = pm->mb_indcs;
+  // get spatial dimensions of arrays, including ghost zones
+  int nmb = pmbp->nmb_thispack;
+  int ng = indcs.ng;
+  int nbin1 = indcs.nx1;
+  int nbin2 = indcs.nx2;
+  int nbin3 = indcs.nx3;
+  int cells = nbin1*nbin2*nbin3;
+  // calculate total number of CC variables
+  hydro::Hydro* phydro = pmbp->phydro;
+  mhd::MHD* pmhd = pmbp->pmhd;
+  int n_vars = (pmhd != nullptr) ? pmhd->nmhd : phydro->nhydro;
+  std::size_t data_size = (cells*n_vars)*sizeof(Real);
+
+  IOWrapperSizeT headeroffset;
+  // master process gets file offset
+  if (global_variable::my_rank == 0) {
+    headeroffset = binfile.GetPosition();
+  }
+#if MPI_PARALLEL_ENABLED
+  // then broadcasts it
+  MPI_Bcast(&headeroffset, sizeof(IOWrapperSizeT), MPI_CHAR, 0, MPI_COMM_WORLD);
+#endif
+
+  // read CC data into host array
+  int mygids = pm->gids_eachrank[global_variable::my_rank];
+  IOWrapperSizeT offset_myrank = headeroffset + data_size*mygids;
+  IOWrapperSizeT myoffset = offset_myrank;
+
+  HostArray5D<Real> ccin("bin-cc-in", 1, 1, 1, 1, 1);
+
+  // calculate max/min number of MeshBlocks across all ranks
+  int nbinmbs_max = pm->nmb_eachrank[0];
+  int nbinmbs_min = pm->nmb_eachrank[0];
+  for (int i=0; i<(global_variable::nranks); ++i) {
+    nbinmbs_max = std::max(nbinmbs_max,pm->nmb_eachrank[i]);
+    nbinmbs_min = std::min(nbinmbs_min,pm->nmb_eachrank[i]);
+  }
+
+  // read data for all MeshBlocks
+  Kokkos::realloc(ccin, nmb, n_vars, nbin3, nbin2, nbin1);
+  for (int m=0;  m<nbinmbs_max; ++m) {
+    myoffset = (mygids+m)*data_size;
+    // every rank has a MB to read, so read collectively
+    if (m < nbinmbs_min) {
+      // get ptr to cell-centered MeshBlock data
+      auto mbptr = Kokkos::subview(ccin, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                    Kokkos::ALL);
+      int mbcnt = mbptr.size();
+      if (binfile.Read_Reals_at_all(mbptr.data(), mbcnt, myoffset) != mbcnt) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "CC data not read correctly from binary file, "
+                  << "binary file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    // some ranks are finished writing, so use non-collective write
+    } else if (m < pm->nmb_thisrank) {
+      // get ptr to MeshBlock data
+      auto mbptr = Kokkos::subview(ccin, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                    Kokkos::ALL);
+      int mbcnt = mbptr.size();
+      if (binfile.Read_Reals_at(mbptr.data(), mbcnt, myoffset) != mbcnt) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "CC data not read correctly from binary file, "
+                  << "binary file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+  }
+
+  // Copy data to device
+  // Use HostMirror because subview is not contiguous
+  auto w0 = (pmhd != nullptr) ? pmhd->w0 : phydro->w0;
+  DvceArray5D<Real>::HostMirror host_w0 = Kokkos::create_mirror(w0);
+  auto w0_slice = Kokkos::subview(host_w0, std::make_pair(0,nmb),
+                  std::make_pair(0,n_vars), Kokkos::make_pair(ng,ng+nbin3),
+                  Kokkos::make_pair(ng,ng+nbin2), Kokkos::make_pair(ng,ng+nbin1));
+  Kokkos::deep_copy(w0_slice, ccin);
+  Kokkos::deep_copy(w0, host_w0);
+
+  binfile.Close();
+  return;
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn ReadFromRestart
 //! \brief Read data from restart file
