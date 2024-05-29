@@ -129,7 +129,7 @@ struct torus_pgen {
 // Prototypes for user-defined BCs and history functions
 void NoInflowTorus(Mesh *pm);
 void TorusFluxes(HistoryData *pdata, Mesh *pm);
-void ZoomRefine(MeshBlockPack* pmbp) {pmbp->pzoom->ZoomRefine();}
+void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
@@ -150,7 +150,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = NoInflowTorus;
 
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
-    user_ref_func = ZoomRefine;
+    user_ref_func = ZoomAMR;
   }
 
   // capture variables for kernel
@@ -1660,7 +1660,7 @@ void NoInflowTorus(Mesh *pm) {
   }
 
   if (pm->pmb_pack->pzoom != nullptr && pm->pmb_pack->pzoom->is_set) {
-    pm->pmb_pack->pzoom->ZoomBoundaryConditions();
+    pm->pmb_pack->pzoom->BoundaryConditions();
   }
 
   return;
