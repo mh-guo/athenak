@@ -16,7 +16,7 @@
 #include "athena.hpp"
 #include "io_wrapper.hpp"
 
-#define NHISTORY_VARIABLES 1024
+#define NHISTORY_VARIABLES 2048
 // #if NHISTORY_VARIABLES > NREDUCTION_VARIABLES
 //     #error NHISTORY > NREDUCTION in outputs.hpp
 // #endif
@@ -233,7 +233,7 @@ class BaseTypeOutput {
   // for restarts, where dims are (m,n,k,j,i)
   HostArray5D<Real> outarray;
   HostArray5D<Real> outarray_hyd, outarray_mhd, outarray_rad,
-                    outarray_force, outarray_z4c, outarray_adm;
+                    outarray_force, outarray_z4c, outarray_adm, outarray_zoom;
   HostFaceFld4D<Real> outfield;  // FC output field on host
   std::vector<int> noutmbs;   // with MPI, number of output MBs across all ranks
   int noutmbs_min;            // with MPI, minimum number of output MBs across all ranks

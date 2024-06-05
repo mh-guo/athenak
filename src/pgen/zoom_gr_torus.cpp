@@ -150,6 +150,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = NoInflowTorus;
 
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
+    pmbp->pzoom->PrintInfo();
     user_ref_func = ZoomAMR;
   }
 

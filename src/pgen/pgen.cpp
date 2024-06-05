@@ -25,6 +25,7 @@
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "pgen.hpp"
+#include "pgen/zoom.hpp"
 
 //----------------------------------------------------------------------------------------
 // default constructor, calls pgen function.
@@ -152,7 +153,8 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   radiation::Radiation* prad=pm->pmb_pack->prad;
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
-  int nrad = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0;
+  zoom::Zoom* pzoom=pm->pmb_pack->pzoom;
+  int nrad = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0, nzoom=5;
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
   }
@@ -206,6 +208,39 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     MPI_Bcast(rng_data, sizeof(RNG_State), MPI_CHAR, 0, MPI_COMM_WORLD);
 #endif
     std::memcpy(&(pturb->rstate), &(rng_data[0]), sizeof(RNG_State));
+  }
+
+  // TODO(@mhguo): not working for MPI!
+  if (pzoom != nullptr) {
+    // root process reads size the random seed
+    char *zamr_data = new char[sizeof(zoom::ZoomAMR)];
+
+    if (global_variable::my_rank == 0) { // the master process reads the variables data
+      if (resfile.Read_bytes(zamr_data, 1, sizeof(zoom::ZoomAMR)) != sizeof(zoom::ZoomAMR)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "ZoomAMR data size read from restart file is incorrect, "
+                  << "restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      // Read pzoom w0 data
+      HostArray5D<Real> zwin("rst-zw-in", 1, 1, 1, 1, 1);
+      Kokkos::realloc(zwin, pzoom->mzoom, nzoom, nout3, nout2, nout1);
+      int mbcnt = zwin.size();
+      if (resfile.Read_Reals(zwin.data(), mbcnt) != mbcnt) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "CC zoom data not read correctly from rst file, "
+                  << "restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      Kokkos::deep_copy(pzoom->w0, zwin);
+    }
+
+#if MPI_PARALLEL_ENABLED
+    // then broadcast the ZoomAMR information
+    MPI_Bcast(zamr_data, sizeof(zoom::ZoomAMR), MPI_CHAR, 0, MPI_COMM_WORLD);
+#endif
+    std::memcpy(&(pzoom->zamr), &(zamr_data[0]), sizeof(zoom::ZoomAMR));
+
   }
 
   IOWrapperSizeT headeroffset;

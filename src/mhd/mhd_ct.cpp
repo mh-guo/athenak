@@ -12,6 +12,7 @@
 #include "srcterms/srcterms.hpp"
 #include "driver/driver.hpp"
 #include "mhd.hpp"
+#include "pgen/zoom.hpp"
 
 namespace mhd {
 //----------------------------------------------------------------------------------------
@@ -41,6 +42,14 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
   auto &mbsize = pmy_pack->pmb->mb_size;
+
+  if (pmy_pack->pzoom != nullptr && pmy_pack->pzoom->fix_efield) {
+    // Get mean E field on the zoomed grid
+    // TODO(@mhguo): this only needs to be done once per level, can be optimized
+    // pmy_pack->pzoom->GetMeanEField(efld);
+    // fix E field on the zoomed grid
+    pmy_pack->pzoom->FixEField(efld);
+  }
 
   //---- update B1 (only for 2D/3D problems)
   if (multi_d) {

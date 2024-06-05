@@ -17,7 +17,7 @@ namespace zoom {
 //! \struct ZoomAMR
 //! \brief structure to hold zoom level information
 
-struct ZoomAMR {
+typedef struct ZoomAMR {
   int max_level;                // maximum level number
   int min_level;                // minimum level number
   int level;                    // level number
@@ -32,7 +32,7 @@ struct ZoomAMR {
   Real last_time;               // time of last zoom
   Real next_time;               // time of next zoom
   bool just_zoomed;             // flag for just zoomed
-};
+} ZoomAMR;
 
 //----------------------------------------------------------------------------------------
 //! \class Zoom
@@ -49,7 +49,9 @@ class Zoom
 
   // data
   bool is_set;
+  bool fix_efield;
   int nlevels;             // number of levels
+  int mzoom;               // number of zoom meshblocks
   int nvars;               // number of variables
   Real r_in;               // radius of iner boundary
   Real d_zoom;             // density within inner boundary
@@ -66,14 +68,19 @@ class Zoom
   // vector of SphericalGrid objects for analysis
   std::vector<std::unique_ptr<SphericalGrid>> spherical_grids;
 
+  // array_sum::GlobalSum nc1, nc2, nc3, em1, em2, em3;
+
   // functions
   void Initialize();
+  void PrintInfo();
   void BoundaryConditions();
   void AMR();
-  void Refine();
-  void Interval();
+  void RefineCondition();
+  void SetInterval();
   void UpdateVariables();
   void ApplyVariables();
+  void GetMeanEField(DvceEdgeFld4D<Real> efld);
+  void FixEField(DvceEdgeFld4D<Real> efld);
 
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD

@@ -30,11 +30,13 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     coarse_u0("ccons",1,1,1,1,1),
     coarse_w0("cprim",1,1,1,1,1) {
   is_set = pin->GetOrAddBoolean("zoom","is_set",false);
+  fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
   r_in = pin->GetReal("zoom","r_in");
   // TODO(@mhguo): move to struct ZoomBC
   d_zoom = pin->GetReal("zoom","d_zoom");
   p_zoom = pin->GetReal("zoom","p_zoom");
   nlevels = pin->GetOrAddInteger("zoom","nlevels",4);
+  mzoom = 8*nlevels;
   nvars = pin->GetOrAddInteger("zoom","nvars",5);
   zamr.interval_fac = pin->GetOrAddReal("zoom","interval_fac",1.0);
   zamr.interval_pow = pin->GetOrAddReal("zoom","interval_pow",0.0);
@@ -48,7 +50,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zamr.zone = zamr.max_level - zamr.level;
   zamr.direction = pin->GetOrAddInteger("zoom","direction",-1);
   zamr.last_time = pmesh->time;
-  Interval();
+  SetInterval();
   zamr.just_zoomed = false;
 
   // allocate memory for primitive variables
@@ -56,22 +58,13 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
   int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-  Kokkos::realloc(u0, 8*nlevels, nvars, ncells3, ncells2, ncells1);
-  Kokkos::realloc(w0, 8*nlevels, nvars, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u0, mzoom, nvars, ncells3, ncells2, ncells1);
+  Kokkos::realloc(w0, mzoom, nvars, ncells3, ncells2, ncells1);
   int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
   int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
   int n_ccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
-  Kokkos::realloc(coarse_u0, 8*nlevels, nvars, n_ccells3, n_ccells2, n_ccells1);
-  Kokkos::realloc(coarse_w0, 8*nlevels, nvars, n_ccells3, n_ccells2, n_ccells1);
-
-  // print level structure
-  std::cout << "Zoom: max_level = " << zamr.max_level << " min_level = " << zamr.min_level
-            << " level = " << zamr.level << " zone = " << zamr.zone
-            << " direction = " << zamr.direction << std::endl;
-  std::cout << "Zoom: interval = " << zamr.interval << " next time = " << zamr.next_time << std::endl;
-  std::cout << "Zoom: interval_fac = " << zamr.interval_fac << " interval_pow = " << zamr.interval_pow
-            << " interval_fac_max_level = " << zamr.interval_fac_max_level
-            << " interval_fac_min_level = " << zamr.interval_fac_min_level << std::endl;
+  Kokkos::realloc(coarse_u0, mzoom, nvars, n_ccells3, n_ccells2, n_ccells1);
+  Kokkos::realloc(coarse_w0, mzoom, nvars, n_ccells3, n_ccells2, n_ccells1);
 
   std::cout << "Zoom: initialized" << std::endl;
 
@@ -85,6 +78,23 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
 // TODO(@mhguo): Implement this function
 void Zoom::Initialize()
 {
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::PrintInfo()
+//! \brief Print Zoom information
+
+void Zoom::PrintInfo()
+{
+  // print level structure
+  std::cout << "Zoom: max_level = " << zamr.max_level << " min_level = " << zamr.min_level
+            << " level = " << zamr.level << " zone = " << zamr.zone
+            << " direction = " << zamr.direction << std::endl;
+  std::cout << "Zoom: interval = " << zamr.interval << " next time = " << zamr.next_time << std::endl;
+  std::cout << "Zoom: interval_fac = " << zamr.interval_fac << " interval_pow = " << zamr.interval_pow
+            << " interval_fac_max_level = " << zamr.interval_fac_max_level
+            << " interval_fac_min_level = " << zamr.interval_fac_min_level << std::endl;
   return;
 }
 
@@ -227,19 +237,19 @@ void Zoom::AMR() {
     if (zamr.direction < 0) {
       UpdateVariables();
     }
-    Refine();
+    RefineCondition();
     zamr.level += zamr.direction;
     zamr.direction = (zamr.level==zamr.max_level) ? -1 : zamr.direction;
     zamr.direction = (zamr.level==zamr.min_level) ? 1 : zamr.direction;
     zamr.zone = zamr.max_level - zamr.level;
-    Interval();
+    SetInterval();
     std::cout << "Zoom AMR: new level = " << zamr.level << " zone = " << zamr.zone << std::endl;
     std::cout << "Zoom AMR: interval = " << zamr.interval << " next time = " << zamr.next_time << std::endl;
     zamr.just_zoomed = true;
   }
 }
 
-void Zoom::Interval() {
+void Zoom::SetInterval() {
   zamr.radius = std::pow(2.0,static_cast<Real>(zamr.zone));
   Real timescale = pow(zamr.radius,zamr.interval_pow);
   zamr.interval = zamr.interval_fac*timescale;
@@ -250,11 +260,11 @@ void Zoom::Interval() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void Zoom::Refine()
+//! \fn void Zoom::RefineCondition()
 //! \brief User-defined refinement condition(s)
 
 // TODO(@mhguo): Implement this function
-void Zoom::Refine() {
+void Zoom::RefineCondition() {
   auto &size = pmy_pack->pmb->mb_size;
 
   // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
@@ -382,7 +392,8 @@ void Zoom::UpdateVariables() {
     }
   }
   if (zid != 8*(zamr.zone+1)) {
-    std::cerr << "Error: UpdateVariables() failed to update all coarse variables" << std::endl;
+    std::cerr << "Error: Zoom::UpdateVariables() failed: zid = " << zid <<
+                 " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
     std::exit(1);
   }
 
@@ -435,9 +446,242 @@ void Zoom::ApplyVariables() {
     }
   }
   if (zid != 8*(zamr.zone+1)) {
-    std::cerr << "Error: UpdateVariables() failed to update all coarse variables" << std::endl;
+    std::cerr << "Error: Zoom::ApplyVariables() failed: zid = " << zid <<
+                 " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
     std::exit(1);
   }
+
+  return;
+}
+
+// TODO(@mhguo): either remove or make sure it works! 
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::GetMeanEField()
+//! \brief Get mean E field on the zoomed grid
+
+void Zoom::GetMeanEField(DvceEdgeFld4D<Real> efld) {
+  // print basic information
+  std::cout << "Zoom: GetMeanEField" << std::endl;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &ng = indcs.ng;
+  int is = indcs.is; int nx1 = indcs.nx1;
+  int js = indcs.js; int nx2 = indcs.nx2;
+  int ks = indcs.ks; int nx3 = indcs.nx3;
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+  auto e1 = efld.x1e;
+  auto e2 = efld.x2e;
+  auto e3 = efld.x3e;
+
+  Real rzoom = zamr.radius;
+
+  array_sum::GlobalSum tnc1, tnc2, tnc3, tem1, tem2, tem3;
+
+  std::cout << "Zoom: GetMeanEField: computing sums" << std::endl;
+  
+  // TODO(@mhguo): now assuming there are 8 cells per rzoom
+  Kokkos::parallel_reduce("EFldSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, 
+  array_sum::GlobalSum &nc1_, array_sum::GlobalSum &nc2_, array_sum::GlobalSum &nc3_, 
+  array_sum::GlobalSum &em1_, array_sum::GlobalSum &em2_, array_sum::GlobalSum &em3_) {
+    // compute n,k,j,i indices of thread
+    // int m = (idx)/nkji;
+    // int k = (idx - m*nkji)/nji;
+    // int j = (idx - m*nkji - k*nji)/nx1;
+    // int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    // k += ks;
+    // j += js;
+
+    // Real &x1min = size.d_view(m).x1min;
+    // Real &x1max = size.d_view(m).x1max;
+    // Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    // Real &x2min = size.d_view(m).x2min;
+    // Real &x2max = size.d_view(m).x2max;
+    // Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    // Real &x3min = size.d_view(m).x3min;
+    // Real &x3max = size.d_view(m).x3max;
+    // Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    // Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    // if (rad < rzoom) {
+    //   int idx1 = (int) (8.0*(1.0+x1v/rzoom));
+    //   int idx2 = (int) (8.0*(1.0+x2v/rzoom));
+    //   int idx3 = (int) (8.0*(1.0+x3v/rzoom));
+    //   // print postion and idx for debugging using printf
+    //   printf("m = %d, k = %d, j = %d, i = %d, idx1 = %d, idx2 = %d, idx3 = %d\n", m, k, j, i, idx1, idx2, idx3);
+
+    //   nc1_.the_array[idx1] += 1.0;
+    //   nc2_.the_array[idx2] += 1.0;
+    //   nc3_.the_array[idx3] += 1.0;
+    //   em1_.the_array[idx1] += e1(m,k,j,i);
+    //   em2_.the_array[idx2] += e2(m,k,j,i);
+    //   em3_.the_array[idx3] += e3(m,k,j,i);
+    // }
+
+  }, Kokkos::Sum<array_sum::GlobalSum>(tnc1),
+     Kokkos::Sum<array_sum::GlobalSum>(tnc2),
+     Kokkos::Sum<array_sum::GlobalSum>(tnc3),
+     Kokkos::Sum<array_sum::GlobalSum>(tem1),
+     Kokkos::Sum<array_sum::GlobalSum>(tem2),
+     Kokkos::Sum<array_sum::GlobalSum>(tem3));
+
+  std::cout << "Zoom: GetMeanEField: computing means" << std::endl;
+
+  // par_for("efld-norm", DevExeSpace(), 0, NREDUCTION_VARIABLES-1,
+  // KOKKOS_LAMBDA(int i) {
+  //   nc1.the_array[i] = tnc1.the_array[i];
+  //   nc2.the_array[i] = tnc2.the_array[i];
+  //   nc3.the_array[i] = tnc3.the_array[i];
+  //   em1.the_array[i] = tem1.the_array[i];
+  //   em2.the_array[i] = tem2.the_array[i];
+  //   em3.the_array[i] = tem3.the_array[i];
+  // });
+
+  // // Normalize
+  // par_for("efld-norm", DevExeSpace(), 0, NREDUCTION_VARIABLES-1,
+  // KOKKOS_LAMBDA(int i) {
+  //   printf("idx: i = %d, nc1 = %f, nc2 = %f, nc3 = %f\n", i, nc1.the_array[i], nc2.the_array[i], nc3.the_array[i]);
+  //   printf("sum: i = %d, em1 = %f, em2 = %f, em3 = %f\n", i, em1.the_array[i], em2.the_array[i], em3.the_array[i]);
+  //   if (nc1.the_array[i] > 0.0) {
+  //     em1.the_array[i] /= nc1.the_array[i];
+  //   }
+  //   if (nc2.the_array[i] > 0.0) {
+  //     em2.the_array[i] /= nc2.the_array[i];
+  //   }
+  //   if (nc3.the_array[i] > 0.0) {
+  //     em3.the_array[i] /= nc3.the_array[i];
+  //   }
+  //   printf("mean i = %d, em1 = %f, em2 = %f, em3 = %f\n", i, em1.the_array[i], em2.the_array[i], em3.the_array[i]);
+  // });
+
+  // TODO(@mhguo): MPI reduction
+  return;
+}
+
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::FixEField()
+//! \brief Fix E field on the zoomed grid
+
+void Zoom::FixEField(DvceEdgeFld4D<Real> efld) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &ng = indcs.ng;
+  int &is = indcs.is;  int &ie  = indcs.ie;
+  int &js = indcs.js;  int &je  = indcs.je;
+  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int nmb1 = pmy_pack->nmb_thispack-1;
+  auto e1 = efld.x1e;
+  auto e2 = efld.x2e;
+  auto e3 = efld.x3e;
+  Real rzoom = zamr.radius;
+
+  // print basic information
+  // std::cout << "Zoom: FixEField" << std::endl;
+
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+
+  // array_sum::GlobalSum tnc1, tnc2, tnc3, tem1, tem2, tem3;
+  array_sum::GlobalSum nc1, nc2, nc3, em1, em2, em3;
+
+  Kokkos::parallel_reduce("EFldSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, 
+  array_sum::GlobalSum &nc1_, array_sum::GlobalSum &nc2_, array_sum::GlobalSum &nc3_, 
+  array_sum::GlobalSum &em1_, array_sum::GlobalSum &em2_, array_sum::GlobalSum &em3_) {
+    // compute n,k,j,i indices of thread
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    if (rad < rzoom) {
+      int idx1 = (int) (8.0*(1.0+x1v/rzoom));
+      int idx2 = (int) (8.0*(1.0+x2v/rzoom));
+      int idx3 = (int) (8.0*(1.0+x3v/rzoom));
+      // print postion and idx for debugging using printf
+      // printf("m = %d, k = %d, j = %d, i = %d, idx1 = %d, idx2 = %d, idx3 = %d\n", m, k, j, i, idx1, idx2, idx3);
+
+      nc1_.the_array[idx1] += 1.0;
+      nc2_.the_array[idx2] += 1.0;
+      nc3_.the_array[idx3] += 1.0;
+      em1_.the_array[idx1] += e1(m,k,j,i);
+      em2_.the_array[idx2] += e2(m,k,j,i);
+      em3_.the_array[idx3] += e3(m,k,j,i);
+    }
+
+  }, Kokkos::Sum<array_sum::GlobalSum>(nc1),
+     Kokkos::Sum<array_sum::GlobalSum>(nc2),
+     Kokkos::Sum<array_sum::GlobalSum>(nc3),
+     Kokkos::Sum<array_sum::GlobalSum>(em1),
+     Kokkos::Sum<array_sum::GlobalSum>(em2),
+     Kokkos::Sum<array_sum::GlobalSum>(em3));
+
+  // Normalize
+  par_for("efld-norm", DevExeSpace(), 0, NREDUCTION_VARIABLES-1,
+  KOKKOS_LAMBDA(int i) {
+    printf("idx: i = %d, nc1 = %f, nc2 = %f, nc3 = %f\n", i, nc1.the_array[i], nc2.the_array[i], nc3.the_array[i]);
+    printf("sum: i = %d, em1 = %f, em2 = %f, em3 = %f\n", i, em1.the_array[i], em2.the_array[i], em3.the_array[i]);
+    printf("mean i = %d, em1 = %f, em2 = %f, em3 = %f\n", i, em1.the_array[i]/nc1.the_array[i], em2.the_array[i]/nc2.the_array[i], em3.the_array[i]/nc3.the_array[i]);
+  });
+
+  par_for("fix-efld", DevExeSpace(), 0, nmb1, ks-ng, ke+ng, js-ng, je+ng ,is-ng, ie+ng,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    if (rad < rzoom) {
+      int idx1 = (int) (8.0*(1.0+x1v/rzoom));
+      int idx2 = (int) (8.0*(1.0+x2v/rzoom));
+      int idx3 = (int) (8.0*(1.0+x3v/rzoom));
+      Real e1m = em1.the_array[idx1]/nc1.the_array[idx1];
+      Real e2m = em2.the_array[idx2]/nc2.the_array[idx2];
+      Real e3m = em3.the_array[idx3]/nc3.the_array[idx3];
+      e1(m,k,j,i) = e1m;
+      e2(m,k,j,i) = e2m;
+      e3(m,k,j,i) = e3m;
+      e1(m,k+1,j,i) = e1m;
+      e1(m,k,j+1,i) = e1m;
+      e1(m,k+1,j+1,i) = e1m;
+      e2(m,k+1,j,i) = e2m;
+      e2(m,k,j,i+1) = e2m;
+      e2(m,k+1,j,i+1) = e2m;
+      e3(m,k,j+1,i) = e3m;
+      e3(m,k,j,i+1) = e3m;
+      e3(m,k,j+1,i+1) = e3m;
+    }
+  });
 
   return;
 }

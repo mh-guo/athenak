@@ -217,7 +217,8 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
 
   // (9) ZOOM
   // Create Zoom module.  Create tasklist.
-  if (pin->DoesBlockExist("zoom")) {
+  // TODO(@mhguo): make it more flexible to allow easier restarts
+  if (pin->DoesBlockExist("zoom") && pin->GetOrAddBoolean("zoom", "is_set", false)){
     pzoom = new zoom::Zoom(this, pin);
   } else {
     pzoom = nullptr;
