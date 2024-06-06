@@ -24,15 +24,22 @@ typedef struct ZoomAMR {
   int zone;                     // zone number = level_max - level
   int direction;                // direction of zoom
   Real radius;                  // radius of inner boundary
-  Real interval;                // interval for zoom
-  Real interval_fac;            // interval factor
-  Real interval_pow;            // interval power law
-  Real interval_fac_max_level;  // interval of maximum level
-  Real interval_fac_min_level;  // interval of minimum level
+  Real runtime;                 // interval for zoom
   Real last_time;               // time of last zoom
   Real next_time;               // time of next zoom
   bool just_zoomed;             // flag for just zoomed
 } ZoomAMR;
+
+typedef struct ZoomInterval {
+  Real t_run_fac;            // interval factor
+  Real t_run_pow;            // interval power law
+  Real t_run_fac_zone_0;        // runtime factor for zone 0
+  Real t_run_fac_zone_1;        // runtime factor for zone 1
+  Real t_run_fac_zone_2;        // runtime factor for zone 2
+  Real t_run_fac_zone_3;        // runtime factor for zone 3
+  Real t_run_fac_zone_4;        // runtime factor for zone 4
+  Real t_run_fac_zone_max;      // runtime factor for zone max
+} ZoomInterval;
 
 //----------------------------------------------------------------------------------------
 //! \class Zoom
@@ -49,6 +56,7 @@ class Zoom
 
   // data
   bool is_set;
+  bool restart;            // flag for restart
   bool fix_efield;
   int nlevels;             // number of levels
   int mzoom;               // number of zoom meshblocks
@@ -58,12 +66,16 @@ class Zoom
   Real p_zoom;             // pressure within inner boundary
 
   ZoomAMR zamr;            // zoom AMR parameters
+  ZoomInterval zint;       // zoom interval parameters
 
   DvceArray5D<Real> u0;    // conserved variables
   DvceArray5D<Real> w0;    // primitive variables
   
   DvceArray5D<Real> coarse_u0;  // coarse conserved variables
   DvceArray5D<Real> coarse_w0;  // coarse primitive variables
+
+  // following only used for time-evolving flow
+  DvceEdgeFld4D<Real> efld;   // edge-centered electric fields (fluxes of B)
 
   // vector of SphericalGrid objects for analysis
   std::vector<std::unique_ptr<SphericalGrid>> spherical_grids;
@@ -79,8 +91,8 @@ class Zoom
   void SetInterval();
   void UpdateVariables();
   void ApplyVariables();
-  void GetMeanEField(DvceEdgeFld4D<Real> efld);
-  void FixEField(DvceEdgeFld4D<Real> efld);
+  void FixEField(DvceEdgeFld4D<Real> emf);
+  void ApplyEField(DvceEdgeFld4D<Real> emf);
 
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD
