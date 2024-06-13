@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "athena.hpp"
+#include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates/coordinates.hpp"
@@ -1840,7 +1841,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
         t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
       };
 
-      pdata->hdata[nflux*g+0] = flux_data[0];
+      pdata->hdata[nflux*g+0] = (global_variable::my_rank == 0)? flux_data[0] : 0.0;
       for (int i=1; i<nflux; ++i) {
         pdata->hdata[nflux*g+i] += flux_data[i]*sqrtmdet*domega;
       }
