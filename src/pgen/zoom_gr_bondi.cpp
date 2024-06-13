@@ -141,12 +141,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   const bool is_radiation_enabled = (pmbp->prad != nullptr);
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
-  const Real rflx =
+  const Real rflux =
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(bondi.spin));
-  int hist_nr = pin->GetOrAddInteger("problem","hist_nr",4);
-  Real rmax = pin->GetReal("mesh","x1max");
-  for (int i=0; i<hist_nr; i++) {
-    Real r_i = std::pow(rmax/rflx,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rflx;
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rflux));
+  int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
+  Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 1.5);
+  Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
+  for (int i=1; i<hist_nr; i++) {
+    Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rmin;
     grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, r_i));
   }
   if (restart) return;
