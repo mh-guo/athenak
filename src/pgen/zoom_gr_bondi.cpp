@@ -3,7 +3,7 @@
 // Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
-//! \file cycle_gr_bondi.cpp
+//! \file zoom_gr_bondi.cpp
 //! \brief Problem generator for spherically symmetric black hole accretion.
 
 #include <cmath>   // abs(), NAN, pow(), sqrt()
@@ -27,6 +27,8 @@
 #include "pgen/turb_init.hpp"
 #include "pgen/turb_mhd.hpp"
 #include "pgen/zoom.hpp"
+
+#include <Kokkos_Random.hpp>
 
 namespace {
 
@@ -98,6 +100,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = FixedBondiInflow;
   user_hist_func = BondiFluxes;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
+    pmbp->pzoom->PrintInfo();
     user_ref_func = ZoomAMR;
   }
 
@@ -164,6 +167,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
 
   // Initialize primitive values (HYDRO ONLY)
+  // local parameters
+  Real pert_amp = pin->GetOrAddReal("problem", "pert_amp", 0.0);
+  Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
   par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real rho, pgas, uu1, uu2, uu3;
@@ -179,9 +185,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
+    // TODO: add flat IC
     ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+    // Calculate perturbation
+    auto rand_gen = rand_pool64.get_state(); // get random number state this thread
+    Real perturbation = 2.0*pert_amp*(rand_gen.frand() - 0.5);
+    rand_pool64.free_state(rand_gen);        // free state for use by other threads
     w0_(m,IDN,k,j,i) = rho;
-    w0_(m,IEN,k,j,i) = pgas/gm1;
+    w0_(m,IEN,k,j,i) = pgas/gm1 * (1.0 + perturbation);
     w0_(m,IM1,k,j,i) = uu1;
     w0_(m,IM2,k,j,i) = uu2;
     w0_(m,IM3,k,j,i) = uu3;

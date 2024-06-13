@@ -77,6 +77,8 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   Kokkos::realloc(efld.x2e, mzoom, n_ccells3+1, n_ccells2, n_ccells1+1);
   Kokkos::realloc(efld.x3e, mzoom, n_ccells3, n_ccells2+1, n_ccells1+1);
 
+  Initialize();
+
   std::cout << "Zoom: initialized" << std::endl;
 
   return;
@@ -87,6 +89,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
 //! \brief Initialize Zoom variables
 
 // TODO(@mhguo): Implement this function
+// Set density, velocity, pressure
 void Zoom::Initialize()
 {
   return;
