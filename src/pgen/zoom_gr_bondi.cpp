@@ -65,10 +65,14 @@ static Real TemperatureResidual(struct bondi_pgen pgen, Real t, Real r);
 struct bondi_pgen {
   Real spin;                // black hole spin
   Real dexcise, pexcise;    // excision parameters
+  int  ic_type;             // initial condition type
   Real n_adi, k_adi, gm;    // hydro EOS parameters
   Real r_crit;              // sonic point radius
   Real c1, c2;              // useful constants
   Real temp_min, temp_max;  // bounds for temperature root find
+  Real temp_inf, c_s_inf;   // asymptotic temperature and sound speed
+  Real rho_inf, pgas_inf;   // asymptotic density and pressure
+  Real r_bondi;             // Bondi radius 2GM/c_s^2
   bool reset_ic = false;    // reset initial conditions after run
 };
 
@@ -124,6 +128,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bondi.dexcise = pmbp->pcoord->coord_data.dexcise;
   bondi.pexcise = pmbp->pcoord->coord_data.pexcise;
 
+  // Get initial condition type
+  int ic_type = bondi.ic_type = pin->GetOrAddInteger("problem", "ic_type", 0);
+
   // Get ratio of specific heats
   bondi.n_adi = 1.0/(bondi.gm - 1.0);
 
@@ -135,6 +142,25 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bondi.c1 = pow(t_crit, bondi.n_adi) * u_crit * SQR(bondi.r_crit);  // (HSW 68)
   bondi.c2 = (SQR(1.0 + (bondi.n_adi+1.0) * t_crit)
               * (1.0 - 3.0/(2.0*bondi.r_crit)));                     // (HSW 69)
+  bondi.temp_inf = (sqrt(bondi.c2)-1.0)/(1.0+bondi.n_adi);           // (HSW 69)
+  bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
+  bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
+
+  if (ic_type > 0) {
+    // Prepare various constants for determining primitives
+    bondi.temp_inf = pin->GetReal("problem", "temp_inf");
+    bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
+    bondi.rho_inf = pow(bondi.temp_inf/bondi.k_adi, bondi.n_adi);
+    bondi.pgas_inf = bondi.rho_inf * bondi.temp_inf;
+    bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
+    // bondi.r_crit = (5.0-3.0*bondi.gm)/4.0;
+    // bondi.c1 = 0.25*pow(2.0/(5.0-3.0*bondi.gm), (5.0-3.0*bondi.gm)*0.5*bondi.n_adi);
+    // bondi.c2 = -bondi.n_adi; // useless in Newtonian case
+  }
+
+  std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
+  std::cout << " Critical radius = " << bondi.r_crit << std::endl;
+  std::cout << " c1 = " << bondi.c1 << std::endl;
 
   // Extract BH parameters
   const Real r_excise = coord.rexcise;
@@ -170,6 +196,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Initialize primitive values (HYDRO ONLY)
   // local parameters
+  Real rho_inf = bondi.rho_inf;
+  Real pgas_inf = bondi.pgas_inf;
   Real pert_amp = pin->GetOrAddReal("problem", "pert_amp", 0.0);
   Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
   par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
@@ -188,7 +216,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     // TODO: add flat IC
-    ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+    if (ic_type == 0) {
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+    } else {
+      rho = rho_inf;
+      pgas = pgas_inf;
+      uu1 = 0.0;
+      uu2 = 0.0;
+      uu3 = 0.0;
+    }
     // Calculate perturbation
     auto rand_gen = rand_pool64.get_state(); // get random number state this thread
     Real perturbation = 2.0*pert_amp*(rand_gen.frand() - 0.5);
