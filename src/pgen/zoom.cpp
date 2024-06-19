@@ -269,11 +269,11 @@ void Zoom::SetInterval() {
   Real timescale = pow(zamr.radius,zint.t_run_pow);
   zamr.runtime = zint.t_run_fac*timescale;
   if (zamr.level==zamr.max_level) {zamr.runtime = zint.t_run_fac_zone_0*timescale;}
-  if (zamr.level==zamr.min_level) {zamr.runtime = zint.t_run_fac_zone_max*timescale;}
   if (zamr.zone == 1) {zamr.runtime = zint.t_run_fac_zone_1*timescale;}
   if (zamr.zone == 2) {zamr.runtime = zint.t_run_fac_zone_2*timescale;}
   if (zamr.zone == 3) {zamr.runtime = zint.t_run_fac_zone_3*timescale;}
   if (zamr.zone == 4) {zamr.runtime = zint.t_run_fac_zone_4*timescale;}
+  if (zamr.level==zamr.min_level) {zamr.runtime = zint.t_run_fac_zone_max*timescale;}
   zamr.last_time = pmy_pack->pmesh->time;
   zamr.next_time = zamr.last_time + zamr.runtime;
 }
