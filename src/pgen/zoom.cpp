@@ -303,7 +303,7 @@ void Zoom::RefineCondition() {
     levels_thisrank.template sync<DevExeSpace>();
     par_for_outer("RefineLevel",DevExeSpace(), 0, 0, 0, (nmb-1),
     KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-      if (levels_thisrank.d_view(m+mbs) == old_level) {
+      if (levels_thisrank.d_view(m) == old_level) {
         Real &x1min = size.d_view(m).x1min;
         Real &x1max = size.d_view(m).x1max;
         Real &x2min = size.d_view(m).x2min;
@@ -451,26 +451,30 @@ void Zoom::UpdateVariables() {
       Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
       Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
       Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
-      if (rad_min < r_in) {    
-        auto des_slice = Kokkos::subview(u0, Kokkos::make_pair(zid,zid+1), Kokkos::ALL,
+      if (rad_min < r_in) {
+        bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
+        bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
+        int leaf_id = 1*x1r + 2*x2r + 4*x3r;
+        int zm = zid + leaf_id;
+        auto des_slice = Kokkos::subview(u0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                           Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         auto src_slice = Kokkos::subview(u, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                           Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
-        des_slice = Kokkos::subview(w0, Kokkos::make_pair(zid,zid+1), Kokkos::ALL,
+        des_slice = Kokkos::subview(w0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         src_slice = Kokkos::subview(w, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
-        zid += 1;
+        std::cout << "Zoom: Update variables for zone meshblock " << zm << std::endl;
       }
     }
   }
-  if (zid != 8*(zamr.zone+1)) {
-    std::cerr << "Error: Zoom::UpdateVariables() failed: zid = " << zid <<
-                 " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
-    std::exit(1);
-  }
+  // if (zid != 8*(zamr.zone+1)) {
+  //   std::cerr << "Error: Zoom::UpdateVariables() failed: zid = " << zid <<
+  //                " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
+  //   std::exit(1);
+  // }
 
   return;
 }
@@ -505,26 +509,30 @@ void Zoom::ApplyVariables() {
       Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
       Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
       Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
-      if (rad_min < r_in) {    
-        auto src_slice = Kokkos::subview(u0, Kokkos::make_pair(zid,zid+1), Kokkos::ALL,
+      if (rad_min < r_in) {
+        bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
+        bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
+        int leaf_id = 1*x1r + 2*x2r + 4*x3r;
+        int zm = zid + leaf_id;
+        auto src_slice = Kokkos::subview(u0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                           Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         auto des_slice = Kokkos::subview(u, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                           Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
-        src_slice = Kokkos::subview(w0, Kokkos::make_pair(zid,zid+1), Kokkos::ALL,
+        src_slice = Kokkos::subview(w0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         des_slice = Kokkos::subview(w, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
-        zid += 1;
+        std::cout << "Zoom: Apply variables for zone meshblock " << zm << std::endl;
       }
     }
   }
-  if (zid != 8*(zamr.zone+1)) {
-    std::cerr << "Error: Zoom::ApplyVariables() failed: zid = " << zid <<
-                 " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
-    std::exit(1);
-  }
+  // if (zid != 8*(zamr.zone+1)) {
+  //   std::cerr << "Error: Zoom::ApplyVariables() failed: zid = " << zid <<
+  //                " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
+  //   std::exit(1);
+  // }
 
   return;
 }

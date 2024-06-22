@@ -117,6 +117,8 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
     Kokkos::deep_copy(outarray_adm, Kokkos::subview(padm->u_adm, std::make_pair(0,nmb),
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
   }
+  // TODO(@mhguo): maybe not necessary since it's complex
+  // TODO(@mhguo): perhaps better to restart only when resoving all the scales
   if (pzoom != nullptr) {
     int mzoom = pzoom->mzoom;
     Kokkos::realloc(outarray_zoom, mzoom, nzoom, nout3, nout2, nout1);
