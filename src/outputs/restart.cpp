@@ -119,7 +119,7 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
   }
   // TODO(@mhguo): maybe not necessary since it's complex
   // TODO(@mhguo): perhaps better to restart only when resoving all the scales
-  if (pzoom != nullptr) {
+  if (pzoom != nullptr && pzoom->write_rst) {
     int mzoom = pzoom->mzoom;
     Kokkos::realloc(outarray_zoom, mzoom, nzoom, nout3, nout2, nout1);
     Kokkos::deep_copy(outarray_zoom, Kokkos::subview(pzoom->w0, std::make_pair(0,mzoom),
@@ -256,7 +256,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     if (pturb != nullptr) {
       resfile.Write_any_type(&(pturb->rstate), sizeof(RNG_State), "byte");
     }
-    if (pzoom != nullptr) {
+    if (pzoom != nullptr && pzoom->write_rst) {
       resfile.Write_any_type(&(pzoom->zamr), sizeof(zoom::ZoomAMR), "byte");
       // TODO(@mhguo): not working for MPI!
       // every rank has a MB to write, so write collectively
@@ -281,7 +281,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   IOWrapperSizeT offset_myrank  = step1size + step2size + sizeof(IOWrapperSizeT) +
                                   data_size*(pm->gids_eachrank[global_variable::my_rank]);
   if (pturb != nullptr) offset_myrank += sizeof(RNG_State);
-  if (pzoom != nullptr) {
+  if (pzoom != nullptr && pzoom->write_rst) {
     offset_myrank += sizeof(zoom::ZoomAMR) + pzoom->mzoom*nzoom*nout1*nout2*nout3*sizeof(Real);
   }
   IOWrapperSizeT myoffset = offset_myrank;

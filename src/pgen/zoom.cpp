@@ -31,7 +31,10 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     coarse_w0("cprim",1,1,1,1,1),
     efld("efld",1,1,1,1) {
   is_set = pin->GetOrAddBoolean("zoom","is_set",false);
-  restart = pin->GetOrAddBoolean("zoom","restart",true);
+  read_rst = pin->GetOrAddBoolean("zoom","read_rst",true);
+  write_rst = pin->GetOrAddBoolean("zoom","write_rst",true);
+  zoom_bcs = pin->GetOrAddBoolean("zoom","zoom_bcs",true);
+  zoom_ref = pin->GetOrAddBoolean("zoom","zoom_ref",true);
   fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
   r_in = pin->GetReal("zoom","r_in");
   // TODO(@mhguo): move to struct ZoomBC
@@ -120,7 +123,7 @@ void Zoom::PrintInfo()
 // TODO(@Mhguo): decide whehter we still need the sink condition
 void Zoom::BoundaryConditions()
 {
-  if (!is_set) return;
+  if (!zoom_bcs) return;
   // put here because BoundaryConditions() is called just after
   // RedistAndRefineMeshBlocks() in AdaptiveMeshRefinement()
   if (zamr.just_zoomed && zamr.direction > 0 && zamr.level != zamr.min_level) {
@@ -246,10 +249,11 @@ void Zoom::BoundaryConditions()
 }
 
 void Zoom::AMR() {
+  if (!zoom_ref) return;
   zamr.just_zoomed = false;
   if (pmy_pack->pmesh->time >= zamr.next_time) {
     std::cout << "Zoom AMR: old level = " << zamr.level << std::endl;
-    if (zamr.direction < 0) {
+    if (zoom_bcs && zamr.direction < 0) {
       UpdateVariables();
     }
     RefineCondition();

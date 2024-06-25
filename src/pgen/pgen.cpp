@@ -212,7 +212,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
 
   // TODO(@mhguo): not working for MPI!
   // TODO(@mhguo): working for MPI only if restarting from time including all information
-  if (pzoom != nullptr && pzoom->restart) {
+  if (pzoom != nullptr && pzoom->read_rst) {
     // root process reads size the random seed
     char *zamr_data = new char[sizeof(zoom::ZoomAMR)];
 

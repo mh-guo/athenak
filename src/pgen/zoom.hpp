@@ -56,7 +56,10 @@ class Zoom
 
   // data
   bool is_set;
-  bool restart;            // flag for restart
+  bool read_rst;           // flag for reading restart file
+  bool write_rst;          // flag for writing restart file
+  bool zoom_bcs;           // flag for zoom boundary conditions
+  bool zoom_ref;           // flag for zoom refinement
   bool fix_efield;
   int nlevels;             // number of levels
   int mzoom;               // number of zoom meshblocks
