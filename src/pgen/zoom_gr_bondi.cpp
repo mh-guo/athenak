@@ -169,13 +169,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &grids = spherical_grids;
   const Real rflux =
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(bondi.spin));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rflux));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux));
   int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
   Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 1.5);
   Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
   for (int i=1; i<hist_nr; i++) {
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-1))*rmin;
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, r_i));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i));
   }
   if (restart) return;
 
