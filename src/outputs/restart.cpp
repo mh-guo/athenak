@@ -257,7 +257,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       resfile.Write_any_type(&(pturb->rstate), sizeof(RNG_State), "byte");
     }
     if (pzoom != nullptr && pzoom->write_rst) {
-      resfile.Write_any_type(&(pzoom->zamr), sizeof(zoom::ZoomAMR), "byte");
+      resfile.Write_any_type(&(pzoom->zrun), sizeof(zoom::ZoomRun), "byte");
       // TODO(@mhguo): not working for MPI!
       // every rank has a MB to write, so write collectively
       // get ptr to cell-centered MeshBlock data
@@ -282,7 +282,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
                                   data_size*(pm->gids_eachrank[global_variable::my_rank]);
   if (pturb != nullptr) offset_myrank += sizeof(RNG_State);
   if (pzoom != nullptr && pzoom->write_rst) {
-    offset_myrank += sizeof(zoom::ZoomAMR) + pzoom->mzoom*nzoom*nout1*nout2*nout3*sizeof(Real);
+    offset_myrank += sizeof(zoom::ZoomRun) + pzoom->mzoom*nzoom*nout1*nout2*nout3*sizeof(Real);
   }
   IOWrapperSizeT myoffset = offset_myrank;
 

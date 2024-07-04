@@ -213,13 +213,13 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   // TODO(@mhguo): not working for MPI!
   // TODO(@mhguo): working for MPI only if restarting from time including all information
   if (pzoom != nullptr && pzoom->read_rst) {
-    // root process reads size the random seed
-    char *zamr_data = new char[sizeof(zoom::ZoomAMR)];
+    // root process reads zoom data
+    char *zrdata = new char[sizeof(zoom::ZoomRun)];
 
     if (global_variable::my_rank == 0) { // the master process reads the variables data
-      if (resfile.Read_bytes(zamr_data, 1, sizeof(zoom::ZoomAMR)) != sizeof(zoom::ZoomAMR)) {
+      if (resfile.Read_bytes(zrdata, 1, sizeof(zoom::ZoomRun)) != sizeof(zoom::ZoomRun)) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << "ZoomAMR data size read from restart file is incorrect, "
+                  << std::endl << "ZoomRun data read from restart file is incorrect, "
                   << "restart file is broken." << std::endl;
         exit(EXIT_FAILURE);
       }
@@ -237,10 +237,10 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     }
 
 #if MPI_PARALLEL_ENABLED
-    // then broadcast the ZoomAMR information
-    MPI_Bcast(zamr_data, sizeof(zoom::ZoomAMR), MPI_CHAR, 0, MPI_COMM_WORLD);
+    // then broadcast the ZoomRun information
+    MPI_Bcast(zrdata, sizeof(zoom::ZoomRun), MPI_CHAR, 0, MPI_COMM_WORLD);
 #endif
-    std::memcpy(&(pzoom->zamr), &(zamr_data[0]), sizeof(zoom::ZoomAMR));
+    std::memcpy(&(pzoom->zrun), &(zrdata[0]), sizeof(zoom::ZoomRun));
 
   }
 

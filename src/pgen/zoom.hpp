@@ -18,6 +18,7 @@ namespace zoom {
 //! \brief structure to hold zoom level information
 
 typedef struct ZoomAMR {
+  int nlevels;                  // number of levels
   int max_level;                // maximum level number
   int min_level;                // minimum level number
   int level;                    // level number
@@ -25,14 +26,13 @@ typedef struct ZoomAMR {
   int direction;                // direction of zoom
   Real radius;                  // radius of inner boundary
   Real runtime;                 // interval for zoom
-  Real last_time;               // time of last zoom
-  Real next_time;               // time of next zoom
   bool just_zoomed;             // flag for just zoomed
+  bool dump_rst;                // flag for dumping restart file
 } ZoomAMR;
 
 typedef struct ZoomInterval {
-  Real t_run_fac;            // interval factor
-  Real t_run_pow;            // interval power law
+  Real t_run_fac;               // interval factor
+  Real t_run_pow;               // interval power law
   Real t_run_fac_zone_0;        // runtime factor for zone 0
   Real t_run_fac_zone_1;        // runtime factor for zone 1
   Real t_run_fac_zone_2;        // runtime factor for zone 2
@@ -40,6 +40,11 @@ typedef struct ZoomInterval {
   Real t_run_fac_zone_4;        // runtime factor for zone 4
   Real t_run_fac_zone_max;      // runtime factor for zone max
 } ZoomInterval;
+
+typedef struct ZoomRun {
+  int id;                       // run number
+  Real next_time;               // time of next zoom
+} ZoomRun;
 
 //----------------------------------------------------------------------------------------
 //! \class Zoom
@@ -60,8 +65,8 @@ class Zoom
   bool write_rst;          // flag for writing restart file
   bool zoom_bcs;           // flag for zoom boundary conditions
   bool zoom_ref;           // flag for zoom refinement
-  bool fix_efield;
-  int nlevels;             // number of levels
+  bool zoom_dt;            // flag for zoom time step
+  bool fix_efield;         // flag for fixing electric field
   int mzoom;               // number of zoom meshblocks
   int nvars;               // number of variables
   Real r_in;               // radius of iner boundary
@@ -70,6 +75,7 @@ class Zoom
 
   ZoomAMR zamr;            // zoom AMR parameters
   ZoomInterval zint;       // zoom interval parameters
+  ZoomRun zrun;          // zoom time parameters
 
   DvceArray5D<Real> u0;    // conserved variables
   DvceArray5D<Real> w0;    // primitive variables
@@ -90,12 +96,14 @@ class Zoom
   void PrintInfo();
   void BoundaryConditions();
   void AMR();
-  void RefineCondition();
   void SetInterval();
+  void DumpRestartFile();
+  void RefineCondition();
   void UpdateVariables();
   void ApplyVariables();
   void FixEField(DvceEdgeFld4D<Real> emf);
   void ApplyEField(DvceEdgeFld4D<Real> emf);
+  Real NewTimeStep(Mesh* pm);
 
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD

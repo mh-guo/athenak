@@ -83,6 +83,7 @@ void FixedBondiInflow(Mesh *pm);
 void BondiErrors(ParameterInput *pin, Mesh *pm);
 void BondiFluxes(HistoryData *pdata, Mesh *pm);
 void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
+Real ZoomNewTimeStep(Mesh* pm) {return pm->pmb_pack->pzoom->NewTimeStep(pm);}
 
 } // namespace
 
@@ -93,7 +94,6 @@ void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
 //    reference: Hawley, Smarr, & Wilson 1984, ApJ 277 296 (HSW)
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
-  std::cout << "### gr_bondi test problem initializing" << std::endl;
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_mhd = (pmbp->pmhd != nullptr);
   auto peos = (is_mhd) ? pmbp->pmhd->peos : pmbp->phydro->peos;
@@ -104,8 +104,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = FixedBondiInflow;
   user_hist_func = BondiFluxes;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
-    pmbp->pzoom->PrintInfo();
     user_ref_func = ZoomAMR;
+    if (pmbp->pzoom->zoom_dt) user_dt_func = ZoomNewTimeStep;
   }
 
   // Read problem-specific parameters from input file
@@ -151,6 +151,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     bondi.temp_inf = pin->GetReal("problem", "temp_inf");
     bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
     bondi.rho_inf = pow(bondi.temp_inf/bondi.k_adi, bondi.n_adi);
+    bondi.rho_inf = pin->GetOrAddReal("problem", "dens_inf", bondi.rho_inf);
     bondi.pgas_inf = bondi.rho_inf * bondi.temp_inf;
     bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
     // bondi.r_crit = (5.0-3.0*bondi.gm)/4.0;
@@ -158,9 +159,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     // bondi.c2 = -bondi.n_adi; // useless in Newtonian case
   }
 
-  std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
-  std::cout << " Critical radius = " << bondi.r_crit << std::endl;
-  std::cout << " c1 = " << bondi.c1 << std::endl;
+  if (global_variable::my_rank == 0) {
+    std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
+    std::cout << " Critical radius = " << bondi.r_crit << std::endl;
+    std::cout << " c1 = " << bondi.c1 << std::endl;
+  }
 
   // Extract BH parameters
   const Real r_excise = coord.rexcise;
@@ -196,8 +199,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Initialize primitive values (HYDRO ONLY)
   // local parameters
-  Real rho_inf = bondi.rho_inf;
-  Real pgas_inf = bondi.pgas_inf;
   Real pert_amp = pin->GetOrAddReal("problem", "pert_amp", 0.0);
   Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
   par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
@@ -216,15 +217,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     // TODO: add flat IC
-    if (ic_type == 0) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
-    } else {
-      rho = rho_inf;
-      pgas = pgas_inf;
-      uu1 = 0.0;
-      uu2 = 0.0;
-      uu3 = 0.0;
-    }
+    ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
     // Calculate perturbation
     auto rand_gen = rand_pool64.get_state(); // get random number state this thread
     Real perturbation = 2.0*pert_amp*(rand_gen.frand() - 0.5);
@@ -302,8 +295,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     pmbp->pmhd->peos->ConsToPrim(u0_, b0_, w0_, bcc0_, false, 0, n1m1, 0, n2m1, 0, n3m1);
     pmbp->pmhd->CopyCons(nullptr,1);
   }
-
-  std::cout << "### gr_bondi test problem initialized" << std::endl;
 
   return;
 }
@@ -465,6 +456,14 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
                                    struct bondi_pgen pgen,
                                    Real& rho, Real& pgas,
                                    Real& uu1, Real& uu2, Real& uu3) {
+  if (pgen.ic_type>0) {
+    rho = pgen.rho_inf;
+    pgas = pgen.pgas_inf;
+    uu1 = 0.0;
+    uu2 = 0.0;
+    uu3 = 0.0;
+    return;
+  }
   // Calculate Boyer-Lindquist coordinates of cell
   Real r, theta, phi;
   GetBoyerLindquistCoordinates(pgen, x1v, x2v, x3v, &r, &theta, &phi);

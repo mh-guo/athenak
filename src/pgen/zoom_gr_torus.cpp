@@ -131,6 +131,7 @@ struct torus_pgen {
 void NoInflowTorus(Mesh *pm);
 void TorusFluxes(HistoryData *pdata, Mesh *pm);
 void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
+Real ZoomNewTimeStep(Mesh* pm) {return pm->pmb_pack->pzoom->NewTimeStep(pm);}
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
@@ -151,8 +152,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = NoInflowTorus;
 
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
-    pmbp->pzoom->PrintInfo();
     user_ref_func = ZoomAMR;
+    if (pmbp->pzoom->zoom_dt) user_dt_func = ZoomNewTimeStep;
   }
 
   // capture variables for kernel

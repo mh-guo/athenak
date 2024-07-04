@@ -35,14 +35,8 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   write_rst = pin->GetOrAddBoolean("zoom","write_rst",true);
   zoom_bcs = pin->GetOrAddBoolean("zoom","zoom_bcs",true);
   zoom_ref = pin->GetOrAddBoolean("zoom","zoom_ref",true);
+  zoom_dt = pin->GetOrAddBoolean("zoom","zoom_dt",false);
   fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
-  r_in = pin->GetReal("zoom","r_in");
-  // TODO(@mhguo): move to struct ZoomBC
-  d_zoom = pin->GetOrAddReal("zoom","d_zoom",(FLT_MIN));
-  p_zoom = pin->GetOrAddReal("zoom","p_zoom",(FLT_MIN));
-  nlevels = pin->GetOrAddInteger("zoom","nlevels",4);
-  mzoom = 8*nlevels;
-  nvars = pin->GetOrAddInteger("zoom","nvars",5);
   zint.t_run_fac = pin->GetOrAddReal("zoom","t_run_fac",1.0);
   zint.t_run_pow = pin->GetOrAddReal("zoom","t_run_pow",0.0);
   zint.t_run_fac_zone_0 = pin->GetOrAddReal("zoom","t_run_fac_zone_0",zint.t_run_fac);
@@ -53,14 +47,24 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zint.t_run_fac_zone_max = pin->GetOrAddReal("zoom","t_run_fac_zone_max",zint.t_run_fac);
 
   auto pmesh = pmy_pack->pmesh;
+  zamr.nlevels = pin->GetOrAddInteger("zoom","nlevels",4);
   zamr.max_level = pmesh->max_level;
-  zamr.min_level = zamr.max_level - nlevels + 1;
+  zamr.min_level = zamr.max_level - zamr.nlevels + 1;
   zamr.level = pin->GetOrAddInteger("zoom","level",zamr.max_level);
   zamr.zone = zamr.max_level - zamr.level;
   zamr.direction = pin->GetOrAddInteger("zoom","direction",-1);
-  zamr.last_time = pmesh->time;
-  SetInterval();
   zamr.just_zoomed = false;
+  zamr.dump_rst = false;
+  zrun.id = 0;
+  zrun.next_time = 0.0;
+  SetInterval();
+  
+  mzoom = 8*zamr.nlevels;
+  nvars = pin->GetOrAddInteger("zoom","nvars",5);
+  // TODO(@mhguo): move to a new struct?
+  r_in = pin->GetReal("zoom","r_in");
+  d_zoom = pin->GetOrAddReal("zoom","d_zoom",(FLT_MIN));
+  p_zoom = pin->GetOrAddReal("zoom","p_zoom",(FLT_MIN));
 
   // allocate memory for primitive variables
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -82,7 +86,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
 
   Initialize();
 
-  std::cout << "Zoom: initialized" << std::endl;
+  PrintInfo();
 
   return;
 }
@@ -91,10 +95,70 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
 //! \fn void Zoom::Initialize()
 //! \brief Initialize Zoom variables
 
-// TODO(@mhguo): Implement this function
+// TODO(@mhguo): Check whether this is correct
 // Set density, velocity, pressure
 void Zoom::Initialize()
 {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int n1 = indcs.nx1 + 2*ng;
+  int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 0;
+  int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 0;
+  int nc1 = indcs.cnx1 + 2*ng;
+  int nc2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*ng) : 0;
+  int nc3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*ng) : 0;
+
+  auto &u0_ = u0;
+  auto &w0_ = w0;
+  auto &cu0 = coarse_u0;
+  auto &cw0 = coarse_w0;
+  auto e1 = efld.x1e;
+  auto e2 = efld.x2e;
+  auto e3 = efld.x3e;
+  bool is_mhd = (pmy_pack->pmhd != nullptr);
+  auto peos = (is_mhd)? pmy_pack->pmhd->peos : pmy_pack->phydro->peos;
+  Real gm1 = peos->eos_data.gamma - 1.0;
+
+  Real dzoom = this->d_zoom;
+  Real pzoom = this->p_zoom;
+
+  par_for("zoom_init", DevExeSpace(),0,mzoom-1,0,n3-1,0,n2-1,0,n1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    w0_(m,IDN,k,j,i) = dzoom;
+    w0_(m,IM1,k,j,i) = 0.0;
+    w0_(m,IM2,k,j,i) = 0.0;
+    w0_(m,IM3,k,j,i) = 0.0;
+    w0_(m,IEN,k,j,i) = pzoom/gm1;
+  });
+
+  par_for("zoom_init_c",DevExeSpace(),0,mzoom-1,0,nc3-1,0,nc2-1,0,nc1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    cw0(m,IDN,k,j,i) = dzoom;
+    cw0(m,IM1,k,j,i) = 0.0;
+    cw0(m,IM2,k,j,i) = 0.0;
+    cw0(m,IM3,k,j,i) = 0.0;
+    cw0(m,IEN,k,j,i) = pzoom/gm1;
+  });
+
+  // In MHD, we don't use conserved variables so no need to convert
+  if (!is_mhd) {
+    peos->PrimToCons(w0_,u0_,0,n3-1,0,n2-1,0,n1-1);
+    peos->PrimToCons(cw0,cu0,0,nc3-1,0,nc2-1,0,nc1-1);
+  }
+
+  par_for("zoom_init_e1",DevExeSpace(),0,mzoom-1,0,nc3,0,nc2,0,nc1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    e1(m,k,j,i) = 0.0;
+  });
+  par_for("zoom_init_e2",DevExeSpace(),0,mzoom-1,0,nc3,0,nc2-1,0,nc1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    e2(m,k,j,i) = 0.0;
+  });
+  par_for("zoom_init_e3",DevExeSpace(),0,mzoom-1,0,nc3-1,0,nc2,0,nc1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    e3(m,k,j,i) = 0.0;
+  });
+
   return;
 }
 
@@ -104,14 +168,32 @@ void Zoom::Initialize()
 
 void Zoom::PrintInfo()
 {
-  // print level structure
-  std::cout << "Zoom: max_level = " << zamr.max_level << " min_level = " << zamr.min_level
-            << " level = " << zamr.level << " zone = " << zamr.zone
-            << " direction = " << zamr.direction << std::endl;
-  std::cout << "Zoom: runtime = " << zamr.runtime << " next time = " << zamr.next_time << std::endl;
-  std::cout << "Zoom: t_run_fac = " << zint.t_run_fac << " t_run_pow = " << zint.t_run_pow
-            << " t_run_fac_zone_0 = " << zint.t_run_fac_zone_0
-            << " t_run_fac_zone_max = " << zint.t_run_fac_zone_max << std::endl;
+  if (global_variable::my_rank == 0) {
+    std::cout << "============== Zoom Information ==============" << std::endl;
+    // print basic parameters
+    std::cout << "Basic: is_set = " << is_set << " read_rst = " << read_rst
+              << " write_rst = " << write_rst << std::endl;
+    std::cout << "Funcs: zoom_bcs = " << zoom_bcs << " zoom_ref = " << zoom_ref 
+              << " zoom_dt = " << zoom_dt << " fix_efield = " << fix_efield << std::endl;
+    // print interval parameters
+    std::cout << "Interval: t_run_fac = " << zint.t_run_fac
+              << " t_run_pow = " << zint.t_run_pow << std::endl;
+    std::cout << " t_run_fac_zone_0 = " << zint.t_run_fac_zone_0
+              << " t_run_fac_zone_max = " << zint.t_run_fac_zone_max << std::endl;
+    std::cout << " tfz_1 = " << zint.t_run_fac_zone_1
+              << " tfz_2 = " << zint.t_run_fac_zone_2
+              << " tfz_3 = " << zint.t_run_fac_zone_3
+              << " tfz_4 = " << zint.t_run_fac_zone_4 << std::endl;
+    // print level structure
+    std::cout << "Level: max_level = " << zamr.max_level
+              << " min_level = " << zamr.min_level
+              << " level = " << zamr.level << " zone = " << zamr.zone
+              << " direction = " << zamr.direction << std::endl;
+    // print runtime information
+    std::cout << "Time: runtime = " << zamr.runtime << " next time = "
+              << zrun.next_time << std::endl;
+    std::cout << "==============================================" << std::endl;
+  }
   return;
 }
 
@@ -124,12 +206,14 @@ void Zoom::PrintInfo()
 void Zoom::BoundaryConditions()
 {
   if (!zoom_bcs) return;
-  // put here because BoundaryConditions() is called just after
-  // RedistAndRefineMeshBlocks() in AdaptiveMeshRefinement()
+  // put here because BoundaryConditions() is called in InitBoundaryValuesAndPrimitives(),
+  // just after RedistAndRefineMeshBlocks() in AdaptiveMeshRefinement()
   if (zamr.just_zoomed && zamr.direction > 0 && zamr.level != zamr.min_level) {
     ApplyVariables();
     zamr.just_zoomed = false;
-    std::cout << "Zoom: Apply variables after zooming" << std::endl;
+    if (global_variable::my_rank == 0) {
+      std::cout << "Zoom: Apply variables after zooming" << std::endl;
+    }
   }
   if (zamr.zone == 0) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -168,7 +252,6 @@ void Zoom::BoundaryConditions()
   int zid = 8*(zamr.zone-1);
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
-  // std::cout << "Zoom: BoundaryConditions: zone = " << zamr.zone << " radius = " << rzoom << std::endl;
   par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -251,8 +334,10 @@ void Zoom::BoundaryConditions()
 void Zoom::AMR() {
   if (!zoom_ref) return;
   zamr.just_zoomed = false;
-  if (pmy_pack->pmesh->time >= zamr.next_time) {
-    std::cout << "Zoom AMR: old level = " << zamr.level << std::endl;
+  if (pmy_pack->pmesh->time >= zrun.next_time) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "Zoom AMR: old level = " << zamr.level << std::endl;
+    }
     if (zoom_bcs && zamr.direction < 0) {
       UpdateVariables();
     }
@@ -262,8 +347,12 @@ void Zoom::AMR() {
     zamr.direction = (zamr.level==zamr.min_level) ? 1 : zamr.direction;
     zamr.zone = zamr.max_level - zamr.level;
     SetInterval();
-    std::cout << "Zoom AMR: new level = " << zamr.level << " zone = " << zamr.zone << std::endl;
-    std::cout << "Zoom AMR: runtime = " << zamr.runtime << " next time = " << zamr.next_time << std::endl;
+    if (global_variable::my_rank == 0) {
+      std::cout << "Zoom AMR: new level = " << zamr.level
+                << " zone = " << zamr.zone << std::endl;
+      std::cout << "Zoom AMR: runtime = " << zamr.runtime 
+                << " next time = " << zrun.next_time << std::endl;
+    }
     zamr.just_zoomed = true;
   }
 }
@@ -278,8 +367,23 @@ void Zoom::SetInterval() {
   if (zamr.zone == 3) {zamr.runtime = zint.t_run_fac_zone_3*timescale;}
   if (zamr.zone == 4) {zamr.runtime = zint.t_run_fac_zone_4*timescale;}
   if (zamr.level==zamr.min_level) {zamr.runtime = zint.t_run_fac_zone_max*timescale;}
-  zamr.last_time = pmy_pack->pmesh->time;
-  zamr.next_time = zamr.last_time + zamr.runtime;
+  zrun.id++;
+  zrun.next_time = pmy_pack->pmesh->time + zamr.runtime;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::DumpRestartFile()
+//! \brief Set flag to dump restart file
+
+// TODO(@mhguo): Implement this function
+void Zoom::DumpRestartFile() {
+  if (zamr.dump_rst) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "Zoom: Dumping restart file" << std::endl;
+    }
+    // dump restart file
+    zamr.dump_rst = false;
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -435,11 +539,6 @@ void Zoom::UpdateVariables() {
         Real &x3max = size.d_view(m).x3max;
         Real x3v = CellCenterX(finek-cks, nx3, x3min, x3max);
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        // print e, ef, rad, dens
-        // printf("m=%d, i=%d, j=%d, k=%d, finei=%d, finej=%d, finek=%d, e1 = %f, e2 = %f, e3 = %f, ef1 = %f, ef2 = %f, ef3 = %f, rad = %f, den = %f\n",
-        //        m, i, j, k, finei, finej, finek,
-        //        e1(zm,k,j,i), e2(zm,k,j,i), e3(zm,k,j,i), ef1(m,finek,finej,finei),
-        //        ef2(m,finek,finej,finei), ef3(m,finek,finej,finei), rad, w(m,IDN,finek,finej,finei));
       }
     });
   }
@@ -470,7 +569,7 @@ void Zoom::UpdateVariables() {
         src_slice = Kokkos::subview(w, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
-        std::cout << "Zoom: Update variables for zone meshblock " << zm << std::endl;
+        std::cout << "Zoom: Update variables for zoom meshblock " << zm << std::endl;
       }
     }
   }
@@ -487,6 +586,7 @@ void Zoom::UpdateVariables() {
 //! \fn void Zoom::ApplyVariables()
 //! \brief Apply finer level variables to coarser level
 
+// TODO(@mhguo): looks not correct, need to check with b-field
 void Zoom::ApplyVariables() {
   auto &size = pmy_pack->pmb->mb_size;
   int nmb = pmy_pack->nmb_thispack;
@@ -528,7 +628,7 @@ void Zoom::ApplyVariables() {
         des_slice = Kokkos::subview(w, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
-        std::cout << "Zoom: Apply variables for zone meshblock " << zm << std::endl;
+        std::cout << "Zoom: Apply variables for zoom meshblock " << zm << std::endl;
       }
     }
   }
@@ -600,8 +700,6 @@ void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
       int idx1 = (int) (8.0*(1.0+x1v/rzoom));
       int idx2 = (int) (8.0*(1.0+x2v/rzoom));
       int idx3 = (int) (8.0*(1.0+x3v/rzoom));
-      // print postion and idx for debugging using printf
-      // printf("m = %d, k = %d, j = %d, i = %d, idx1 = %d, idx2 = %d, idx3 = %d\n", m, k, j, i, idx1, idx2, idx3);
 
       nc1_.the_array[idx1] += 1.0;
       nc2_.the_array[idx2] += 1.0;
@@ -617,14 +715,6 @@ void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
      Kokkos::Sum<array_sum::GlobalSum>(em1),
      Kokkos::Sum<array_sum::GlobalSum>(em2),
      Kokkos::Sum<array_sum::GlobalSum>(em3));
-
-  // Normalize
-  par_for("emf-norm", DevExeSpace(), 0, NREDUCTION_VARIABLES-1,
-  KOKKOS_LAMBDA(int i) {
-    printf("idx: i = %d, nc1 = %f, nc2 = %f, nc3 = %f\n", i, nc1.the_array[i], nc2.the_array[i], nc3.the_array[i]);
-    printf("sum: i = %d, em1 = %f, em2 = %f, em3 = %f\n", i, em1.the_array[i], em2.the_array[i], em3.the_array[i]);
-    printf("mean i = %d, em1 = %f, em2 = %f, em3 = %f\n", i, em1.the_array[i]/nc1.the_array[i], em2.the_array[i]/nc2.the_array[i], em3.the_array[i]/nc3.the_array[i]);
-  });
 
   par_for("fix-emf", DevExeSpace(), 0, nmb1, ks-ng, ke+ng, js-ng, je+ng ,is-ng, ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -733,4 +823,225 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
 
   return;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::NewTimeStep()
+//! \brief New time step for zoom, only for GR since others are already handled
+
+Real Zoom::NewTimeStep(Mesh* pm) {
+  Real dt = pm->dt/pm->cfl_no;
+  auto &is_general_relativistic_ = pmy_pack->pcoord->is_general_relativistic;
+  if (!is_general_relativistic_) return dt;
+  
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+  auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
+  auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
+
+  Real dt1 = std::numeric_limits<float>::max();
+  Real dt2 = std::numeric_limits<float>::max();
+  Real dt3 = std::numeric_limits<float>::max();
+
+  // capture class variables for kernel
+  auto &size = pmy_pack->pmb->mb_size;
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+  bool is_hydro = (pmy_pack->phydro != nullptr);
+  bool is_mhd = (pmy_pack->pmhd != nullptr);
+
+  if (is_hydro) {
+    auto &w0_ = pmy_pack->phydro->w0;
+    auto &eos = pmy_pack->phydro->peos->eos_data;
+
+    // find smallest dx/(v +/- Cs) in each direction for hydrodynamic problems
+    Kokkos::parallel_reduce("ZHydroNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+      
+      // Use the GR sound speed to compute the time step
+      // References to left primitives
+      Real &wd = w0_(m,IDN,k,j,i);
+      Real &ux = w0_(m,IVX,k,j,i);
+      Real &uy = w0_(m,IVY,k,j,i);
+      Real &uz = w0_(m,IVZ,k,j,i);
+
+      // FIXME ERM: Ideal fluid for now
+      Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+
+      // Extract components of metric
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real glower[4][4], gupper[4][4];
+      ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+
+      // Calculate 4-velocity (contravariant compt)
+      Real q = glower[IVX][IVX] * SQR(ux) + glower[IVY][IVY] * SQR(uy) +
+               glower[IVZ][IVZ] * SQR(uz) + 2.0*glower[IVX][IVY] * ux * uy +
+           2.0*glower[IVX][IVZ] * ux * uz + 2.0*glower[IVY][IVZ] * uy * uz;
+
+      Real alpha = std::sqrt(-1.0/gupper[0][0]);
+      Real gamma = sqrt(1.0 + q);
+      Real uu[4];
+      uu[0] = gamma / alpha;
+      uu[IVX] = ux - alpha * gamma * gupper[0][IVX];
+      uu[IVY] = uy - alpha * gamma * gupper[0][IVY];
+      uu[IVZ] = uz - alpha * gamma * gupper[0][IVZ];
+
+      // Calculate wavespeeds
+      Real lm, lp;
+      eos.IdealGRHydroSoundSpeeds(wd, p, uu[0], uu[IVX], gupper[0][0],
+                                  gupper[0][IVX], gupper[IVX][IVX], lp, lm);
+      max_dv1 = fmax(fabs(lm), lp);
+
+      eos.IdealGRHydroSoundSpeeds(wd, p, uu[0], uu[IVY], gupper[0][0],
+                                  gupper[0][IVY], gupper[IVY][IVY], lp, lm);
+      max_dv2 = fmax(fabs(lm), lp);
+
+      eos.IdealGRHydroSoundSpeeds(wd, p, uu[0], uu[IVZ], gupper[0][0],
+                                  gupper[0][IVZ], gupper[IVZ][IVZ], lp, lm);
+      max_dv3 = fmax(fabs(lm), lp);
+
+      min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+      min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+      min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+    }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+  } else if (is_mhd) {
+    auto &w0_ = pmy_pack->pmhd->w0;
+    auto &eos = pmy_pack->pmhd->peos->eos_data;
+    auto &bcc0_ = pmy_pack->pmhd->bcc0;
+
+    // find smallest dx/(v +/- Cf) in each direction for mhd problems
+    Kokkos::parallel_reduce("ZMHDNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+      // compute m,k,j,i indices of thread and call function
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+
+      // Use the GR fast magnetosonic speed to compute the time step
+      // References to left primitives
+      Real &wd = w0_(m,IDN,k,j,i);
+      Real &ux = w0_(m,IVX,k,j,i);
+      Real &uy = w0_(m,IVY,k,j,i);
+      Real &uz = w0_(m,IVZ,k,j,i);
+      Real &bcc1 = bcc0_(m,IBX,k,j,i);
+      Real &bcc2 = bcc0_(m,IBY,k,j,i);
+      Real &bcc3 = bcc0_(m,IBZ,k,j,i);
+
+      // FIXME ERM: Ideal fluid for now
+      Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+
+      // Extract components of metric
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real glower[4][4], gupper[4][4];
+      ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+
+      // Calculate 4-velocity (contravariant compt)
+      Real q = glower[IVX][IVX] * SQR(ux) + glower[IVY][IVY] * SQR(uy) +
+               glower[IVZ][IVZ] * SQR(uz) + 2.0*glower[IVX][IVY] * ux * uy +
+           2.0*glower[IVX][IVZ] * ux * uz + 2.0*glower[IVY][IVZ] * uy * uz;
+
+      Real alpha = std::sqrt(-1.0/gupper[0][0]);
+      Real gamma = sqrt(1.0 + q);
+      Real uu[4];
+      uu[0] = gamma / alpha;
+      uu[IVX] = ux - alpha * gamma * gupper[0][IVX];
+      uu[IVY] = uy - alpha * gamma * gupper[0][IVY];
+      uu[IVZ] = uz - alpha * gamma * gupper[0][IVZ];
+
+      // lower vector indices (covariant compt)
+      Real ul[4];
+      ul[0]   = glower[0][0]  *uu[0]   + glower[0][IVX]*uu[IVX] +
+                glower[0][IVY]*uu[IVY] + glower[0][IVZ]*uu[IVZ];
+
+      ul[IVX] = glower[IVX][0]  *uu[0]   + glower[IVX][IVX]*uu[IVX] +
+                glower[IVX][IVY]*uu[IVY] + glower[IVX][IVZ]*uu[IVZ];
+
+      ul[IVY] = glower[IVY][0]  *uu[0]   + glower[IVY][IVX]*uu[IVX] +
+                glower[IVY][IVY]*uu[IVY] + glower[IVY][IVZ]*uu[IVZ];
+
+      ul[IVZ] = glower[IVZ][0]  *uu[0]   + glower[IVZ][IVX]*uu[IVX] +
+                glower[IVZ][IVY]*uu[IVY] + glower[IVZ][IVZ]*uu[IVZ];
+
+
+      // Calculate 4-magnetic field in right state
+      Real bu[4];
+      bu[0]   = ul[IVX]*bcc1 + ul[IVY]*bcc2 + ul[IVZ]*bcc3;
+      bu[IVX] = (bcc1 + bu[0] * uu[IVX]) / uu[0];
+      bu[IVY] = (bcc2 + bu[0] * uu[IVY]) / uu[0];
+      bu[IVZ] = (bcc3 + bu[0] * uu[IVZ]) / uu[0];
+
+      // lower vector indices (covariant compt)
+      Real bl[4];
+      bl[0]   = glower[0][0]  *bu[0]   + glower[0][IVX]*bu[IVX] +
+                glower[0][IVY]*bu[IVY] + glower[0][IVZ]*bu[IVZ];
+
+      bl[IVX] = glower[IVX][0]  *bu[0]   + glower[IVX][IVX]*bu[IVX] +
+                glower[IVX][IVY]*bu[IVY] + glower[IVX][IVZ]*bu[IVZ];
+
+      bl[IVY] = glower[IVY][0]  *bu[0]   + glower[IVY][IVX]*bu[IVX] +
+                glower[IVY][IVY]*bu[IVY] + glower[IVY][IVZ]*bu[IVZ];
+
+      bl[IVZ] = glower[IVZ][0]  *bu[0]   + glower[IVZ][IVX]*bu[IVX] +
+                glower[IVZ][IVY]*bu[IVY] + glower[IVZ][IVZ]*bu[IVZ];
+
+      Real b_sq = bl[0]*bu[0] + bl[IVX]*bu[IVX] + bl[IVY]*bu[IVY] +bl[IVZ]*bu[IVZ];
+
+      // Calculate wavespeeds
+      Real lm, lp;
+      eos.IdealGRMHDFastSpeeds(wd, p, uu[0], uu[IVX], b_sq, gupper[0][0],
+                               gupper[0][IVX], gupper[IVX][IVX], lp, lm);
+      max_dv1 = fmax(fabs(lm), lp);
+
+      eos.IdealGRMHDFastSpeeds(wd, p, uu[0], uu[IVY], b_sq, gupper[0][0],
+                               gupper[0][IVY], gupper[IVY][IVY], lp, lm);
+      max_dv2 = fmax(fabs(lm), lp);
+
+      eos.IdealGRMHDFastSpeeds(wd, p, uu[0], uu[IVZ], b_sq, gupper[0][0],
+                               gupper[0][IVZ], gupper[IVZ][IVZ], lp, lm);
+      max_dv3 = fmax(fabs(lm), lp);
+
+      min_dt1 = fmin((size.d_view(m).dx1/max_dv1), min_dt1);
+      min_dt2 = fmin((size.d_view(m).dx2/max_dv2), min_dt2);
+      min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
+    }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
+  }
+
+  // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems
+  Real dtnew = dt1;
+  if (pmy_pack->pmesh->multi_d) { dtnew = std::min(dtnew, dt2); }
+  if (pmy_pack->pmesh->three_d) { dtnew = std::min(dtnew, dt3); }
+
+  return dtnew;
+}
+
 } // namespace zoom
