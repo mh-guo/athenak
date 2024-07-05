@@ -86,8 +86,6 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
 
   Initialize();
 
-  PrintInfo();
-
   return;
 }
 
@@ -245,9 +243,6 @@ void Zoom::BoundaryConditions()
   auto cu0 = coarse_u0;
   auto cw0 = coarse_w0;
 
-  Real rin = this->r_in;
-  Real dzoom = this->d_zoom;
-  Real pzoom = this->p_zoom;
   Real rzoom = zamr.radius;
   int zid = 8*(zamr.zone-1);
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
@@ -588,18 +583,30 @@ void Zoom::UpdateVariables() {
 
 // TODO(@mhguo): looks not correct, need to check with b-field
 void Zoom::ApplyVariables() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
+  int &ng = indcs.ng;
+  int &is = indcs.is;  int &ie  = indcs.ie;
+  int &js = indcs.js;  int &je  = indcs.je;
+  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   int nmb = pmy_pack->nmb_thispack;
   int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
-  DvceArray5D<Real> u, w;
+  Real gamma = 0.0;
+  DvceArray5D<Real> u_, w_;
   if (pmy_pack->phydro != nullptr) {
-    u = pmy_pack->phydro->u0;
-    w = pmy_pack->phydro->w0;
+    gamma = pmy_pack->phydro->peos->eos_data.gamma;
+    u_ = pmy_pack->phydro->u0;
+    w_ = pmy_pack->phydro->w0;
   } else if (pmy_pack->pmhd != nullptr) {
-    u = pmy_pack->pmhd->u0;
-    w = pmy_pack->pmhd->w0;
+    gamma = pmy_pack->pmhd->peos->eos_data.gamma;
+    u_ = pmy_pack->pmhd->u0;
+    w_ = pmy_pack->pmhd->w0;
   }
-  auto cu = coarse_u0, cw = coarse_w0;
+  Real rzoom = zamr.radius;
+  auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
+  auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
+  auto u0_ = u0, w0_ = w0;
   int zid = 8*zamr.zone;
   for (int m=0; m<nmb; ++m) {
     if (pmy_pack->pmesh->lloc_eachmb[m+mbs].level == zamr.level) {
@@ -618,16 +625,61 @@ void Zoom::ApplyVariables() {
         bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
         int leaf_id = 1*x1r + 2*x2r + 4*x3r;
         int zm = zid + leaf_id;
-        auto src_slice = Kokkos::subview(u0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
-                                          Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
-        auto des_slice = Kokkos::subview(u, Kokkos::make_pair(m,m+1), Kokkos::ALL,
-                                          Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
-        Kokkos::deep_copy(des_slice, src_slice);
-        src_slice = Kokkos::subview(w0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
-                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
-        des_slice = Kokkos::subview(w, Kokkos::make_pair(m,m+1), Kokkos::ALL,
-                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
-        Kokkos::deep_copy(des_slice, src_slice);
+        if (pmy_pack->phydro != nullptr) {
+          auto src_slice = Kokkos::subview(u0_, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                           Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+          auto des_slice = Kokkos::subview(u_, Kokkos::make_pair(m,m+1), Kokkos::ALL,
+                                           Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+          Kokkos::deep_copy(des_slice, src_slice);
+          src_slice = Kokkos::subview(w0_, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                      Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+          des_slice = Kokkos::subview(w_, Kokkos::make_pair(m,m+1), Kokkos::ALL,
+                                      Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+          Kokkos::deep_copy(des_slice, src_slice);
+        } else if (pmy_pack->pmhd != nullptr) {
+          auto b = pmy_pack->pmhd->b0;
+          par_for("zoom_apply", DevExeSpace(),ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+          KOKKOS_LAMBDA(int k, int j, int i) {
+            Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+            Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+            Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+            Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+            if (rad < 2*rzoom) { // apply to 2*rzoom since rzoom is already updated
+              w_(m,IDN,k,j,i) = w0_(zm,IDN,k,j,i);
+              w_(m,IM1,k,j,i) = w0_(zm,IM1,k,j,i);
+              w_(m,IM2,k,j,i) = w0_(zm,IM2,k,j,i);
+              w_(m,IM3,k,j,i) = w0_(zm,IM3,k,j,i);
+              w_(m,IEN,k,j,i) = w0_(zm,IEN,k,j,i);
+              Real glower[4][4], gupper[4][4];
+              ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+
+              // Load single state of primitive variables
+              MHDPrim1D w;
+              w.d  = w_(m,IDN,k,j,i);
+              w.vx = w_(m,IVX,k,j,i);
+              w.vy = w_(m,IVY,k,j,i);
+              w.vz = w_(m,IVZ,k,j,i);
+              w.e  = w_(m,IEN,k,j,i);
+
+              // load cell-centered fields into primitive state
+              // use simple linear average of face-centered fields as bcc is not updated
+              w.bx = 0.5*(b.x1f(m,k,j,i) + b.x1f(m,k,j,i+1));
+              w.by = 0.5*(b.x2f(m,k,j,i) + b.x2f(m,k,j+1,i));
+              w.bz = 0.5*(b.x3f(m,k,j,i) + b.x3f(m,k+1,j,i));
+
+              // call p2c function
+              HydCons1D u;
+              SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+
+              // store conserved quantities in 3D array
+              u_(m,IDN,k,j,i) = u.d;
+              u_(m,IM1,k,j,i) = u.mx;
+              u_(m,IM2,k,j,i) = u.my;
+              u_(m,IM3,k,j,i) = u.mz;
+              u_(m,IEN,k,j,i) = u.e;
+            }
+          });
+        }
         std::cout << "Zoom: Apply variables for zoom meshblock " << zm << std::endl;
       }
     }
@@ -760,11 +812,11 @@ void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
 //! \fn void Zoom::ApplyEField()
 //! \brief Fix E field on the zoomed grid
 
+// TODO(@mhguo): check the corner case in ghost zones
 void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
   if (zamr.zone == 0) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
-  int &ng = indcs.ng;
   int &is = indcs.is;  int &ie  = indcs.ie;
   int &js = indcs.js;  int &je  = indcs.je;
   int &ks = indcs.ks;  int &ke  = indcs.ke;

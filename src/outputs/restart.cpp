@@ -60,8 +60,8 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   radiation::Radiation* prad = pm->pmb_pack->prad;
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
-  zoom::Zoom* pzoom = pm->pmb_pack->pzoom;
-  int nhydro=0, nmhd=0, nrad=0, nforce=3, nadm=0, nz4c=0, nzoom=5;
+  // zoom::Zoom* pzoom = pm->pmb_pack->pzoom;
+  int nhydro=0, nmhd=0, nrad=0, nforce=3, nadm=0, nz4c=0;
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
   }
@@ -119,12 +119,12 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
   }
   // TODO(@mhguo): maybe not necessary since it's complex
   // TODO(@mhguo): perhaps better to restart only when resoving all the scales
-  if (pzoom != nullptr && pzoom->write_rst) {
-    int mzoom = pzoom->mzoom;
-    Kokkos::realloc(outarray_zoom, mzoom, nzoom, nout3, nout2, nout1);
-    Kokkos::deep_copy(outarray_zoom, Kokkos::subview(pzoom->w0, std::make_pair(0,mzoom),
-                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
-  }
+  // if (pzoom != nullptr && pzoom->write_rst) {
+  //   int mzoom = pzoom->mzoom;
+  //   Kokkos::realloc(outarray_zoom, mzoom, nzoom, nout3, nout2, nout1);
+  //   Kokkos::deep_copy(outarray_zoom, Kokkos::subview(pzoom->w0, std::make_pair(0,mzoom),
+  //                     Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+  // }
 
   // calculate max/min number of MeshBlocks across all ranks
   noutmbs_max = pm->nmb_eachrank[0];
@@ -152,7 +152,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   adm::ADM* padm = pm->pmb_pack->padm;
   zoom::Zoom* pzoom = pm->pmb_pack->pzoom;
-  int nhydro=0, nmhd=0, nrad=0, nforce=3, nz4c=0, nadm=0, nzoom=5;
+  int nhydro=0, nmhd=0, nrad=0, nforce=3, nz4c=0, nadm=0;
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
   }
@@ -261,14 +261,14 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       // TODO(@mhguo): not working for MPI!
       // every rank has a MB to write, so write collectively
       // get ptr to cell-centered MeshBlock data
-      auto mbptr = outarray_zoom;
-      int mbcnt = mbptr.size();
-      if (resfile.Write_any_type(mbptr.data(),mbcnt,"Real") != mbcnt) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-        << std::endl << "cell-centered zoom data not written correctly to rst file, "
-        << "restart file is broken." << std::endl;
-        exit(EXIT_FAILURE);
-      }
+      // auto mbptr = outarray_zoom;
+      // int mbcnt = mbptr.size();
+      // if (resfile.Write_any_type(mbptr.data(),mbcnt,"Real") != mbcnt) {
+      //   std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+      //   << std::endl << "cell-centered zoom data not written correctly to rst file, "
+      //   << "restart file is broken." << std::endl;
+      //   exit(EXIT_FAILURE);
+      // }
     }
   }
 
@@ -282,7 +282,8 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
                                   data_size*(pm->gids_eachrank[global_variable::my_rank]);
   if (pturb != nullptr) offset_myrank += sizeof(RNG_State);
   if (pzoom != nullptr && pzoom->write_rst) {
-    offset_myrank += sizeof(zoom::ZoomRun) + pzoom->mzoom*nzoom*nout1*nout2*nout3*sizeof(Real);
+    offset_myrank += sizeof(zoom::ZoomRun);
+    // offset_myrank += sizeof(zoom::ZoomRun) + pzoom->mzoom*nzoom*nout1*nout2*nout3*sizeof(Real);
   }
   IOWrapperSizeT myoffset = offset_myrank;
 

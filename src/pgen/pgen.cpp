@@ -154,7 +154,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   radiation::Radiation* prad=pm->pmb_pack->prad;
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
   zoom::Zoom* pzoom=pm->pmb_pack->pzoom;
-  int nrad = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0, nzoom=5;
+  int nrad = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0;
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
   }
@@ -224,16 +224,16 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
         exit(EXIT_FAILURE);
       }
       // Read pzoom w0 data
-      HostArray5D<Real> zwin("rst-zw-in", 1, 1, 1, 1, 1);
-      Kokkos::realloc(zwin, pzoom->mzoom, nzoom, nout3, nout2, nout1);
-      int mbcnt = zwin.size();
-      if (resfile.Read_Reals(zwin.data(), mbcnt) != mbcnt) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << "CC zoom data not read correctly from rst file, "
-                  << "restart file is broken." << std::endl;
-        exit(EXIT_FAILURE);
-      }
-      Kokkos::deep_copy(pzoom->w0, zwin);
+      // HostArray5D<Real> zwin("rst-zw-in", 1, 1, 1, 1, 1);
+      // Kokkos::realloc(zwin, pzoom->mzoom, nzoom, nout3, nout2, nout1);
+      // int mbcnt = zwin.size();
+      // if (resfile.Read_Reals(zwin.data(), mbcnt) != mbcnt) {
+      //   std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+      //             << std::endl << "CC zoom data not read correctly from rst file, "
+      //             << "restart file is broken." << std::endl;
+      //   exit(EXIT_FAILURE);
+      // }
+      // Kokkos::deep_copy(pzoom->w0, zwin);
     }
 
 #if MPI_PARALLEL_ENABLED

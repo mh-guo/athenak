@@ -104,6 +104,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = FixedBondiInflow;
   user_hist_func = BondiFluxes;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
+    pmbp->pzoom->PrintInfo();
     user_ref_func = ZoomAMR;
     if (pmbp->pzoom->zoom_dt) user_dt_func = ZoomNewTimeStep;
   }
