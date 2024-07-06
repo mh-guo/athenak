@@ -44,6 +44,8 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zint.t_run_fac_zone_2 = pin->GetOrAddReal("zoom","t_run_fac_zone_2",zint.t_run_fac);
   zint.t_run_fac_zone_3 = pin->GetOrAddReal("zoom","t_run_fac_zone_3",zint.t_run_fac);
   zint.t_run_fac_zone_4 = pin->GetOrAddReal("zoom","t_run_fac_zone_4",zint.t_run_fac);
+  zint.t_run_fac_zone_5 = pin->GetOrAddReal("zoom","t_run_fac_zone_5",zint.t_run_fac);
+  zint.t_run_fac_zone_6 = pin->GetOrAddReal("zoom","t_run_fac_zone_6",zint.t_run_fac);
   zint.t_run_fac_zone_max = pin->GetOrAddReal("zoom","t_run_fac_zone_max",zint.t_run_fac);
 
   auto pmesh = pmy_pack->pmesh;
@@ -181,7 +183,9 @@ void Zoom::PrintInfo()
     std::cout << " tfz_1 = " << zint.t_run_fac_zone_1
               << " tfz_2 = " << zint.t_run_fac_zone_2
               << " tfz_3 = " << zint.t_run_fac_zone_3
-              << " tfz_4 = " << zint.t_run_fac_zone_4 << std::endl;
+              << " tfz_4 = " << zint.t_run_fac_zone_4
+              << " tfz_5 = " << zint.t_run_fac_zone_5
+              << " tfz_6 = " << zint.t_run_fac_zone_6 << std::endl;
     // print level structure
     std::cout << "Level: max_level = " << zamr.max_level
               << " min_level = " << zamr.min_level
@@ -361,6 +365,8 @@ void Zoom::SetInterval() {
   if (zamr.zone == 2) {zamr.runtime = zint.t_run_fac_zone_2*timescale;}
   if (zamr.zone == 3) {zamr.runtime = zint.t_run_fac_zone_3*timescale;}
   if (zamr.zone == 4) {zamr.runtime = zint.t_run_fac_zone_4*timescale;}
+  if (zamr.zone == 5) {zamr.runtime = zint.t_run_fac_zone_5*timescale;}
+  if (zamr.zone == 6) {zamr.runtime = zint.t_run_fac_zone_6*timescale;}
   if (zamr.level==zamr.min_level) {zamr.runtime = zint.t_run_fac_zone_max*timescale;}
   zrun.id++;
   zrun.next_time = pmy_pack->pmesh->time + zamr.runtime;

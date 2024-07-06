@@ -38,6 +38,8 @@ typedef struct ZoomInterval {
   Real t_run_fac_zone_2;        // runtime factor for zone 2
   Real t_run_fac_zone_3;        // runtime factor for zone 3
   Real t_run_fac_zone_4;        // runtime factor for zone 4
+  Real t_run_fac_zone_5;        // runtime factor for zone 5
+  Real t_run_fac_zone_6;        // runtime factor for zone 6
   Real t_run_fac_zone_max;      // runtime factor for zone max
 } ZoomInterval;
 
