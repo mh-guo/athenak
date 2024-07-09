@@ -67,6 +67,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   r_in = pin->GetReal("zoom","r_in");
   d_zoom = pin->GetOrAddReal("zoom","d_zoom",(FLT_MIN));
   p_zoom = pin->GetOrAddReal("zoom","p_zoom",(FLT_MIN));
+  efld_fac = pin->GetOrAddReal("zoom","efld_fac",1.0);
 
   // allocate memory for primitive variables
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -175,6 +176,10 @@ void Zoom::PrintInfo()
               << " write_rst = " << write_rst << std::endl;
     std::cout << "Funcs: zoom_bcs = " << zoom_bcs << " zoom_ref = " << zoom_ref 
               << " zoom_dt = " << zoom_dt << " fix_efield = " << fix_efield << std::endl;
+    // print model parameters
+    std::cout << "Model: mzoom = " << mzoom << " nvars = " << nvars
+              << " r_in = " << r_in << " d_zoom = " << d_zoom
+              << " p_zoom = " << p_zoom << " efld_fac = " << efld_fac << std::endl;
     // print interval parameters
     std::cout << "Interval: t_run_fac = " << zint.t_run_fac
               << " t_run_pow = " << zint.t_run_pow << std::endl;
@@ -226,6 +231,7 @@ void Zoom::BoundaryConditions()
 
   auto &size = pmy_pack->pmb->mb_size;
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
   int nmb = pmy_pack->nmb_thispack;
 
   // Select either Hydro or MHD
@@ -278,14 +284,13 @@ void Zoom::BoundaryConditions()
     //   u0_(m,IEN,k,j,i) = pzoom/gm1;
     // }
     if (rad < rzoom) {
-      int hnx1 = nx1/2; int hnx2 = nx2/2;  int hnx3 = nx3/2;
       bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
       bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
       int leaf_id = 1*x1r + 2*x2r + 4*x3r;
       int zm = zid + leaf_id;
-      int ci = i - hnx1 * x1l;
-      int cj = j - hnx2 * x2l;
-      int ck = k - hnx3 * x3l;
+      int ci = i - cnx1 * x1l;
+      int cj = j - cnx2 * x2l;
+      int ck = k - cnx3 * x3l;
       if (is_mhd) {
         w0_(m,IDN,k,j,i) = cw0(zm,IDN,ck,cj,ci);
         w0_(m,IM1,k,j,i) = cw0(zm,IM1,ck,cj,ci);
@@ -447,6 +452,7 @@ void Zoom::UpdateVariables() {
   int &cjs = indcs.cjs;  int &cje  = indcs.cje;
   int &cks = indcs.cks;  int &cke  = indcs.cke;
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
   int nmb = pmy_pack->nmb_thispack;
   int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
   DvceArray5D<Real> u, w;
@@ -459,6 +465,7 @@ void Zoom::UpdateVariables() {
   }
   auto cu = coarse_u0, cw = coarse_w0;
   int zid = 8*zamr.zone;
+  Real rzoom = zamr.radius;
   int nvar = nvars;
   Real rin = r_in;
   par_for("zoom-update",DevExeSpace(), 0,nmb-1, 0,nvar-1, cks,cke, cjs,cje, cis,cie,
@@ -530,16 +537,20 @@ void Zoom::UpdateVariables() {
         e2(zm,k,j,i) = 0.5*(ef2(m,finek,finej,finei) + ef2(m,finek,finej+1,finei));
         e3(zm,k,j,i) = 0.5*(ef3(m,finek,finej,finei) + ef3(m,finek+1,finej,finei));
         
-        Real &x1min = size.d_view(m).x1min;
-        Real &x1max = size.d_view(m).x1max;
-        Real x1v = CellCenterX(finei-cis, nx1, x1min, x1max);
-        Real &x2min = size.d_view(m).x2min;
-        Real &x2max = size.d_view(m).x2max;
-        Real x2v = CellCenterX(finej-cjs, nx2, x2min, x2max);
-        Real &x3min = size.d_view(m).x3min;
-        Real &x3max = size.d_view(m).x3max;
-        Real x3v = CellCenterX(finek-cks, nx3, x3min, x3max);
+        // TODO (@mhguo): is this the correct radius?
+        Real x1v = CellCenterX(i-cis, cnx1, x1min, x1max);
+        Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
+        Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+        if (zid>0 && rad < rzoom) {
+          int zmp = zm-8;
+          int prei = finei - cnx1 * x1l;
+          int prej = finej - cnx2 * x2l;
+          int prek = finek - cnx3 * x3l;
+          e1(zm,k,j,i) = 0.5*(e1(zmp,prek,prej,prei) + e1(zmp,prek,prej,prei+1));
+          e2(zm,k,j,i) = 0.5*(e2(zmp,prek,prej,prei) + e2(zmp,prek,prej+1,prei));
+          e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
+        }
       }
     });
   }
@@ -827,6 +838,7 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
   int &js = indcs.js;  int &je  = indcs.je;
   int &ks = indcs.ks;  int &ke  = indcs.ke;
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
   int nmb1 = pmy_pack->nmb_thispack-1;
   auto e1 = efld.x1e;
   auto e2 = efld.x2e;
@@ -837,6 +849,7 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
   Real rzoom = zamr.radius;
 
   int zid = 8*(zamr.zone-1);
+  Real fac = efld_fac; //(rzoom-rad)/rzoom;
   par_for("fix-emf", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1 ,is-1, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -855,17 +868,15 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
     Real x3f = LeftEdgeX  (k-ks, nx3, x3min, x3max);
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-    
-    int hnx1 = nx1/2; int hnx2 = nx2/2;  int hnx3 = nx3/2;
+
     bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
     bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
     int leaf_id = 1*x1r + 2*x2r + 4*x3r;
     int zm = zid + leaf_id;
     // TODO: check if this is correct
-    int ci = i - hnx1 * x1l;
-    int cj = j - hnx2 * x2l;
-    int ck = k - hnx3 * x3l;
-    Real fac = 1.0; //(rzoom-rad)/rzoom;
+    int ci = i - cnx1 * x1l;
+    int cj = j - cnx2 * x2l;
+    int ck = k - cnx3 * x3l;
     // ef2(m,k,j,i) += fac*e2(zm,ck,cj,ci);
     // ef3(m,k,j,i) += fac*e3(zm,ck,cj,ci);
     if (sqrt(SQR(x1v)+SQR(x2f)+SQR(x3f)) < rzoom) {

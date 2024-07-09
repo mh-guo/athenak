@@ -74,6 +74,7 @@ class Zoom
   Real r_in;               // radius of iner boundary
   Real d_zoom;             // density within inner boundary
   Real p_zoom;             // pressure within inner boundary
+  Real efld_fac;           // electric field factor
 
   ZoomAMR zamr;            // zoom AMR parameters
   ZoomInterval zint;       // zoom interval parameters

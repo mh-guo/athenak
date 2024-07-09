@@ -1702,7 +1702,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   // int nflux = (is_mhd) ? 4 : 3;
-  const int nflux = 24;
+  const int nflux = 27;
 
   // set number of and names of history variables for hydro or mhd
   //  (1) mass accretion rate
@@ -1718,7 +1718,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   }
   // no more than 7 characters per label
   std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
-    "lx","ly","lz","lzout","phi","eint","b^2","u0","ur","uph","br","bph",
+    "lx","ly","lz","lzout","phi","eint","b^2","u0","u_0","ur","uph","b0","b_0","br","bph",
     "edothyd","edho","edotadv","edao"
   };
   for (int g=0; g<nradii; ++g) {
@@ -1826,7 +1826,12 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Real &domega = grids[g]->solid_angles.h_view(n);
       Real sqrtmdet = (r2+SQR(spin*cos(theta)));
 
+      // flags
+      Real on = (int_dn != 0.0)? 1.0 : 0.0; // check if angle is on this rank
       Real is_out = (ur>0.0)? 1.0 : 0.0;
+
+      // compute mass flux
+      Real m_flx = int_dn*ur;
 
       // compute energy flux
       Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
@@ -1839,15 +1844,15 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Real t1_0_hyd = (int_dn + gamma*int_ie)*ur*u_0;
       Real bernl_hyd = -(1.0 + gamma*int_ie/int_dn)*u_0-1.0;
 
-      Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, int_dn*ur, int_dn*ur*is_out,
+      Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
         t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
-        int_ie, b_sq, u0, ur, u_ph, br, b_ph,
+        int_ie, b_sq, u0, u_0, ur, u_ph, b0, b_0, br, b_ph,
         t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
       };
 
       pdata->hdata[nflux*g+0] = (global_variable::my_rank == 0)? flux_data[0] : 0.0;
       for (int i=1; i<nflux; ++i) {
-        pdata->hdata[nflux*g+i] += flux_data[i]*sqrtmdet*domega;
+        pdata->hdata[nflux*g+i] += flux_data[i]*sqrtmdet*domega*on;
       }
     }
   }
