@@ -344,6 +344,7 @@ void Zoom::AMR() {
     }
     if (zoom_bcs && zamr.direction < 0) {
       UpdateVariables();
+      SyncVariables();
     }
     RefineCondition();
     zamr.level += zamr.direction;
@@ -468,92 +469,7 @@ void Zoom::UpdateVariables() {
   Real rzoom = zamr.radius;
   int nvar = nvars;
   Real rin = r_in;
-  par_for("zoom-update",DevExeSpace(), 0,nmb-1, 0,nvar-1, cks,cke, cjs,cje, cis,cie,
-  KOKKOS_LAMBDA(const int m, const int n, const int k, const int j, const int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
-    Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
-    Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
-    Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
 
-    if (rad_min < rin) {
-      bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
-      bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
-      int leaf_id = 1*x1r + 2*x2r + 4*x3r;
-      int zm = zid + leaf_id;
-      int finei = 2*i - cis;  // correct when cis=is
-      int finej = 2*j - cjs;  // correct when cjs=js
-      int finek = 2*k - cks;  // correct when cks=ks
-      cu(zm,n,k,j,i) =
-          0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
-              + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
-              + u(m,n,finek+1,finej,  finei) + u(m,n,finek+1,finej,  finei+1)
-              + u(m,n,finek+1,finej+1,finei) + u(m,n,finek+1,finej+1,finei+1));
-      cw(zm,n,k,j,i) =
-          0.125*(w(m,n,finek  ,finej  ,finei) + w(m,n,finek  ,finej  ,finei+1)
-              + w(m,n,finek  ,finej+1,finei) + w(m,n,finek  ,finej+1,finei+1)
-              + w(m,n,finek+1,finej,  finei) + w(m,n,finek+1,finej,  finei+1)
-              + w(m,n,finek+1,finej+1,finei) + w(m,n,finek+1,finej+1,finei+1));
-      // printf("m=%d, i=%d, j=%d, k=%d, finei=%d, finej=%d, finek=%d, den = %f\n",
-      //         m, i, j, k, finei, finej, finek, w(m,IDN,finek,finej,finei));
-    }
-  });
-  if (pmy_pack->pmhd != nullptr && fix_efield) {
-    DvceEdgeFld4D<Real> emf = pmy_pack->pmhd->efld;
-    auto e1 = efld.x1e;
-    auto e2 = efld.x2e;
-    auto e3 = efld.x3e;
-    auto ef1 = emf.x1e;
-    auto ef2 = emf.x2e;
-    auto ef3 = emf.x3e;
-    // update coarse electric fields
-    par_for("zoom-update-efld",DevExeSpace(), 0,nmb-1, cks,cke+1, cjs,cje+1, cis,cie+1,
-    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
-      Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
-      Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
-      Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
-
-      if (rad_min < rin) {
-        bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
-        bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
-        int leaf_id = 1*x1r + 2*x2r + 4*x3r;
-        int zm = zid + leaf_id;
-        int finei = 2*i - cis;  // correct when cis=is
-        int finej = 2*j - cjs;  // correct when cjs=js
-        int finek = 2*k - cks;  // correct when cks=ks
-        e1(zm,k,j,i) = 0.5*(ef1(m,finek,finej,finei) + ef1(m,finek,finej,finei+1));
-        e2(zm,k,j,i) = 0.5*(ef2(m,finek,finej,finei) + ef2(m,finek,finej+1,finei));
-        e3(zm,k,j,i) = 0.5*(ef3(m,finek,finej,finei) + ef3(m,finek+1,finej,finei));
-        
-        // TODO (@mhguo): is this the correct radius?
-        Real x1v = CellCenterX(i-cis, cnx1, x1min, x1max);
-        Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
-        Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        if (zid>0 && rad < rzoom) {
-          int zmp = zm-8;
-          int prei = finei - cnx1 * x1l;
-          int prej = finej - cnx2 * x2l;
-          int prek = finek - cnx3 * x3l;
-          e1(zm,k,j,i) = 0.5*(e1(zmp,prek,prej,prei) + e1(zmp,prek,prej,prei+1));
-          e2(zm,k,j,i) = 0.5*(e2(zmp,prek,prej,prei) + e2(zmp,prek,prej+1,prei));
-          e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
-        }
-      }
-    });
-  }
   for (int m=0; m<nmb; ++m) {
     if (pmy_pack->pmesh->lloc_eachmb[m+mbs].level == zamr.level) {
       Real &x1min = size.h_view(m).x1min;
@@ -566,7 +482,7 @@ void Zoom::UpdateVariables() {
       Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
       Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
       Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
-      if (rad_min < r_in) {
+      if (rad_min < rin) {
         bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
         bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
         int leaf_id = 1*x1r + 2*x2r + 4*x3r;
@@ -581,6 +497,56 @@ void Zoom::UpdateVariables() {
         src_slice = Kokkos::subview(w, Kokkos::make_pair(m,m+1), Kokkos::ALL,
                                     Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
         Kokkos::deep_copy(des_slice, src_slice);
+        par_for("zoom-update",DevExeSpace(), 0,nvar-1, cks,cke, cjs,cje, cis,cie,
+        KOKKOS_LAMBDA(const int n, const int k, const int j, const int i) {
+          int finei = 2*i - cis;  // correct when cis=is
+          int finej = 2*j - cjs;  // correct when cjs=js
+          int finek = 2*k - cks;  // correct when cks=ks
+          cu(zm,n,k,j,i) =
+              0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
+                  + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
+                  + u(m,n,finek+1,finej,  finei) + u(m,n,finek+1,finej,  finei+1)
+                  + u(m,n,finek+1,finej+1,finei) + u(m,n,finek+1,finej+1,finei+1));
+          cw(zm,n,k,j,i) =
+              0.125*(w(m,n,finek  ,finej  ,finei) + w(m,n,finek  ,finej  ,finei+1)
+                  + w(m,n,finek  ,finej+1,finei) + w(m,n,finek  ,finej+1,finei+1)
+                  + w(m,n,finek+1,finej,  finei) + w(m,n,finek+1,finej,  finei+1)
+                  + w(m,n,finek+1,finej+1,finei) + w(m,n,finek+1,finej+1,finei+1));
+        });
+        if (pmy_pack->pmhd != nullptr && fix_efield) {
+          DvceEdgeFld4D<Real> emf = pmy_pack->pmhd->efld;
+          auto e1 = efld.x1e;
+          auto e2 = efld.x2e;
+          auto e3 = efld.x3e;
+          auto ef1 = emf.x1e;
+          auto ef2 = emf.x2e;
+          auto ef3 = emf.x3e;
+          // update coarse electric fields
+          par_for("zoom-update-efld",DevExeSpace(), cks,cke+1, cjs,cje+1, cis,cie+1,
+          KOKKOS_LAMBDA(const int k, const int j, const int i) {
+            int finei = 2*i - cis;  // correct when cis=is
+            int finej = 2*j - cjs;  // correct when cjs=js
+            int finek = 2*k - cks;  // correct when cks=ks
+            e1(zm,k,j,i) = 0.5*(ef1(m,finek,finej,finei) + ef1(m,finek,finej,finei+1));
+            e2(zm,k,j,i) = 0.5*(ef2(m,finek,finej,finei) + ef2(m,finek,finej+1,finei));
+            e3(zm,k,j,i) = 0.5*(ef3(m,finek,finej,finei) + ef3(m,finek+1,finej,finei));
+            
+            // TODO (@mhguo): is this the correct radius?
+            Real x1v = CellCenterX(i-cis, cnx1, x1min, x1max);
+            Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
+            Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
+            Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+            if (zid>0 && rad < rzoom) {
+              int zmp = zm-8;
+              int prei = finei - cnx1 * x1l;
+              int prej = finej - cnx2 * x2l;
+              int prek = finek - cnx3 * x3l;
+              e1(zm,k,j,i) = 0.5*(e1(zmp,prek,prej,prei) + e1(zmp,prek,prej,prei+1));
+              e2(zm,k,j,i) = 0.5*(e2(zmp,prek,prej,prei) + e2(zmp,prek,prej+1,prei));
+              e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
+            }
+          });
+        }
         std::cout << "Zoom: Update variables for zoom meshblock " << zm << std::endl;
       }
     }
@@ -591,6 +557,100 @@ void Zoom::UpdateVariables() {
   //   std::exit(1);
   // }
 
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::SyncVariables()
+//! \brief Syncronize variables between different ranks
+
+// TODO (@mhguo): check whether this is correct
+void Zoom::SyncVariables() {
+#if MPI_PARALLEL_ENABLED
+  // broadcast zoom data
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int ncells1 = indcs.nx1 + 2*(indcs.ng);
+  int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+  int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+  int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
+  int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
+  int n_ccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
+  int u0_slice_size = nvars * ncells1 * ncells2 * ncells3;
+  int w0_slice_size = nvars * ncells1 * ncells2 * ncells3;
+  int cu_slice_size = nvars * n_ccells1 * n_ccells2 * n_ccells3;
+  int cw_slice_size = nvars * n_ccells1 * n_ccells2 * n_ccells3;
+  int e1_slice_size = (n_ccells3+1) * (n_ccells2+1) * n_ccells1;
+  int e2_slice_size = (n_ccells3+1) * n_ccells2 * (n_ccells1+1);
+  int e3_slice_size = n_ccells3 * (n_ccells2+1) * (n_ccells1+1);
+  
+  int zid = 8*zamr.zone;
+  for (int leaf=0; leaf<8; ++leaf) {
+    // determine which rank is the "root" rank
+    int zm = zid + leaf;
+    int x1r = (leaf%2 == 1); int x2r = (leaf%4 > 1); int x3r = (leaf > 3);
+    int zm_rank = 0;
+    for (int m=0; m<pmy_pack->pmesh->nmb_total; ++m) {
+      auto lloc = pmy_pack->pmesh->lloc_eachmb[m];
+      if (lloc.level == zamr.level) {
+        if ((lloc.lx1 == pow(2,zamr.level-1)+x1r-1) &&
+            (lloc.lx2 == pow(2,zamr.level-1)+x2r-1) &&
+            (lloc.lx3 == pow(2,zamr.level-1)+x3r-1)) {
+          zm_rank = pmy_pack->pmesh->rank_eachmb[m];
+          // print basic information
+          // std::cout << "Zoom: Syncing variables for zoom meshblock " << zm
+          //           << " from rank " << zm_rank << std::endl;
+        }
+      }
+    }
+    // It looks device to device communication is not supported, so copy to host first
+    Kokkos::realloc(harr_5d, 1, nvars, ncells3, ncells2, ncells1);
+    auto u0_slice = Kokkos::subview(u0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_5d, u0_slice);
+    MPI_Bcast(harr_5d.data(), u0_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(u0_slice, harr_5d);
+
+    auto w0_slice = Kokkos::subview(w0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_5d, w0_slice);
+    MPI_Bcast(harr_5d.data(), w0_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(w0_slice, harr_5d);
+
+    Kokkos::realloc(harr_5d, 1, nvars, n_ccells3, n_ccells2, n_ccells1);
+    auto cu_slice = Kokkos::subview(coarse_u0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_5d, cu_slice);
+    MPI_Bcast(harr_5d.data(), cu_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(cu_slice, harr_5d);
+
+    auto cw_slice = Kokkos::subview(coarse_w0, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_5d, cw_slice);
+    MPI_Bcast(harr_5d.data(), cw_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(cw_slice, harr_5d);
+    
+    Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2+1, n_ccells1);
+    auto e1_slice = Kokkos::subview(efld.x1e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_4d, e1_slice);
+    MPI_Bcast(harr_4d.data(), e1_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(e1_slice, harr_4d);
+    
+    Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2, n_ccells1+1);
+    auto e2_slice = Kokkos::subview(efld.x2e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_4d, e2_slice);
+    MPI_Bcast(harr_4d.data(), e2_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(e2_slice, harr_4d);
+    
+    Kokkos::realloc(harr_4d, 1, n_ccells3, n_ccells2+1, n_ccells1+1);
+    auto e3_slice = Kokkos::subview(efld.x3e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_4d, e3_slice);
+    MPI_Bcast(harr_4d.data(), e3_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(e3_slice, harr_4d);
+  }
+#endif
   return;
 }
 

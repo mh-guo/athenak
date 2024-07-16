@@ -92,6 +92,9 @@ class Zoom
   // vector of SphericalGrid objects for analysis
   std::vector<std::unique_ptr<SphericalGrid>> spherical_grids;
 
+  HostArray5D<Real> harr_5d;  // host copy of 5D arrays
+  HostArray4D<Real> harr_4d;  // host copy of 4D arrays
+
   // array_sum::GlobalSum nc1, nc2, nc3, em1, em2, em3;
 
   // functions
@@ -103,6 +106,7 @@ class Zoom
   void DumpRestartFile();
   void RefineCondition();
   void UpdateVariables();
+  void SyncVariables();
   void ApplyVariables();
   void FixEField(DvceEdgeFld4D<Real> emf);
   void ApplyEField(DvceEdgeFld4D<Real> emf);
