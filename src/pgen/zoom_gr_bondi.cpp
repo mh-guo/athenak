@@ -744,15 +744,45 @@ void FixedBondiInflow(Mesh *pm) {
 
 
   // Primitive boundary conditions
+  // X1-Boundary
+  // Set X1-BCs on b0 if Meshblock face is at the edge of computational domain
   if (is_mhd) {
+    auto &b0 = pmbp->pmhd->b0;
+    par_for("noinflow_field_x1", DevExeSpace(),0,(nmb-1),0,n3m1,0,n2m1,
+    KOKKOS_LAMBDA(int m, int k, int j) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
+        for (int i=0; i<ng; ++i) {
+          b0.x1f(m,k,j,is-i-1) = b0.x1f(m,k,j,is);
+          b0.x2f(m,k,j,is-i-1) = b0.x2f(m,k,j,is);
+          if (j == n2-1) {b0.x2f(m,k,j+1,is-i-1) = b0.x2f(m,k,j+1,is);}
+          b0.x3f(m,k,j,is-i-1) = b0.x3f(m,k,j,is);
+          if (k == n3-1) {b0.x3f(m,k+1,j,is-i-1) = b0.x3f(m,k+1,j,is);}
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
+        for (int i=0; i<ng; ++i) {
+          b0.x1f(m,k,j,ie+i+2) = b0.x1f(m,k,j,ie+1);
+          b0.x2f(m,k,j,ie+i+1) = b0.x2f(m,k,j,ie);
+          if (j == n2-1) {b0.x2f(m,k,j+1,ie+i+1) = b0.x2f(m,k,j+1,ie);}
+          b0.x3f(m,k,j,ie+i+1) = b0.x3f(m,k,j,ie);
+          if (k == n3-1) {b0.x3f(m,k+1,j,ie+i+1) = b0.x3f(m,k+1,j,ie);}
+        }
+      }
+    });
+  }
+  // TODO (@mhguo): check whether it should be is or is-1, also in gr_torus problem
+  // ConsToPrim over all X1 ghost zones *and* at the innermost/outermost X1-active zones
+  // of Meshblocks, even if Meshblock face is not at the edge of computational domain
+  if (!is_mhd) {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is,0,n2m1,0,n3m1);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,ie,ie+ng,0,n2m1,0,n3m1);
+  } else {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
-    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,is-ng,is-1,0,n2m1,0,n3m1);
-    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,ie+1,ie+ng,0,n2m1,0,n3m1);
-  } else {
-    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,n2m1,0,n3m1);
-    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,n2m1,0,n3m1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,is-ng,is,0,n2m1,0,n3m1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,ie,ie+ng,0,n2m1,0,n3m1);
   }
+  // Set X1-BCs on w0 if Meshblock face is at the edge of computational domain
   par_for("fixed_x1", DevExeSpace(),0,(nmb-1),0,n3m1,0,n2m1,0,(ng-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x1 boundary
@@ -791,24 +821,53 @@ void FixedBondiInflow(Mesh *pm) {
     }
   });
   // PrimToCons on X1 physical boundary ghost zones
-  if (is_mhd) {
+  if (!is_mhd) {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,n2m1,0,n3m1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,n2m1,0,n3m1);
+  } else {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,is-ng,is-1,0,n2m1,0,n3m1);
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,ie+1,ie+ng,0,n2m1,0,n3m1);
-  } else {
-    pmbp->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,n2m1,0,n3m1);
-    pmbp->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,n2m1,0,n3m1);
   }
 
+  // X2-Boundary
+  // Set X2-BCs on b0 if Meshblock face is at the edge of computational domain
   if (is_mhd) {
+    auto &b0 = pmbp->pmhd->b0;
+    par_for("noinflow_field_x2", DevExeSpace(),0,(nmb-1),0,n3m1,0,n1m1,
+    KOKKOS_LAMBDA(int m, int k, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
+        for (int j=0; j<ng; ++j) {
+          b0.x1f(m,k,js-j-1,i) = b0.x1f(m,k,js,i);
+          if (i == n1-1) {b0.x1f(m,k,js-j-1,i+1) = b0.x1f(m,k,js,i+1);}
+          b0.x2f(m,k,js-j-1,i) = b0.x2f(m,k,js,i);
+          b0.x3f(m,k,js-j-1,i) = b0.x3f(m,k,js,i);
+          if (k == n3-1) {b0.x3f(m,k+1,js-j-1,i) = b0.x3f(m,k+1,js,i);}
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
+        for (int j=0; j<ng; ++j) {
+          b0.x1f(m,k,je+j+1,i) = b0.x1f(m,k,je,i);
+          if (i == n1-1) {b0.x1f(m,k,je+j+1,i+1) = b0.x1f(m,k,je,i+1);}
+          b0.x2f(m,k,je+j+2,i) = b0.x2f(m,k,je+1,i);
+          b0.x3f(m,k,je+j+1,i) = b0.x3f(m,k,je,i);
+          if (k == n3-1) {b0.x3f(m,k+1,je+j+1,i) = b0.x3f(m,k+1,je,i);}
+        }
+      }
+    });
+  }
+  // ConsToPrim over all X2 ghost zones *and* at the innermost/outermost X2-active zones
+  // of Meshblocks, even if Meshblock face is not at the edge of computational domain
+  if (!is_mhd) {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,js-ng,js,0,n3m1);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,je,je+ng,0,n3m1);
+  } else {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
-    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,js-ng,js-1,0,n3m1);
-    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,je+1,je+ng,0,n3m1);
-  } else {
-    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,js-ng,js-1,0,n3m1);
-    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,je+1,je+ng,0,n3m1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,js-ng,js,0,n3m1);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,je,je+ng,0,n3m1);
   }
+  // Set X2-BCs on w0 if Meshblock face is at the edge of computational domain
   par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,n3m1,0,(ng-1),0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x2 boundary
@@ -847,24 +906,53 @@ void FixedBondiInflow(Mesh *pm) {
     }
   });
   // PrimToCons on X2 physical boundary ghost zones
-  if (is_mhd) {
+  if (!is_mhd) {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,js-ng,js-1,0,n3m1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,je+1,je+ng,0,n3m1);
+  } else {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,js-ng,js-1,0,n3m1);
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,je+1,je+ng,0,n3m1);
-  } else {
-    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,js-ng,js-1,0,n3m1);
-    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,je+1,je+ng,0,n3m1);
   }
 
+  // X3-Boundary
+  // Set X3-BCs on b0 if Meshblock face is at the edge of computational domain
   if (is_mhd) {
+    auto &b0 = pmbp->pmhd->b0;
+    par_for("noinflow_field_x3", DevExeSpace(),0,(nmb-1),0,n2m1,0,n1m1,
+    KOKKOS_LAMBDA(int m, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+        for (int k=0; k<ng; ++k) {
+          b0.x1f(m,ks-k-1,j,i) = b0.x1f(m,ks,j,i);
+          if (i == n1-1) {b0.x1f(m,ks-k-1,j,i+1) = b0.x1f(m,ks,j,i+1);}
+          b0.x2f(m,ks-k-1,j,i) = b0.x2f(m,ks,j,i);
+          if (j == n2-1) {b0.x2f(m,ks-k-1,j+1,i) = b0.x2f(m,ks,j+1,i);}
+          b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i);
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
+        for (int k=0; k<ng; ++k) {
+          b0.x1f(m,ke+k+1,j,i) = b0.x1f(m,ke,j,i);
+          if (i == n1-1) {b0.x1f(m,ke+k+1,j,i+1) = b0.x1f(m,ke,j,i+1);}
+          b0.x2f(m,ke+k+1,j,i) = b0.x2f(m,ke,j,i);
+          if (j == n2-1) {b0.x2f(m,ke+k+1,j+1,i) = b0.x2f(m,ke,j+1,i);}
+          b0.x3f(m,ke+k+2,j,i) = b0.x3f(m,ke+1,j,i);
+        }
+      }
+    });
+  }
+  // ConsToPrim over all X3 ghost zones *and* at the innermost/outermost X3-active zones
+  // of Meshblocks, even if Meshblock face is not at the edge of computational domain
+  if (!is_mhd) {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,0,n2m1,ks-ng,ks);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,0,n2m1,ke,ke+ng);
+  } else {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
     pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,0,n2m1,ks-ng,ks-1);
     pmbp->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,0,n1m1,0,n2m1,ke+1,ke+ng);
-  } else {
-    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,0,n2m1,ks-ng,ks-1);
-    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,n1m1,0,n2m1,ke+1,ke+ng);
   }
+  // Set X3-BCs on w0 if Meshblock face is at the edge of computational domain
   par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,n2m1,0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x3 boundary
@@ -903,13 +991,13 @@ void FixedBondiInflow(Mesh *pm) {
     }
   });
   // PrimToCons on X3 physical boundary ghost zones
-  if (is_mhd) {
+  if (!is_mhd) {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,0,n2m1,ks-ng,ks-1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
+  } else {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ks-ng,ks-1);
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
-  } else {
-    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,0,n2m1,ks-ng,ks-1);
-    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
   }
 
   if (pm->pmb_pack->pzoom != nullptr && pm->pmb_pack->pzoom->is_set) {
