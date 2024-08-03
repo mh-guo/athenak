@@ -33,6 +33,7 @@ typedef struct ZoomAMR {
 typedef struct ZoomInterval {
   Real t_run_fac;               // interval factor
   Real t_run_pow;               // interval power law
+  Real t_run_max;               // maximum interval
   Real t_run_fac_zone_0;        // runtime factor for zone 0
   Real t_run_fac_zone_1;        // runtime factor for zone 1
   Real t_run_fac_zone_2;        // runtime factor for zone 2

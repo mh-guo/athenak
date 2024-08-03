@@ -39,6 +39,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
   zint.t_run_fac = pin->GetOrAddReal("zoom","t_run_fac",1.0);
   zint.t_run_pow = pin->GetOrAddReal("zoom","t_run_pow",0.0);
+  zint.t_run_max = pin->GetOrAddReal("zoom","t_run_max",FLT_MAX);
   zint.t_run_fac_zone_0 = pin->GetOrAddReal("zoom","t_run_fac_zone_0",zint.t_run_fac);
   zint.t_run_fac_zone_1 = pin->GetOrAddReal("zoom","t_run_fac_zone_1",zint.t_run_fac);
   zint.t_run_fac_zone_2 = pin->GetOrAddReal("zoom","t_run_fac_zone_2",zint.t_run_fac);
@@ -182,7 +183,9 @@ void Zoom::PrintInfo()
               << " p_zoom = " << p_zoom << " efld_fac = " << efld_fac << std::endl;
     // print interval parameters
     std::cout << "Interval: t_run_fac = " << zint.t_run_fac
-              << " t_run_pow = " << zint.t_run_pow << std::endl;
+              << " t_run_pow = " << zint.t_run_pow
+              << " t_run_max = " << zint.t_run_max
+              << std::endl;
     std::cout << " t_run_fac_zone_0 = " << zint.t_run_fac_zone_0
               << " t_run_fac_zone_max = " << zint.t_run_fac_zone_max << std::endl;
     std::cout << " tfz_1 = " << zint.t_run_fac_zone_1
@@ -374,6 +377,7 @@ void Zoom::SetInterval() {
   if (zamr.zone == 5) {zamr.runtime = zint.t_run_fac_zone_5*timescale;}
   if (zamr.zone == 6) {zamr.runtime = zint.t_run_fac_zone_6*timescale;}
   if (zamr.level==zamr.min_level) {zamr.runtime = zint.t_run_fac_zone_max*timescale;}
+  if (zamr.runtime > zint.t_run_max) {zamr.runtime = zint.t_run_max;}
   zrun.id++;
   zrun.next_time = pmy_pack->pmesh->time + zamr.runtime;
 }
