@@ -23,6 +23,7 @@
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "ion-neutral/ion-neutral.hpp"
 #include "radiation/radiation.hpp"
+#include "pgen/zoom.hpp"
 #include "driver.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -418,6 +419,14 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
             ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
           out->LoadOutputData(pmesh);
           out->WriteOutputFile(pmesh, pin);
+        }
+        if (out->out_params.file_type.compare("rst") == 0) {
+          zoom::Zoom *pzoom = pmesh->pmb_pack->pzoom;
+          if (pzoom != nullptr && pzoom->is_set && pzoom->zamr.dump_rst) {
+            out->LoadOutputData(pmesh);
+            out->WriteOutputFile(pmesh, pin);
+            pzoom->zamr.dump_rst = false;
+          }
         }
       }
 

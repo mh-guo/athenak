@@ -26,6 +26,7 @@
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "pgen.hpp"
+#include "pgen/zoom.hpp"
 
 //----------------------------------------------------------------------------------------
 // default constructor, calls pgen function.
@@ -157,6 +158,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   radiation::Radiation* prad=pm->pmb_pack->prad;
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
+  zoom::Zoom* pzoom=pm->pmb_pack->pzoom;
   int nrad = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0;
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
@@ -225,6 +227,40 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
 #endif
     std::memcpy(&(pturb->rstate), &(rng_data[0]), sizeof(RNG_State));
   }
+
+  // TODO(@mhguo): not working for MPI!
+  // TODO(@mhguo): working for MPI only if restarting from time including all information
+  if (pzoom != nullptr && pzoom->read_rst) {
+    // root process reads zoom data
+    char *zrdata = new char[sizeof(zoom::ZoomRun)];
+
+    if (global_variable::my_rank == 0) { // the master process reads the variables data
+      if (resfile.Read_bytes(zrdata, 1, sizeof(zoom::ZoomRun)) != sizeof(zoom::ZoomRun)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "ZoomRun data read from restart file is incorrect, "
+                  << "restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      // Read pzoom w0 data
+      // HostArray5D<Real> zwin("rst-zw-in", 1, 1, 1, 1, 1);
+      // Kokkos::realloc(zwin, pzoom->mzoom, nzoom, nout3, nout2, nout1);
+      // int mbcnt = zwin.size();
+      // if (resfile.Read_Reals(zwin.data(), mbcnt) != mbcnt) {
+      //   std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+      //             << std::endl << "CC zoom data not read correctly from rst file, "
+      //             << "restart file is broken." << std::endl;
+      //   exit(EXIT_FAILURE);
+      // }
+      // Kokkos::deep_copy(pzoom->w0, zwin);
+    }
+
+#if MPI_PARALLEL_ENABLED
+    // then broadcast the ZoomRun information
+    MPI_Bcast(zrdata, sizeof(zoom::ZoomRun), MPI_CHAR, 0, MPI_COMM_WORLD);
+#endif
+    std::memcpy(&(pzoom->zrun), &(zrdata[0]), sizeof(zoom::ZoomRun));
+  }
+
 
   // root process reads size of CC and FC data arrays from restart file
   IOWrapperSizeT variablesize = sizeof(IOWrapperSizeT);

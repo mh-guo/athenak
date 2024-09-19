@@ -29,6 +29,7 @@
 #include "srcterms/turb_driver.hpp"
 #include "particles/particles.hpp"
 #include "units/units.hpp"
+#include "pgen/zoom.hpp"
 #include "meshblock_pack.hpp"
 
 //----------------------------------------------------------------------------------------
@@ -63,6 +64,7 @@ MeshBlockPack::~MeshBlockPack() {
   if (punit  != nullptr) {delete punit;}
   if (pz4c   != nullptr) {delete pz4c;}
   if (ppart  != nullptr) {delete ppart;}
+  if (pzoom  != nullptr) {delete pzoom;}
   // must be last, since it calls ~BoundaryValues() which (MPI) uses pmy_pack->pmb->nnghbr
   delete pmb;
 }
@@ -222,6 +224,15 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     nphysics++;
   } else {
     ppart = nullptr;
+  }
+
+  // (9) ZOOM
+  // Create Zoom module.  Create tasklist.
+  // TODO(@mhguo): make it more flexible to allow easier restarts
+  if (pin->DoesBlockExist("zoom") && pin->GetOrAddBoolean("zoom", "is_set", false)){
+    pzoom = new zoom::Zoom(this, pin);
+  } else {
+    pzoom = nullptr;
   }
 
   // Check that at least ONE is requested and initialized.

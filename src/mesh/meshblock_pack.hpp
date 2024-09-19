@@ -34,6 +34,7 @@ namespace z4c {class Z4c;}
 namespace adm {class ADM;}
 namespace particles {class Particles;}
 namespace units {class Units;}
+namespace zoom {class Zoom;}
 
 //----------------------------------------------------------------------------------------
 //! \class MeshBlockPack
@@ -75,6 +76,8 @@ class MeshBlockPack {
 
   // units (needed to convert code units to cgs for, e.g., cooling or radiation)
   units::Units *punit=nullptr;
+
+  zoom::Zoom *pzoom=nullptr;
 
   // map for task lists which operate over all MeshBlocks in this MeshBlockPack
   std::map<std::string, std::shared_ptr<TaskList>> tl_map;
