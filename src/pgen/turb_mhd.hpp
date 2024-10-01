@@ -615,7 +615,7 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
 
     auto force_ = force;
     auto f_n_ = force_new;
-    std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    // std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
 
     auto b0 = pmy_pack->pmhd->b0;
     auto &size = pmy_pack->pmb->mb_size;

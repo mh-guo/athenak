@@ -711,7 +711,7 @@ TaskStatus TurbulenceDens::InitializeModes(int stage) {
 TaskStatus TurbulenceDens::AddTurbing(int stage) {
   // turb_flag == 1 : decaying turbulence
   // TODO(@mhguo): rm this!
-  std::cout << "turb_count=" << turb_count << std::endl;
+  // std::cout << "turb_count=" << turb_count << std::endl;
   if (turb_flag == 1) {
     if (turb_count == 0) {
       return TaskStatus::complete;
@@ -753,7 +753,7 @@ TaskStatus TurbulenceDens::AddTurbing(int stage) {
 
     auto force_ = force;
     auto force_new_ = force_new;
-    std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    // std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
     par_for("push", DevExeSpace(),0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real den = u(m,IDN,k,j,i);
@@ -764,20 +764,20 @@ TaskStatus TurbulenceDens::AddTurbing(int stage) {
       Real m2 = u(m,IM2,k,j,i);
       Real m3 = u(m,IM3,k,j,i);
 
-      if (m==0&&k==6&&j==6&&i==6) {
-        printf("den: %.6e\n",u(m,IDN,k,j,i));
-        printf("mom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
-        printf("v: %.6e %.6e %.6e\n",v1,v2,v3);
-      }
+      // if (m==0&&k==6&&j==6&&i==6) {
+      //   printf("den: %.6e\n",u(m,IDN,k,j,i));
+      //   printf("mom: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      //   printf("v: %.6e %.6e %.6e\n",v1,v2,v3);
+      // }
 
       u(m,IDN,k,j,i) += den*v1;
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.5*den*(v1*v1+v2*v2+v3*v3);
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.25*den*(v1*v1+v2*v2+v3*v3);
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3;
-      if (m==0&&k==6&&j==6&&i==6) {
-        printf("den_new: %.6e\n",u(m,IDN,k,j,i));
-        printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
-      }
+      // if (m==0&&k==6&&j==6&&i==6) {
+      //   printf("den_new: %.6e\n",u(m,IDN,k,j,i));
+      //   printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      // }
     });
   } else {
     // modify conserved variables

@@ -793,7 +793,7 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
 
     auto force_ = force;
     auto force_new_ = force_new;
-    std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    // std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
     par_for("push", DevExeSpace(),0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real den = u(m,IDN,k,j,i);
@@ -806,10 +806,10 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
 
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.5*den*(v1*v1+v2*v2+v3*v3);
       // u(m,IEN,k,j,i) += m1*v1 + m2*v2 + m3*v3 + 0.25*den*(v1*v1+v2*v2+v3*v3);
-      if (m==0&&k==6&&j==6&&i==6) {
-        printf("den_old: %.6e\n",u(m,IDN,k,j,i));
-        printf("mom_old: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
-      }
+      // if (m==0&&k==6&&j==6&&i==6) {
+      //   printf("den_old: %.6e\n",u(m,IDN,k,j,i));
+      //   printf("mom_old: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      // }
       if (turb_dens) {
         u(m,IDN,k,j,i) += den*fmax((v1+v2+v3),-0.9);
       } else {
@@ -822,10 +822,10 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
         u(m,IM2,k,j,i) += den*v2;
         u(m,IM3,k,j,i) += den*v3;
       }
-      if (m==0&&k==6&&j==6&&i==6) {
-        printf("den_new: %.6e\n",u(m,IDN,k,j,i));
-        printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
-      }
+      // if (m==0&&k==6&&j==6&&i==6) {
+      //   printf("den_new: %.6e\n",u(m,IDN,k,j,i));
+      //   printf("mom_new: %.6e %.6e %.6e\n",u(m,IM1,k,j,i),u(m,IM2,k,j,i),u(m,IM3,k,j,i));
+      // }
     });
   } else {
     // modify conserved variables
