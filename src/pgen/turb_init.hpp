@@ -601,7 +601,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
     }
   });
   // TODO(@mhguo): rm this cout!
-  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
+  // std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
 
   m0 = 0.0, m1 = 0.0;
   if (!(pmy_pack->pmesh->multilevel)) {
@@ -686,7 +686,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
     m0 = std::max(m0, static_cast<Real>(std::numeric_limits<float>::min()) );
   }
   // TODO(@mhguo): rm this cout!
-  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
+  // std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<std::endl;
 
 #if MPI_PARALLEL_ENABLED
     Real m_sum2[2] = {m0,m1};
@@ -732,7 +732,7 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   }
 
   // TODO(@mhguo): rm this cout!
-  std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<"  s="<<s<<std::endl;
+  // std::cout<<"m00="<<m00<<"  m0="<<m0<<"  m1="<<m1<<"  s="<<s<<std::endl;
 
   // Now normalize new force array
   par_for("OU_process", DevExeSpace(),0,nmb-1,0,2,0,ncells3-1,0,ncells2-1,0,ncells1-1,
