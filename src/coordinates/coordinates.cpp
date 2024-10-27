@@ -22,7 +22,6 @@
 
 Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
     pmy_pack(ppack),
-    zone_mask("zone_mask",1,1,1,1),
     excision_floor("excision_floor",1,1,1,1),
     excision_flux("excision_flux",1,1,1,1) {
   // Check for relativistic dynamics
@@ -91,15 +90,6 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
         SetExcisionMasks(excision_floor, excision_flux);
       }
     }
-  }
-  if (multi_zone || fixed_zone) {
-    // boolean masks allocation
-    int nmb = ppack->nmb_thispack;
-    auto &indcs = pmy_pack->pmesh->mb_indcs;
-    int ncells1 = indcs.nx1 + 2*(indcs.ng);
-    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
-    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(zone_mask, nmb, ncells3, ncells2, ncells1);
   }
 }
 
