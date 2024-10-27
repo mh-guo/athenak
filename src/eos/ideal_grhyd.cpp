@@ -61,7 +61,6 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
   auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
   auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
   auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
-  bool refining = (pmy_pack->pmesh->pmr!=nullptr)? pmy_pack->pmesh->pmr->refining : false;
 
   const int ni   = (iu - il + 1);
   const int nji  = (ju - jl + 1)*ni;

@@ -47,7 +47,6 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   ncyc_check_amr(1),
   refinement_interval(5),
   prolong_prims(false),
-  refining(false),
   d_threshold_(0.0),
   dd_threshold_(0.0),
   dp_threshold_(0.0),
@@ -130,7 +129,6 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 
   // Refine/derefine mesh and evolved data, set boundary conditions/timestep on new mesh
   if (nnew != 0 || ndel != 0) { // at least one (de)refinement flagged
-    refining = true;
     RedistAndRefineMeshBlocks(pin, nnew, ndel);
     pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh);
 
@@ -150,7 +148,6 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 
     nmb_created += nnew;
     nmb_deleted += ndel;
-    refining = false;
   }
   return;
 }
