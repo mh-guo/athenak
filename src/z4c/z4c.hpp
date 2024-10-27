@@ -10,6 +10,7 @@
 
 #include <map>
 #include <memory>    // make_unique, unique_ptr
+#include <list>
 #include <string>
 #include <vector>
 #include "athena.hpp"
@@ -24,6 +25,7 @@
 // forward declarations
 class Coordinates;
 class Driver;
+class CompactObjectTracker;
 
 //----------------------------------------------------------------------------------------
 //! \struct Z4cTaskIDs
@@ -31,6 +33,7 @@ class Driver;
 
 struct Z4cTaskIDs {
   TaskID irecv;
+  TaskID irecvweyl;
   TaskID copyu;
   TaskID crhs;
   TaskID sombc;
@@ -48,7 +51,13 @@ struct Z4cTaskIDs {
   TaskID restu;
   TaskID ptrck;
   TaskID weyl_scalar;
-  TaskID waveform;
+  TaskID wave_extr;
+  TaskID weyl_rest;
+  TaskID weyl_send;
+  TaskID weyl_prol;
+  TaskID weyl_recv;
+  TaskID csendweyl;
+  TaskID crecvweyl;
 };
 
 namespace z4c {
@@ -89,14 +98,14 @@ class Z4c {
   // Names of costraint variables
   static char const * const Constraint_names[ncon];
   // Indices of matter fields
-  enum {
+  /*enum {
     I_MAT_RHO,
     I_MAT_SX, I_MAT_SY, I_MAT_SZ,
     I_MAT_SXX, I_MAT_SXY, I_MAT_SXZ, I_MAT_SYY, I_MAT_SYZ, I_MAT_SZZ,
     nmat
   };
   // Names of matter variables
-  static char const * const Matter_names[nmat];
+  static char const * const Matter_names[nmat];*/
 
   // data
   // flags to denote relativistic dynamics
@@ -107,13 +116,8 @@ class Z4c {
   DvceArray5D<Real> u_rhs;     // z4c rhs storage
   DvceArray5D<Real> coarse_u0; // coarse representation of z4c solution
   DvceArray5D<Real> u_weyl; // weyl scalars
+  DvceArray5D<Real> coarse_u_weyl; // coarse representation of weyl scalars
 
-  // puncture location
-  Real ppos[3] = {0.,0.,0.}; // later on initiate from input file
-#if TWO_PUNCTURES
-  // second puncture location
-  Real ppos2[3] = {0.,0.,0.}; // later on initiate from input file
-#endif
   struct ADM_vars {
     AthenaTensor<Real, TensorSymm::NONE, 3, 0> psi4;
     AthenaTensor<Real, TensorSymm::SYM2, 3, 2> g_dd;
@@ -157,12 +161,12 @@ class Z4c {
   Constraint_vars con;
 
   // aliases for the matter variables
-  struct Matter_vars {
+  /*struct Matter_vars {
     AthenaTensor<Real, TensorSymm::NONE, 3, 0> rho;       // matter energy density
     AthenaTensor<Real, TensorSymm::NONE, 3, 1> vS_d;       // matter momentum density
     AthenaTensor<Real, TensorSymm::SYM2, 3, 2> vS_dd;      // matter stress tensor
   };
-  Matter_vars mat;
+  Matter_vars mat;*/
 
   struct Options {
     Real chi_psi_power;   // chi = psi^N, N = chi_psi_power
@@ -185,6 +189,10 @@ class Z4c {
     Real shift_hh;
     Real shift_advect;
     Real shift_eta;
+    // Enable BSSN if false (disable theta)
+    bool use_z4c;
+    // Apply the Sommerfeld condition for user BCs.
+    bool user_Sbc;
     // Boundary extrapolation order
     int extrap_order;
   };
@@ -192,7 +200,10 @@ class Z4c {
   Real diss;              // Dissipation parameter
 
   // Boundary communication buffers and functions for u
-  BoundaryValuesCC *pbval_u;
+  MeshBoundaryValuesCC *pbval_u;
+
+  // Boundary communication buffers for the weyl scalar
+  MeshBoundaryValuesCC *pbval_weyl;
 
   // following only used for time-evolving flow
   Real dtnew;
@@ -202,31 +213,40 @@ class Z4c {
   // geodesic grid for wave extr
   std::vector<std::unique_ptr<SphericalGrid>> spherical_grids;
   // array storing waveform at each radii
-  HostArray3D<Real> psi_out;
+  Real * psi_out;
   Real waveform_dt;
   Real last_output_time;
+  int nrad; // number of radii to perform wave extraction
 
   // functions
-  void AssembleZ4cTasks(std::map<std::string, std::shared_ptr<TaskList>> tl);
+  void QueueZ4cTasks();
   TaskStatus InitRecv(Driver *d, int stage);
   TaskStatus ClearRecv(Driver *d, int stage);
   TaskStatus ClearSend(Driver *d, int stage);
+  TaskStatus InitRecvWeyl(Driver *d, int stage);
+  TaskStatus ClearRecvWeyl(Driver *d, int stage);
+  TaskStatus ClearSendWeyl(Driver *d, int stage);
   TaskStatus CopyU(Driver *d, int stage);
   TaskStatus SendU(Driver *d, int stage);
   TaskStatus RecvU(Driver *d, int stage);
+  TaskStatus SendWeyl(Driver *d, int stage);
+  TaskStatus RecvWeyl(Driver *d, int stage);
   TaskStatus Prolongate(Driver *pdrive, int stage);
+  TaskStatus ProlongateWeyl(Driver *pdrive, int stage);
   TaskStatus ExpRKUpdate(Driver *d, int stage);
   TaskStatus NewTimeStep(Driver *d, int stage);
   TaskStatus ApplyPhysicalBCs(Driver *d, int stage);
   TaskStatus EnforceAlgConstr(Driver *d, int stage);
 
-  TaskStatus Z4cToADM_(Driver *d, int stage);
+  TaskStatus ConvertZ4cToADM(Driver *d, int stage);
+  TaskStatus UpdateExcisionMasks(Driver *d, int stage);
   TaskStatus ADMConstraints_(Driver *d, int stage);
   TaskStatus Z4cBoundaryRHS(Driver *d, int stage);
   TaskStatus RestrictU(Driver *d, int stage);
-  TaskStatus PunctureTracker(Driver *d, int stage);
-  TaskStatus CalcWeylScalar_(Driver *d, int stage);
-  TaskStatus CalcWaveForm_(Driver *d, int stage);
+  TaskStatus RestrictWeyl(Driver *d, int stage);
+  TaskStatus TrackCompactObjects(Driver *d, int stage);
+  TaskStatus CalcWeylScalar(Driver *d, int stage);
+  TaskStatus CalcWaveForm(Driver *d, int stage);
 
   template <int NGHOST>
   TaskStatus CalcRHS(Driver *d, int stage);
@@ -241,14 +261,12 @@ class Z4c {
   void WaveExtr(MeshBlockPack *pmbp);
   void AlgConstr(MeshBlockPack *pmbp);
 
-  // amr criteria
-  Z4c_AMR *pz4c_amr{nullptr};
+  Z4c_AMR *pamr;
+  std::list<CompactObjectTracker> ptracker;
 
  private:
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Z4c
 };
-
-
 
 } // namespace z4c
 #endif //Z4C_Z4C_HPP_
