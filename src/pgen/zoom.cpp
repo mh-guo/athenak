@@ -49,6 +49,9 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zint.t_run_fac_zone_6 = pin->GetOrAddReal("zoom","t_run_fac_zone_6",zint.t_run_fac);
   zint.t_run_fac_zone_max = pin->GetOrAddReal("zoom","t_run_fac_zone_max",zint.t_run_fac);
 
+  // TODO(@mhguo): consider a new way to set these parameters such that the initial level 
+  // TODO(@mhguo): is same as the initial max level of the mesh,
+  // TODO(@mhguo): currently we need to check whether zamr.level is correct by hand
   auto pmesh = pmy_pack->pmesh;
   zamr.nlevels = pin->GetOrAddInteger("zoom","nlevels",4);
   zamr.max_level = pmesh->max_level;
@@ -202,6 +205,11 @@ void Zoom::PrintInfo()
     // print runtime information
     std::cout << "Time: runtime = " << zamr.runtime << " next time = "
               << zrun.next_time << std::endl;
+    // throw warning
+    if (zamr.zone != 0) {
+      std::cout << "### WARNING! in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "Zoom zone is not zero, this is not expected" << std::endl;
+    }
     std::cout << "==============================================" << std::endl;
   }
   return;
