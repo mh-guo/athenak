@@ -132,6 +132,7 @@ void NoInflowTorus(Mesh *pm);
 void TorusFluxes(HistoryData *pdata, Mesh *pm);
 void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
 Real ZoomNewTimeStep(Mesh* pm) {return pm->pmb_pack->pzoom->NewTimeStep(pm);}
+void TorusDiagnostic(Mesh *pm);
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
@@ -173,17 +174,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &grids = spherical_grids;
   const Real rflux =
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(torus.spin));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5)));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux, 1));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5), 1));
   int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
   Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 3.0);
   Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
   for (int i=0; i<hist_nr-2; i++) {
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-3))*rmin;
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i, 1));
   }
   if (global_variable::my_rank == 0) {
     std::cout << "Spherical grids for user-defined history:" << std::endl;
+    std::cout << "  rmin = " << rmin << " rmax = " << rmax << std::endl;
     for (auto &grid : grids) {
       std::cout << "  r = " << grid->radius << std::endl;
     }
@@ -1719,7 +1721,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   // int nflux = (is_mhd) ? 4 : 3;
-  const int nflux = 27;
+  const int nflux = 29;
 
   // set number of and names of history variables for hydro or mhd
   //  (1) mass accretion rate
@@ -1735,8 +1737,8 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   }
   // no more than 7 characters per label
   std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
-    "lx","ly","lz","lzout","phi","eint","b^2","u0","u_0","ur","uph","b0","b_0","br","bph",
-    "edothyd","edho","edotadv","edao"
+    "lx","ly","lz","lzout","phi","eint","b^2","alpha","lor","u0","u_0","ur","uph","b0",
+    "b_0","br","bph","edothyd","edho","edotadv","edao"
   };
   int gi0 = 0;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
@@ -1870,7 +1872,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
 
       Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
         t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
-        int_ie, b_sq, u0, u_0, ur, u_ph, b0, b_0, br, b_ph,
+        int_ie, b_sq, alpha, lor, u0, u_0, ur, u_ph, b0, b_0, br, b_ph,
         t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
       };
 
@@ -1885,6 +1887,201 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   for (int n=pdata->nhist; n<NHISTORY_VARIABLES; ++n) {
     pdata->hdata[n] = 0.0;
   }
+
+  TorusDiagnostic(pm);
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+// Function for computing monopole diagnostic at constant spherical KS radius
+
+void TorusDiagnostic(Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+
+  // extract BH parameters
+  bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+  Real &spin = pmbp->pcoord->coord_data.bh_spin;
+  Real rh = 1.0 + sqrt(1.-SQR(spin));
+
+  // construct spherical grid
+  int nlevel = 10;
+  SphericalGrid *psph = new SphericalGrid(pmbp, nlevel, rh, 1);
+
+  // capture variables
+  auto &w0_ = pm->pmb_pack->pmhd->w0;
+  auto &bcc_ = pmbp->pmhd->bcc0;
+  int nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+
+  // interpolate cell-centered magnetic fields and store
+  // NOTE(@pdmullen): We later reuse the interp_vals array to interpolate primitives.
+  // Therefore, we must stow interpolated field components.
+  psph->InterpolateToSphere(3, bcc_);
+  DualArray2D<Real> interpolated_bcc;
+  Kokkos::realloc(interpolated_bcc, psph->nangles, 3);
+  Kokkos::deep_copy(interpolated_bcc, psph->interp_vals);
+  interpolated_bcc.template modify<DevExeSpace>();
+  interpolated_bcc.template sync<HostMemSpace>();
+
+  // interpolate primitives
+  psph->InterpolateToSphere(nvars, w0_);
+
+  // calculate diagnostics
+  std::vector<Real> torus_diag_0(psph->nangles);
+  std::vector<Real> torus_diag_1(psph->nangles);
+  std::vector<Real> torus_diag_2(psph->nangles);
+  std::vector<Real> torus_diag_3(psph->nangles);
+  std::vector<Real> torus_diag_4(psph->nangles);
+  std::vector<Real> torus_diag_5(psph->nangles);
+  std::vector<Real> torus_diag_6(psph->nangles);
+  std::vector<Real> torus_diag_7(psph->nangles);
+  std::vector<Real> torus_diag_8(psph->nangles);
+  for (int n=0; n<psph->nangles; ++n) {
+    // extract coordinate data at this angle
+    Real r = psph->radius;
+    Real theta = psph->polar_pos.h_view(n,0);
+    Real x1 = psph->interp_coord.h_view(n,0);
+    Real x2 = psph->interp_coord.h_view(n,1);
+    Real x3 = psph->interp_coord.h_view(n,2);
+    Real glower[4][4], gupper[4][4];
+    ComputeMetricAndInverse(x1,x2,x3,flat,spin,glower,gupper);
+
+    // extract interpolated primitives
+    Real &int_dn = psph->interp_vals.h_view(n,IDN);
+    Real &int_vx = psph->interp_vals.h_view(n,IVX);
+    Real &int_vy = psph->interp_vals.h_view(n,IVY);
+    Real &int_vz = psph->interp_vals.h_view(n,IVZ);
+    Real &int_ie = psph->interp_vals.h_view(n,IEN);
+
+    // extract interpolated field components
+    Real &int_bx = interpolated_bcc.h_view(n,IBX);
+    Real &int_by = interpolated_bcc.h_view(n,IBY);
+    Real &int_bz = interpolated_bcc.h_view(n,IBZ);
+
+    // Compute interpolated u^\mu in CKS
+    Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
+             2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
+             2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
+    Real alpha = sqrt(-1.0/gupper[0][0]);
+    Real gamma = sqrt(1.0 + q);
+    Real u0 = gamma/alpha;
+    Real u1 = int_vx - alpha * gamma * gupper[0][1];
+    Real u2 = int_vy - alpha * gamma * gupper[0][2];
+    Real u3 = int_vz - alpha * gamma * gupper[0][3];
+
+    // Lower vector indices
+    Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
+    Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
+    Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
+
+    // Calculate 4-magnetic field
+    Real b0 = u_1*int_bx + u_2*int_by + u_3*int_bz;
+    Real b1 = (int_bx + b0 * u1) / u0;
+    Real b2 = (int_by + b0 * u2) / u0;
+    Real b3 = (int_bz + b0 * u3) / u0;
+
+    // Transform CKS 4-velocity and 4-magnetic field to spherical KS
+    Real a2 = SQR(spin);
+    Real rad2 = SQR(x1)+SQR(x2)+SQR(x3);
+    Real r2 = SQR(r);
+    Real sth = sin(theta);
+    Real drdx = r*x1/(2.0*r2 - rad2 + a2);
+    Real drdy = r*x2/(2.0*r2 - rad2 + a2);
+    Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
+    Real dphdx = (-x2/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdx);
+    Real dphdy = ( x1/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdy);
+    Real dphdz = (spin/(r2 + a2)*drdz);
+    // r,phi component of 4-velocity in spherical KS
+    Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
+    Real uph = dphdx*u1 + dphdy*u2 + dphdz*u3;
+    // r,phi component of 4-magnetic field in spherical KS
+    Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+    Real bph = dphdx*b1 + dphdy*b2 + dphdz*b3;
+
+    // integration params
+    Real sqrtmdet = (r2+SQR(spin*cos(theta)));
+
+    // flags
+    Real on = (int_dn != 0.0)? 1.0 : 0.0; // check if angle is on this rank
+    Real is_out = (ur>0.0)? 1.0 : 0.0;
+
+    // Compute field rotation rate (in units of rotation rate of horizon)
+    // Should give value ~1/2
+    Real omega = 0.0;
+    if (x3 > 0) {omega = ((uph*br - ur*bph)/fmax(u0*br - ur*b0, 1.0e-12))/(0.5*spin/rh);}
+
+    // store field rotation rate at theta, phi locations
+    torus_diag_0[n] = int_dn*on;
+    torus_diag_1[n] = int_vx*on;
+    torus_diag_2[n] = int_vy*on;
+    torus_diag_3[n] = int_vz*on;
+    torus_diag_4[n] = int_ie*on;
+    torus_diag_5[n] = sqrtmdet*on;
+    torus_diag_6[n] = gamma*on;
+    torus_diag_7[n] = u0*on;
+    torus_diag_8[n] = ur*on;
+  }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_0.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_1.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_2.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_3.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_4.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_5.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_6.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_7.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, torus_diag_8.data(), psph->nangles,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  // root process opens output file and writes out diagnostics
+  if (global_variable::my_rank == 0) {
+    std::string fname;
+    fname.assign("Torus");
+    // add pmesh ncycles
+    fname.append("-");
+    fname.append(std::to_string(pm->ncycle));
+    fname.append("-diag.dat");
+    FILE *pfile;
+
+    if ((pfile = std::fopen(fname.c_str(), "w")) == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Error output file could not be opened" <<std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    std::fprintf(pfile, "# 0=theta  1=phi 2=domega 3=dens 4=vx  5=vy  6=vz  7=ie 8=sqrtmdet 9=gamma 10=u0 11=ur");
+    std::fprintf(pfile, "\n");
+
+    // write diagnostics
+    for (int n=0; n<psph->nangles; ++n) {
+      std::fprintf(pfile, "%12.5e ", psph->polar_pos.h_view(n,0));
+      std::fprintf(pfile, "%12.5e ", psph->polar_pos.h_view(n,1));
+      std::fprintf(pfile, "%12.5e ", psph->solid_angles.h_view(n)); // domega
+      std::fprintf(pfile, "%12.5e ", torus_diag_0[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_1[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_2[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_3[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_4[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_5[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_6[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_7[n]);
+      std::fprintf(pfile, "%12.5e ", torus_diag_8[n]);
+      std::fprintf(pfile, "\n");
+    }
+    std::fclose(pfile);
+  }
+
+  // delete SphericalGrid object
+  delete psph;
 
   return;
 }

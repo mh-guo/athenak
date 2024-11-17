@@ -71,6 +71,7 @@ class Zoom
   bool zoom_dt;            // flag for zoom time step
   bool fix_efield;         // flag for fixing electric field
   int mzoom;               // number of zoom meshblocks
+  int nleaf;               // number of zoom meshblocks on each level
   int nvars;               // number of variables
   Real r_in;               // radius of iner boundary
   Real d_zoom;             // density within inner boundary
@@ -86,6 +87,7 @@ class Zoom
   
   DvceArray5D<Real> coarse_u0;  // coarse conserved variables
   DvceArray5D<Real> coarse_w0;  // coarse primitive variables
+  // DvceArray5D<Real> coarse_wuh; // coarse primitive variables from hydro conserved variables
 
   // following only used for time-evolving flow
   DvceEdgeFld4D<Real> efld;   // edge-centered electric fields (fluxes of B)
@@ -107,7 +109,9 @@ class Zoom
   void DumpRestartFile();
   void RefineCondition();
   void UpdateVariables();
+  void UpdateHydroVariables(int zm, int m);
   void SyncVariables();
+  void CommunicateVariables();
   void ApplyVariables();
   void FixEField(DvceEdgeFld4D<Real> emf);
   void ApplyEField(DvceEdgeFld4D<Real> emf);

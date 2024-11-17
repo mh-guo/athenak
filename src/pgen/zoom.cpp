@@ -13,6 +13,7 @@
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
+#include "eos/ideal_c2p_hyd.hpp"
 #include "eos/ideal_c2p_mhd.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
@@ -65,7 +66,10 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zrun.next_time = 0.0;
   SetInterval();
   
-  mzoom = 8*zamr.nlevels;
+  nleaf = 2;
+  if (pmesh->two_d) nleaf = 4;
+  if (pmesh->three_d) nleaf = 8;
+  mzoom = nleaf*zamr.nlevels;
   nvars = pin->GetOrAddInteger("zoom","nvars",5);
   // TODO(@mhguo): move to a new struct?
   r_in = pin->GetReal("zoom","r_in");
@@ -74,7 +78,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   efld_fac = pin->GetOrAddReal("zoom","efld_fac",1.0);
 
   // allocate memory for primitive variables
-  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &indcs = pmesh->mb_indcs;
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
   int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
@@ -265,7 +269,7 @@ void Zoom::BoundaryConditions()
   auto cw0 = coarse_w0;
 
   Real rzoom = zamr.radius;
-  int zid = 8*(zamr.zone-1);
+  int zid = nleaf*(zamr.zone-1);
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
   par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
@@ -355,7 +359,9 @@ void Zoom::AMR() {
     }
     if (zoom_bcs && zamr.direction < 0) {
       UpdateVariables();
+      // TODO(@mhguo): only store the data needed on this rank instead of holding all
       SyncVariables();
+      CommunicateVariables();;
     }
     RefineCondition();
     zamr.level += zamr.direction;
@@ -477,7 +483,8 @@ void Zoom::UpdateVariables() {
     w = pmy_pack->pmhd->w0;
   }
   auto cu = coarse_u0, cw = coarse_w0;
-  int zid = 8*zamr.zone;
+  int zid = nleaf*zamr.zone;
+  int nlf = nleaf;
   Real rzoom = zamr.radius;
   int nvar = nvars;
   Real rin = r_in;
@@ -525,6 +532,7 @@ void Zoom::UpdateVariables() {
                   + w(m,n,finek+1,finej,  finei) + w(m,n,finek+1,finej,  finei+1)
                   + w(m,n,finek+1,finej+1,finei) + w(m,n,finek+1,finej+1,finei+1));
         });
+        UpdateHydroVariables(zm, m);
         if (pmy_pack->pmhd != nullptr && fix_efield) {
           DvceEdgeFld4D<Real> emf = pmy_pack->pmhd->efld;
           auto e1 = efld.x1e;
@@ -549,7 +557,7 @@ void Zoom::UpdateVariables() {
             Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
             Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
             if (zid>0 && rad < rzoom) {
-              int zmp = zm-8;
+              int zmp = zm-nlf;
               int prei = finei - cnx1 * x1l;
               int prej = finej - cnx2 * x2l;
               int prek = finek - cnx3 * x3l;
@@ -563,11 +571,137 @@ void Zoom::UpdateVariables() {
       }
     }
   }
-  // if (zid != 8*(zamr.zone+1)) {
+  // if (zid != nleaf*(zamr.zone+1)) {
   //   std::cerr << "Error: Zoom::UpdateVariables() failed: zid = " << zid <<
   //                " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
   //   std::exit(1);
   // }
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::UpdateHydroVariables()
+//! \brief User-defined update of variables
+
+// TODO(@mhguo): only for GR now, need to implement for Newtonian
+void Zoom::UpdateHydroVariables(int zm, int m) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &is = indcs.is;  int &ie  = indcs.ie;
+  int &js = indcs.js;  int &je  = indcs.je;
+  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int &cis = indcs.cis;  int &cie  = indcs.cie;
+  int &cjs = indcs.cjs;  int &cje  = indcs.cje;
+  int &cks = indcs.cks;  int &cke  = indcs.cke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
+  int nmb = pmy_pack->nmb_thispack;
+  int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
+  DvceArray5D<Real> u0_, w0_;
+  auto peos = (pmy_pack->pmhd != nullptr)? pmy_pack->pmhd->peos : pmy_pack->phydro->peos;
+  auto eos = peos->eos_data;
+  if (pmy_pack->phydro != nullptr) {
+    u0_ = pmy_pack->phydro->u0;
+    w0_ = pmy_pack->phydro->w0;
+  } else if (pmy_pack->pmhd != nullptr) {
+    u0_ = pmy_pack->pmhd->u0;
+    w0_ = pmy_pack->pmhd->w0;
+  }
+  auto cw = coarse_w0;
+  Real &x1min = size.h_view(m).x1min;
+  Real &x1max = size.h_view(m).x1max;
+  Real &x2min = size.h_view(m).x2min;
+  Real &x2max = size.h_view(m).x2max;
+  Real &x3min = size.h_view(m).x3min;
+  Real &x3max = size.h_view(m).x3max;
+  auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
+  auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
+  par_for("zoom-update-cwu",DevExeSpace(), cks,cke, cjs,cje, cis,cie,
+  KOKKOS_LAMBDA(const int ck, const int cj, const int ci) {
+    int fi = 2*ci - cis;  // correct when cis=is
+    int fj = 2*cj - cjs;  // correct when cjs=js
+    int fk = 2*ck - cks;  // correct when cks=ks
+    cw(zm,IDN,ck,cj,ci) = 0.0;
+    cw(zm,IM1,ck,cj,ci) = 0.0;
+    cw(zm,IM2,ck,cj,ci) = 0.0;
+    cw(zm,IM3,ck,cj,ci) = 0.0;
+    cw(zm,IEN,ck,cj,ci) = 0.0;
+    Real glower[4][4], gupper[4][4];
+    // Step 1: compute coarse-grained hydro conserved variables
+    for (int ii=0; ii<2; ++ii) {
+      for (int jj=0; jj<2; ++jj) {
+        for (int kk=0; kk<2; ++kk) {
+          Real x1v = CellCenterX(fi+ii-is, nx1, x1min, x1max);
+          Real x2v = CellCenterX(fj+jj-js, nx2, x2min, x2max);
+          Real x3v = CellCenterX(fk+kk-ks, nx3, x3min, x3max);
+          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+
+          // Load single state of primitive variables
+          HydPrim1D w;
+          w.d  = w0_(m,IDN,fk+kk,fj+jj,fi+ii);
+          w.vx = w0_(m,IVX,fk+kk,fj+jj,fi+ii);
+          w.vy = w0_(m,IVY,fk+kk,fj+jj,fi+ii);
+          w.vz = w0_(m,IVZ,fk+kk,fj+jj,fi+ii);
+          w.e  = w0_(m,IEN,fk+kk,fj+jj,fi+ii);
+
+          // call p2c function
+          HydCons1D u;
+          SingleP2C_IdealGRHyd(glower, gupper, w, eos.gamma, u);
+          // store conserved quantities using cw
+          cw(zm,IDN,ck,cj,ci) += 0.125*u.d;
+          cw(zm,IM1,ck,cj,ci) += 0.125*u.mx;
+          cw(zm,IM2,ck,cj,ci) += 0.125*u.my;
+          cw(zm,IM3,ck,cj,ci) += 0.125*u.mz;
+          cw(zm,IEN,ck,cj,ci) += 0.125*u.e;
+        }
+      }
+    }
+    // Step 2: convert coarse-grained hydro conserved variables to primitive variables
+    // Shall we add excision?
+    // load single state conserved variables
+    HydCons1D u;
+    u.d  = cw(zm,IDN,ck,cj,ci);
+    u.mx = cw(zm,IM1,ck,cj,ci);
+    u.my = cw(zm,IM2,ck,cj,ci);
+    u.mz = cw(zm,IM3,ck,cj,ci);
+    u.e  = cw(zm,IEN,ck,cj,ci);
+
+    // Extract components of metric
+    Real x1v = CellCenterX(ci-cis, cnx1, x1min, x1max);
+    Real x2v = CellCenterX(cj-cjs, cnx2, x2min, x2max);
+    Real x3v = CellCenterX(ck-cks, cnx3, x3min, x3max);
+    ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+
+    HydCons1D u_sr;
+    Real s2;
+    TransformToSRHyd(u,glower,gupper,s2,u_sr);
+    HydPrim1D w;
+    bool dfloor_used=false, efloor_used=false;
+    bool vceiling_used=false, c2p_failure=false;
+    int iter_used=0;
+    SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
+                      dfloor_used, efloor_used, c2p_failure, iter_used);
+    // apply velocity ceiling if necessary
+    Real tmp = glower[1][1]*SQR(w.vx)
+              + glower[2][2]*SQR(w.vy)
+              + glower[3][3]*SQR(w.vz)
+              + 2.0*glower[1][2]*w.vx*w.vy + 2.0*glower[1][3]*w.vx*w.vz
+              + 2.0*glower[2][3]*w.vy*w.vz;
+    Real lor = sqrt(1.0+tmp);
+    if (lor > eos.gamma_max) {
+      vceiling_used = true;
+      Real factor = sqrt((SQR(eos.gamma_max)-1.0)/(SQR(lor)-1.0));
+      w.vx *= factor;
+      w.vy *= factor;
+      w.vz *= factor;
+    }
+    cw(zm,IDN,ck,cj,ci) = w.d;
+    cw(zm,IVX,ck,cj,ci) = w.vx;
+    cw(zm,IVY,ck,cj,ci) = w.vy;
+    cw(zm,IVZ,ck,cj,ci) = w.vz;
+    cw(zm,IEN,ck,cj,ci) = w.e;
+  });
 
   return;
 }
@@ -595,8 +729,8 @@ void Zoom::SyncVariables() {
   int e2_slice_size = (n_ccells3+1) * n_ccells2 * (n_ccells1+1);
   int e3_slice_size = n_ccells3 * (n_ccells2+1) * (n_ccells1+1);
   
-  int zid = 8*zamr.zone;
-  for (int leaf=0; leaf<8; ++leaf) {
+  int zid = nleaf*zamr.zone;
+  for (int leaf=0; leaf<nleaf; ++leaf) {
     // determine which rank is the "root" rank
     int zm = zid + leaf;
     int x1r = (leaf%2 == 1); int x2r = (leaf%4 > 1); int x3r = (leaf > 3);
@@ -667,6 +801,69 @@ void Zoom::SyncVariables() {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void Zoom::CommunicateVariables()
+//! \brief Communicate variables between different meshblocks
+
+// TODO(@mhguo): add emf
+void Zoom::CommunicateVariables() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &ng = indcs.ng;
+  int ng1 = ng - 1;
+  int &is = indcs.is;  int &ie  = indcs.ie;
+  int &js = indcs.js;  int &je  = indcs.je;
+  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int &cis = indcs.cis;  int &cie  = indcs.cie;
+  int &cjs = indcs.cjs;  int &cje  = indcs.cje;
+  int &cks = indcs.cks;  int &cke  = indcs.cke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
+  auto u = u0, w = w0;
+  auto cu = coarse_u0, cw = coarse_w0;
+  int nvar = nvars;
+  int zid = nleaf*zamr.zone;
+  for (int leaf=0; leaf<nleaf; ++leaf) {
+    // determine which rank is the "root" rank
+    int zm = zid + leaf;
+    int x1r = (leaf%2 == 1); int x2r = (leaf%4 > 1); int x3r = (leaf > 3);
+    for (int sleaf=0; sleaf<nleaf; ++sleaf) { // source leaf index
+      if (leaf == sleaf) continue;
+      int sm = zid + sleaf;
+      int sx1r = (sleaf%2 == 1); int sx2r = (sleaf%4 > 1); int sx3r = (sleaf > 3);
+      int si = (x1r == sx1r)? 0 : (x1r? nx1 : -nx1);
+      int sj = (x2r == sx2r)? 0 : (x2r? nx2 : -nx2);
+      int sk = (x3r == sx3r)? 0 : (x3r? nx3 : -nx3);
+      int il = (x1r == sx1r)? is : (x1r? (is - ng) : (ie + 1));
+      int iu = (x1r == sx1r)? ie : (x1r? (is - 1) : (ie + ng));
+      int jl = (x2r == sx2r)? js : (x2r? (js - ng) : (je + 1));
+      int ju = (x2r == sx2r)? je : (x2r? (js - 1) : (je + ng));
+      int kl = (x3r == sx3r)? ks : (x3r? (ks - ng) : (ke + 1));
+      int ku = (x3r == sx3r)? ke : (x3r? (ks - 1) : (ke + ng));
+      par_for("zoom-comm",DevExeSpace(), 0, nvar-1, kl, ku, jl, ju, il, iu,
+      KOKKOS_LAMBDA(const int n, const int k, const int j, const int i) {
+        u(zm,n,k,j,i) = u(sm,n,k+sk,j+sj,i+si);
+        w(zm,n,k,j,i) = w(sm,n,k+sk,j+sj,i+si);
+      });
+      si = (x1r == sx1r)? 0 : (x1r? cnx1 : -cnx1);
+      sj = (x2r == sx2r)? 0 : (x2r? cnx2 : -cnx2);
+      sk = (x3r == sx3r)? 0 : (x3r? cnx3 : -cnx3);
+      il = (x1r == sx1r)? cis : (x1r? (cis - ng) : (cie + 1));
+      iu = (x1r == sx1r)? cie : (x1r? (cis - 1) : (cie + ng));
+      jl = (x2r == sx2r)? cjs : (x2r? (cjs - ng) : (cje + 1));
+      ju = (x2r == sx2r)? cje : (x2r? (cjs - 1) : (cje + ng));
+      kl = (x3r == sx3r)? cks : (x3r? (cks - ng) : (cke + 1));
+      ku = (x3r == sx3r)? cke : (x3r? (cks - 1) : (cke + ng));
+      par_for("zoom-comm-c",DevExeSpace(), 0, nvar-1, kl, ku, jl, ju, il, iu,
+      KOKKOS_LAMBDA(const int n, const int k, const int j, const int i) {
+        cu(zm,n,k,j,i) = cu(sm,n,k+sk,j+sj,i+si);
+        cw(zm,n,k,j,i) = cw(sm,n,k+sk,j+sj,i+si);
+      });
+    }
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void Zoom::ApplyVariables()
 //! \brief Apply finer level variables to coarser level
 
@@ -696,7 +893,7 @@ void Zoom::ApplyVariables() {
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
   auto u0_ = u0, w0_ = w0;
-  int zid = 8*zamr.zone;
+  int zid = nleaf*zamr.zone;
   for (int m=0; m<nmb; ++m) {
     if (pmy_pack->pmesh->lloc_eachmb[m+mbs].level == zamr.level) {
       Real &x1min = size.h_view(m).x1min;
@@ -773,7 +970,7 @@ void Zoom::ApplyVariables() {
       }
     }
   }
-  // if (zid != 8*(zamr.zone+1)) {
+  // if (zid != nleaf*(zamr.zone+1)) {
   //   std::cerr << "Error: Zoom::ApplyVariables() failed: zid = " << zid <<
   //                " zone = " << zamr.zone << " level = " << zamr.level << std::endl;
   //   std::exit(1);
@@ -920,7 +1117,7 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
   auto ef3 = emf.x3e;
   Real rzoom = zamr.radius;
 
-  int zid = 8*(zamr.zone-1);
+  int zid = nleaf*(zamr.zone-1);
   Real fac = efld_fac; //(rzoom-rad)/rzoom;
   par_for("fix-emf", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1 ,is-1, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
