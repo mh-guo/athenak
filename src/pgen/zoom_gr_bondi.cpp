@@ -173,17 +173,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &grids = spherical_grids;
   const Real rflux =
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(bondi.spin));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5)));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux, 1));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5), 1));
   int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
   Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 3.0);
   Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
   for (int i=0; i<hist_nr-2; i++) {
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-3))*rmin;
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i, 1));
   }
   if (global_variable::my_rank == 0) {
     std::cout << "Spherical grids for user-defined history:" << std::endl;
+    std::cout << "  rmin = " << rmin << " rmax = " << rmax << std::endl;
     for (auto &grid : grids) {
       std::cout << "  r = " << grid->radius << std::endl;
     }
