@@ -248,6 +248,7 @@ void Zoom::BoundaryConditions()
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
   int nmb = pmy_pack->nmb_thispack;
+  bool is_gr = pmy_pack->pcoord->is_general_relativistic;
 
   // Select either Hydro or MHD
   Real gamma = 0.0;
@@ -312,8 +313,6 @@ void Zoom::BoundaryConditions()
         w0_(m,IM2,k,j,i) = cw0(zm,IM2,ck,cj,ci);
         w0_(m,IM3,k,j,i) = cw0(zm,IM3,ck,cj,ci);
         w0_(m,IEN,k,j,i) = cw0(zm,IEN,ck,cj,ci);
-        Real glower[4][4], gupper[4][4];
-        ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
 
         // Load single state of primitive variables
         MHDPrim1D w;
@@ -330,7 +329,14 @@ void Zoom::BoundaryConditions()
 
         // call p2c function
         HydCons1D u;
-        SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+        if (is_gr) {
+          Real glower[4][4], gupper[4][4];
+          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+          SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+        } else {
+          SingleP2C_IdealMHD(w, u);
+        }
+        
 
         // store conserved quantities in 3D array
         u0_(m,IDN,k,j,i) = u.d;
@@ -470,7 +476,6 @@ void Zoom::UpdateVariables() {
   int &cis = indcs.cis;  int &cie  = indcs.cie;
   int &cjs = indcs.cjs;  int &cje  = indcs.cje;
   int &cks = indcs.cks;  int &cke  = indcs.cke;
-  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
   int nmb = pmy_pack->nmb_thispack;
   int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
@@ -588,17 +593,16 @@ void Zoom::UpdateVariables() {
 void Zoom::UpdateHydroVariables(int zm, int m) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
-  int &is = indcs.is;  int &ie  = indcs.ie;
-  int &js = indcs.js;  int &je  = indcs.je;
-  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int &is = indcs.is;
+  int &js = indcs.js;
+  int &ks = indcs.ks;
   int &cis = indcs.cis;  int &cie  = indcs.cie;
   int &cjs = indcs.cjs;  int &cje  = indcs.cje;
   int &cks = indcs.cks;  int &cke  = indcs.cke;
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
-  int nmb = pmy_pack->nmb_thispack;
-  int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
   DvceArray5D<Real> u0_, w0_;
+  bool is_gr = pmy_pack->pcoord->is_general_relativistic;
   auto peos = (pmy_pack->pmhd != nullptr)? pmy_pack->pmhd->peos : pmy_pack->phydro->peos;
   auto eos = peos->eos_data;
   if (pmy_pack->phydro != nullptr) {
@@ -632,11 +636,6 @@ void Zoom::UpdateHydroVariables(int zm, int m) {
     for (int ii=0; ii<2; ++ii) {
       for (int jj=0; jj<2; ++jj) {
         for (int kk=0; kk<2; ++kk) {
-          Real x1v = CellCenterX(fi+ii-is, nx1, x1min, x1max);
-          Real x2v = CellCenterX(fj+jj-js, nx2, x2min, x2max);
-          Real x3v = CellCenterX(fk+kk-ks, nx3, x3min, x3max);
-          ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
-
           // Load single state of primitive variables
           HydPrim1D w;
           w.d  = w0_(m,IDN,fk+kk,fj+jj,fi+ii);
@@ -647,7 +646,16 @@ void Zoom::UpdateHydroVariables(int zm, int m) {
 
           // call p2c function
           HydCons1D u;
-          SingleP2C_IdealGRHyd(glower, gupper, w, eos.gamma, u);
+          if (is_gr) {
+            Real x1v = CellCenterX(fi+ii-is, nx1, x1min, x1max);
+            Real x2v = CellCenterX(fj+jj-js, nx2, x2min, x2max);
+            Real x3v = CellCenterX(fk+kk-ks, nx3, x3min, x3max);
+            ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+            SingleP2C_IdealGRHyd(glower, gupper, w, eos.gamma, u);
+          } else {
+            SingleP2C_IdealHyd(w, u);
+          }
+          
           // store conserved quantities using cw
           cw(zm,IDN,ck,cj,ci) += 0.125*u.d;
           cw(zm,IM1,ck,cj,ci) += 0.125*u.mx;
@@ -667,34 +675,38 @@ void Zoom::UpdateHydroVariables(int zm, int m) {
     u.mz = cw(zm,IM3,ck,cj,ci);
     u.e  = cw(zm,IEN,ck,cj,ci);
 
-    // Extract components of metric
-    Real x1v = CellCenterX(ci-cis, cnx1, x1min, x1max);
-    Real x2v = CellCenterX(cj-cjs, cnx2, x2min, x2max);
-    Real x3v = CellCenterX(ck-cks, cnx3, x3min, x3max);
-    ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
-
-    HydCons1D u_sr;
-    Real s2;
-    TransformToSRHyd(u,glower,gupper,s2,u_sr);
     HydPrim1D w;
-    bool dfloor_used=false, efloor_used=false;
-    bool vceiling_used=false, c2p_failure=false;
-    int iter_used=0;
-    SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
-                      dfloor_used, efloor_used, c2p_failure, iter_used);
-    // apply velocity ceiling if necessary
-    Real tmp = glower[1][1]*SQR(w.vx)
-              + glower[2][2]*SQR(w.vy)
-              + glower[3][3]*SQR(w.vz)
-              + 2.0*glower[1][2]*w.vx*w.vy + 2.0*glower[1][3]*w.vx*w.vz
-              + 2.0*glower[2][3]*w.vy*w.vz;
-    Real lor = sqrt(1.0+tmp);
-    if (lor > eos.gamma_max) {
-      vceiling_used = true;
-      Real factor = sqrt((SQR(eos.gamma_max)-1.0)/(SQR(lor)-1.0));
-      w.vx *= factor;
-      w.vy *= factor;
-      w.vz *= factor;
+    if (is_gr) {
+      // Extract components of metric
+      Real x1v = CellCenterX(ci-cis, cnx1, x1min, x1max);
+      Real x2v = CellCenterX(cj-cjs, cnx2, x2min, x2max);
+      Real x3v = CellCenterX(ck-cks, cnx3, x3min, x3max);
+      ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+
+      HydCons1D u_sr;
+      Real s2;
+      TransformToSRHyd(u,glower,gupper,s2,u_sr);
+      bool dfloor_used=false, efloor_used=false;
+      bool c2p_failure=false;
+      int iter_used=0;
+      SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
+                        dfloor_used, efloor_used, c2p_failure, iter_used);
+      // apply velocity ceiling if necessary
+      Real tmp = glower[1][1]*SQR(w.vx)
+                + glower[2][2]*SQR(w.vy)
+                + glower[3][3]*SQR(w.vz)
+                + 2.0*glower[1][2]*w.vx*w.vy + 2.0*glower[1][3]*w.vx*w.vz
+                + 2.0*glower[2][3]*w.vy*w.vz;
+      Real lor = sqrt(1.0+tmp);
+      if (lor > eos.gamma_max) {
+        Real factor = sqrt((SQR(eos.gamma_max)-1.0)/(SQR(lor)-1.0));
+        w.vx *= factor;
+        w.vy *= factor;
+        w.vz *= factor;
+      }
+    } else {
+      bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+      SingleC2P_IdealHyd(u, eos, w, dfloor_used, efloor_used, tfloor_used);
     }
     cw(zm,IDN,ck,cj,ci) = w.d;
     cw(zm,IVX,ck,cj,ci) = w.vx;
@@ -807,9 +819,7 @@ void Zoom::SyncVariables() {
 // TODO(@mhguo): add emf
 void Zoom::CommunicateVariables() {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
-  auto &size = pmy_pack->pmb->mb_size;
   int &ng = indcs.ng;
-  int ng1 = ng - 1;
   int &is = indcs.is;  int &ie  = indcs.ie;
   int &js = indcs.js;  int &je  = indcs.je;
   int &ks = indcs.ks;  int &ke  = indcs.ke;
