@@ -1839,10 +1839,17 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Real drdx = r*x1/(2.0*r2 - rad2 + a2);
       Real drdy = r*x2/(2.0*r2 - rad2 + a2);
       Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
+      Real dphdx = (-x2/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdx);
+      Real dphdy = ( x1/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdy);
+      Real dphdz = (spin/(r2 + a2)*drdz);
       // contravariant r component of 4-velocity
       Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
       // contravariant r component of 4-magnetic field (returns zero if not MHD)
       Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+      // phi component of 4-velocity in spherical KS
+      Real uph = dphdx*u1 + dphdy*u2 + dphdz*u3;
+      // phi component of 4-magnetic field in spherical KS
+      Real bph = dphdx*b1 + dphdy*b2 + dphdz*b3;
       // covariant phi component of 4-velocity
       Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
       // covariant phi component of 4-magnetic field (returns zero if not MHD)
@@ -1872,7 +1879,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
 
       Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
         t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
-        int_ie, b_sq, alpha, lor, u0, u_0, ur, u_ph, b0, b_0, br, b_ph,
+        int_ie, b_sq, alpha, lor, u0, u_0, ur, uph, b0, b_0, br, bph,
         t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
       };
 
@@ -1888,7 +1895,8 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
     pdata->hdata[n] = 0.0;
   }
 
-  TorusDiagnostic(pm);
+  // TODO(@mhguo): either remove this or set a flag to enable it
+  // TorusDiagnostic(pm);
 
   return;
 }

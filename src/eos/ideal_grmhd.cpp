@@ -16,6 +16,7 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "pgen/zoom.hpp"
 
 //----------------------------------------------------------------------------------------
 // ctor: also calls EOS base class constructor
@@ -57,6 +58,8 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
   auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
   auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
   auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
+  bool use_zoom = (pmy_pack->pzoom != nullptr && pmy_pack->pzoom->is_set);
+  Real rzoom = (use_zoom) ? pmy_pack->pzoom->zamr.radius : 0.0;
 
   const int ni   = (iu - il + 1);
   const int nji  = (ju - jl + 1)*ni;
@@ -172,6 +175,19 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       if (vceiling_used) {sumv++;}
       if (c2p_failure) {sumf++;}
       max_it = (iter_used > max_it) ? iter_used : max_it;
+
+      // TODO: still doing SingleC2P_IdealSRMHD() now, should optimize this
+      if (use_zoom && rzoom > 1.0) {
+        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+        if (rad < rzoom) {
+          // revert to previous state if in zoom mask region
+          w.d = prim(m,IDN,k,j,i);
+          w.vx = prim(m,IVX,k,j,i);
+          w.vy = prim(m,IVY,k,j,i);
+          w.vz = prim(m,IVZ,k,j,i);
+          w.e = prim(m,IEN,k,j,i);
+        }
+      }
 
       // store primitive state in 3D array
       prim(m,IDN,k,j,i) = w.d;

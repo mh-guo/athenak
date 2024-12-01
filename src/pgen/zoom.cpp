@@ -30,7 +30,8 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     w0("prim",1,1,1,1,1),
     coarse_u0("ccons",1,1,1,1,1),
     coarse_w0("cprim",1,1,1,1,1),
-    efld("efld",1,1,1,1) {
+    efld("efld",1,1,1,1),
+    delta_efld("delta_efld",1,1,1,1) {
   is_set = pin->GetOrAddBoolean("zoom","is_set",false);
   read_rst = pin->GetOrAddBoolean("zoom","read_rst",true);
   write_rst = pin->GetOrAddBoolean("zoom","write_rst",true);
@@ -61,6 +62,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zamr.zone = zamr.max_level - zamr.level;
   zamr.direction = pin->GetOrAddInteger("zoom","direction",-1);
   zamr.just_zoomed = false;
+  zamr.first_emf = false;
   zamr.dump_rst = false;
   zrun.id = 0;
   zrun.next_time = 0.0;
@@ -75,7 +77,14 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   r_in = pin->GetReal("zoom","r_in");
   d_zoom = pin->GetOrAddReal("zoom","d_zoom",(FLT_MIN));
   p_zoom = pin->GetOrAddReal("zoom","p_zoom",(FLT_MIN));
-  efld_fac = pin->GetOrAddReal("zoom","efld_fac",1.0);
+  nflux = 3;
+  emf_flag = 0;
+  emf_f0 = 1.0;
+  emf_f1 = 0.0;
+  if (fix_efield) {
+    emf_flag = pin->GetInteger("zoom","emf_flag");
+    emf_f1 = pin->GetReal("zoom","emf_f1");
+  }
 
   // allocate memory for primitive variables
   auto &indcs = pmesh->mb_indcs;
@@ -94,6 +103,29 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   Kokkos::realloc(efld.x1e, mzoom, n_ccells3+1, n_ccells2+1, n_ccells1);
   Kokkos::realloc(efld.x2e, mzoom, n_ccells3+1, n_ccells2, n_ccells1+1);
   Kokkos::realloc(efld.x3e, mzoom, n_ccells3, n_ccells2+1, n_ccells1+1);
+
+  // allocate delta electric fields
+  Kokkos::realloc(delta_efld.x1e, mzoom, n_ccells3+1, n_ccells2+1, n_ccells1);
+  Kokkos::realloc(delta_efld.x2e, mzoom, n_ccells3+1, n_ccells2, n_ccells1+1);
+  Kokkos::realloc(delta_efld.x3e, mzoom, n_ccells3, n_ccells2+1, n_ccells1+1);
+
+  Kokkos::realloc(zoom_fluxes, 2, zamr.nlevels, nflux);
+  for (int i = 0; i < 2; i++) {
+    for (int j = 0; j < zamr.nlevels; j++) {
+      for (int k = 0; k < nflux; k++) {
+        zoom_fluxes(i,j,k) = 0.0;
+      }
+    }
+  }
+  // TODO(@mhguo): only do this when needed, it is slow
+  // construct spherical grids
+  int anglevel = 10;
+  int ninterp = 1;
+  auto &grids = spherical_grids;
+  for (int i = 0; i < zamr.nlevels; i++) {
+    Real rzoom = 0.9*static_cast<Real>(1<<i); // 2^i*0.9 to avoid active zone
+    grids.push_back(std::make_unique<SphericalGrid>(pmy_pack, anglevel, rzoom, ninterp));
+  }
 
   Initialize();
 
@@ -124,6 +156,9 @@ void Zoom::Initialize()
   auto e1 = efld.x1e;
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
+  auto de1 = delta_efld.x1e;
+  auto de2 = delta_efld.x2e;
+  auto de3 = delta_efld.x3e;
   bool is_mhd = (pmy_pack->pmhd != nullptr);
   auto peos = (is_mhd)? pmy_pack->pmhd->peos : pmy_pack->phydro->peos;
   Real gm1 = peos->eos_data.gamma - 1.0;
@@ -158,14 +193,17 @@ void Zoom::Initialize()
   par_for("zoom_init_e1",DevExeSpace(),0,mzoom-1,0,nc3,0,nc2,0,nc1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     e1(m,k,j,i) = 0.0;
+    de1(m,k,j,i) = 0.0;
   });
   par_for("zoom_init_e2",DevExeSpace(),0,mzoom-1,0,nc3,0,nc2-1,0,nc1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     e2(m,k,j,i) = 0.0;
+    de2(m,k,j,i) = 0.0;
   });
   par_for("zoom_init_e3",DevExeSpace(),0,mzoom-1,0,nc3-1,0,nc2,0,nc1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     e3(m,k,j,i) = 0.0;
+    de3(m,k,j,i) = 0.0;
   });
 
   return;
@@ -183,11 +221,13 @@ void Zoom::PrintInfo()
     std::cout << "Basic: is_set = " << is_set << " read_rst = " << read_rst
               << " write_rst = " << write_rst << std::endl;
     std::cout << "Funcs: zoom_bcs = " << zoom_bcs << " zoom_ref = " << zoom_ref 
-              << " zoom_dt = " << zoom_dt << " fix_efield = " << fix_efield << std::endl;
+              << " zoom_dt = " << zoom_dt << " fix_efield = " << fix_efield
+              << " emf_flag = " << emf_flag << std::endl;
     // print model parameters
     std::cout << "Model: mzoom = " << mzoom << " nvars = " << nvars
               << " r_in = " << r_in << " d_zoom = " << d_zoom
-              << " p_zoom = " << p_zoom << " efld_fac = " << efld_fac << std::endl;
+              << " p_zoom = " << p_zoom << " emf_f0 = " << emf_f0
+              << " emf_f1 = " << emf_f1 << std::endl;
     // print interval parameters
     std::cout << "Interval: t_run_fac = " << zint.t_run_fac
               << " t_run_pow = " << zint.t_run_pow
@@ -368,6 +408,10 @@ void Zoom::AMR() {
       // TODO(@mhguo): only store the data needed on this rank instead of holding all
       SyncVariables();
       CommunicateVariables();;
+      if (fix_efield && emf_flag >= 1) {
+        SphericalFlux(0,zamr.zone+1); // store fluxes
+        zamr.first_emf = true;
+      }
     }
     RefineCondition();
     zamr.level += zamr.direction;
@@ -415,13 +459,65 @@ void Zoom::DumpRestartFile() {
     // dump restart file
     zamr.dump_rst = false;
   }
+  
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::DumpData()
+//! \brief dump zoom data to file
+
+// TODO(@mhguo): consider whether we need to dump data
+// TODO: dumping on a single rank now, should consider parallel dumping
+void Zoom::DumpData() {
+  return;
+  if (global_variable::my_rank == 0) {
+    std::cout << "Zoom: Dumping data" << std::endl;
+    auto pm = pmy_pack->pmesh;
+    auto &indcs = pm->mb_indcs;
+    int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
+    int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
+    int n_ccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
+
+    std::string fname;
+    fname.assign("Zoom");
+    // add pmesh ncycles
+    fname.append(".");
+    fname.append(std::to_string(pm->ncycle));
+    fname.append(".dat");
+    FILE *pfile;
+    if ((pfile = std::fopen(fname.c_str(), "wb")) == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Error output file could not be opened" <<std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    int datasize = sizeof(Real);
+    auto mbptr = efld.x1e;
+    IOWrapperSizeT cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
+    std::fwrite(mbptr.data(),datasize,cnt,pfile);
+    mbptr = efld.x2e;
+    cnt = mzoom*(n_ccells3+1)*(n_ccells2)*(n_ccells1+1);
+    std::fwrite(mbptr.data(),datasize,cnt,pfile);
+    mbptr = efld.x3e;
+    cnt = mzoom*(n_ccells3)*(n_ccells2+1)*(n_ccells1+1);
+    std::fwrite(mbptr.data(),datasize,cnt,pfile);
+    mbptr = delta_efld.x1e;
+    cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
+    std::fwrite(mbptr.data(),datasize,cnt,pfile);
+    mbptr = delta_efld.x2e;
+    cnt = mzoom*(n_ccells3+1)*(n_ccells2)*(n_ccells1+1);
+    std::fwrite(mbptr.data(),datasize,cnt,pfile);
+    mbptr = delta_efld.x3e;
+    cnt = mzoom*(n_ccells3)*(n_ccells2+1)*(n_ccells1+1);
+    std::fwrite(mbptr.data(),datasize,cnt,pfile);
+    std::fclose(pfile);
+  }
+  return;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void Zoom::RefineCondition()
 //! \brief User-defined refinement condition(s)
 
-// TODO(@mhguo): Implement this function
 void Zoom::RefineCondition() {
   auto &size = pmy_pack->pmb->mb_size;
 
@@ -523,9 +619,9 @@ void Zoom::UpdateVariables() {
         Kokkos::deep_copy(des_slice, src_slice);
         par_for("zoom-update",DevExeSpace(), 0,nvar-1, cks,cke, cjs,cje, cis,cie,
         KOKKOS_LAMBDA(const int n, const int k, const int j, const int i) {
-          int finei = 2*i - cis;  // correct when cis=is
-          int finej = 2*j - cjs;  // correct when cjs=js
-          int finek = 2*k - cks;  // correct when cks=ks
+          int finei = 2*i - cis;  // correct if cis = is
+          int finej = 2*j - cjs;  // correct if cjs = js
+          int finek = 2*k - cks;  // correct if cks = ks
           cu(zm,n,k,j,i) =
               0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
                   + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
@@ -556,12 +652,13 @@ void Zoom::UpdateVariables() {
             e2(zm,k,j,i) = 0.5*(ef2(m,finek,finej,finei) + ef2(m,finek,finej+1,finei));
             e3(zm,k,j,i) = 0.5*(ef3(m,finek,finej,finei) + ef3(m,finek+1,finej,finei));
             
-            // TODO (@mhguo): is this the correct radius?
+            // TODO (@mhguo): is this the correct radius? No it is not! Fix it ASAP
+            // now it looks 0.5*rzoom works, but need to set a better value
             Real x1v = CellCenterX(i-cis, cnx1, x1min, x1max);
             Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
             Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
             Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-            if (zid>0 && rad < rzoom) {
+            if (zid>0 && rad < 0.5*rzoom) {
               int zmp = zm-nlf;
               int prei = finei - cnx1 * x1l;
               int prej = finej - cnx2 * x2l;
@@ -991,11 +1088,30 @@ void Zoom::ApplyVariables() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Zoom::FixEField()
-//! \brief Fix E field on the zoomed grid
+//! \brief Modify E field on the zoomed grid
 
+// TODO(@mhguo): may change FixEField to a more general name
 void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
-  ApplyEField(emf);
+  if (emf_flag == 0) {
+    MeanEField(emf);
+  } else if (emf_flag == 1) {
+    ApplyEField(emf);
+  } else if (emf_flag == 2) {
+    AddDeltaEField(emf);
+  } else if (emf_flag == 3) {
+    AddDeltaEField(emf);
+  } else {
+    std::cerr << "Error: Zoom::FixEField() failed: emf_flag = " << emf_flag << std::endl;
+    std::exit(1);
+  }
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::MeanEField()
+//! \brief Fix E field on the zoomed grid using mean value
+
+void Zoom::MeanEField(DvceEdgeFld4D<Real> emf) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
   int &ng = indcs.ng;
@@ -1064,6 +1180,8 @@ void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
      Kokkos::Sum<array_sum::GlobalSum>(em2),
      Kokkos::Sum<array_sum::GlobalSum>(em3));
 
+  // TODO(@mhguo): do MPI_Allreduce here, otherwise not working for multiple ranks
+
   par_for("fix-emf", DevExeSpace(), 0, nmb1, ks-ng, ke+ng, js-ng, je+ng ,is-ng, ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -1128,7 +1246,7 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
   Real rzoom = zamr.radius;
 
   int zid = nleaf*(zamr.zone-1);
-  Real fac = efld_fac; //(rzoom-rad)/rzoom;
+  Real fac = emf_f1; //(rzoom-rad)/rzoom;
   par_for("fix-emf", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1 ,is-1, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -1168,6 +1286,401 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
       ef3(m,k,j,i) += fac*e3(zm,ck,cj,ci);
     }
   });
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::AaptiveEField()
+//! \brief Add adaptive E field on the zoomed grid
+
+// TODO(@mhguo): check the corner case in ghost zones
+void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
+  if (zamr.zone == 0) return;
+  // TODO(@mhguo): remove this or set interval
+  // if (global_variable::my_rank == 0) {
+  //   std::cout << "Zoom: AddDeltaEField" << std::endl;
+  // }
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &is = indcs.is;  int &ie  = indcs.ie;
+  int &js = indcs.js;  int &je  = indcs.je;
+  int &ks = indcs.ks;  int &ke  = indcs.ke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
+  int nmb1 = pmy_pack->nmb_thispack-1;
+  if (zamr.first_emf) {
+    UpdateDeltaEField(emf);
+    SyncDeltaEField();
+    DumpData();
+    // TODO(@mhguo): print basic information or not
+    zamr.first_emf = false;
+  }
+  auto de1 = delta_efld.x1e;
+  auto de2 = delta_efld.x2e;
+  auto de3 = delta_efld.x3e;
+  auto ef1 = emf.x1e;
+  auto ef2 = emf.x2e;
+  auto ef3 = emf.x3e;
+  Real rzoom = zamr.radius;
+
+  int zid = nleaf*(zamr.zone-1);
+  Real &f0 = emf_f0; //(rad-rzoom)/rzoom;
+  Real &f1 = emf_f1; //(rzoom-rad)/rzoom;
+  // TODO: add adaptive E field
+  if (emf_flag == 3) { // 3 = adaptive
+    SphericalFlux(1,zamr.zone);
+    Real poy_pow_0=zoom_fluxes(0,zamr.zone,2);
+    Real poy_pow=zoom_fluxes(1,zamr.zone,2);
+    // if (poy_pow > poy_pow_0) {
+    //   efld_fac *= 0.9;
+    // } else {
+    //   efld_fac_a *= 1.1;
+    // }
+    // plus/minus value?
+    // if (poy_pow > poy_pow_0) {
+    //   f1 = std::min(f1+0.01, 1.0);
+    // } else {
+    //   f1 = std::max(f1-0.01, -1.0);
+    // }
+    // print basic flux information
+    // TODO(@mhguo): remove this or set interval
+    // if (global_variable::my_rank == 0) {
+    //   std::cout << " Zoom Fluxes: mdot_0 = " << zoom_fluxes(0,zamr.zone,0)
+    //             << " mdot = " << zoom_fluxes(1,zamr.zone,0)
+    //             << " ehdot_0 = " << zoom_fluxes(0,zamr.zone,1)
+    //             << " ehdot = " << zoom_fluxes(1,zamr.zone,1)
+    //             << " poy_pow_0 = " << poy_pow_0
+    //             << " poy_pow = " << poy_pow << " emf_f1 = " << f1 << std::endl;
+    // }
+  }
+  par_for("apply-emf", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1 ,is-1, ie+1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    Real x1f = LeftEdgeX  (i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    Real x2f = LeftEdgeX  (j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    Real x3f = LeftEdgeX  (k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
+    bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
+    int leaf_id = 1*x1r + 2*x2r + 4*x3r;
+    int zm = zid + leaf_id;
+    // TODO: check if this is correct
+    int ci = i - cnx1 * x1l;
+    int cj = j - cnx2 * x2l;
+    int ck = k - cnx3 * x3l;
+    if (sqrt(SQR(x1v)+SQR(x2f)+SQR(x3f)) < rzoom) {
+      ef1(m,k,j,i) = f0*ef1(m,k,j,i) + f1*de1(zm,ck,cj,ci);
+    }
+    if (sqrt(SQR(x1f)+SQR(x2v)+SQR(x3f)) < rzoom) {
+      ef2(m,k,j,i) = f0*ef2(m,k,j,i) + f1*de2(zm,ck,cj,ci);
+    }
+    if (sqrt(SQR(x1f)+SQR(x2f)+SQR(x3v)) < rzoom) {
+      ef3(m,k,j,i) = f0*ef3(m,k,j,i) + f1*de3(zm,ck,cj,ci);
+    }
+  });
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::UpdateDeltaEField()
+//! \brief Update delta E field on the zoomed grid
+
+void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
+  if (global_variable::my_rank == 0) {
+    std::cout << "Zoom: UpdateDeltaEField" << std::endl;
+  }
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &cis = indcs.cis;  int &cie  = indcs.cie;
+  int &cjs = indcs.cjs;  int &cje  = indcs.cje;
+  int &cks = indcs.cks;  int &cke  = indcs.cke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
+  int nmb = pmy_pack->nmb_thispack;
+  int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
+  auto e1 = efld.x1e;
+  auto e2 = efld.x2e;
+  auto e3 = efld.x3e;
+  auto de1 = delta_efld.x1e;
+  auto de2 = delta_efld.x2e;
+  auto de3 = delta_efld.x3e;
+  auto ef1 = emf.x1e;
+  auto ef2 = emf.x2e;
+  auto ef3 = emf.x3e;
+  int zid = nleaf*(zamr.zone-1);
+  Real rin = r_in;
+  for (int m=0; m<nmb; ++m) {
+    if (pmy_pack->pmesh->lloc_eachmb[m+mbs].level == zamr.level) {
+      Real &x1min = size.h_view(m).x1min;
+      Real &x1max = size.h_view(m).x1max;
+      Real &x2min = size.h_view(m).x2min;
+      Real &x2max = size.h_view(m).x2max;
+      Real &x3min = size.h_view(m).x3min;
+      Real &x3max = size.h_view(m).x3max;
+      Real ax1min = x1min*x1max>0.0? fmin(fabs(x1min), fabs(x1max)) : 0.0;
+      Real ax2min = x2min*x2max>0.0? fmin(fabs(x2min), fabs(x2max)) : 0.0;
+      Real ax3min = x3min*x3max>0.0? fmin(fabs(x3min), fabs(x3max)) : 0.0;
+      Real rad_min = sqrt(SQR(ax1min)+SQR(ax2min)+SQR(ax3min));
+      if (rad_min < rin) {
+        bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
+        bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
+        int leaf_id = 1*x1r + 2*x2r + 4*x3r;
+        int zm = zid + leaf_id;
+        // update delta electric fields
+        par_for("zoom-update-efld",DevExeSpace(), cks,cke+1, cjs,cje+1, cis,cie+1,
+        KOKKOS_LAMBDA(const int ck, const int cj, const int ci) {
+          int fi = ci + cnx1 * x1l; // correct if cis = is
+          int fj = cj + cnx2 * x2l; // correct if cjs = js
+          int fk = ck + cnx3 * x3l; // correct if cks = ks
+          de1(zm,ck,cj,ci) = e1(zm,ck,cj,ci) - ef1(m,fk,fj,fi);
+          de2(zm,ck,cj,ci) = e2(zm,ck,cj,ci) - ef2(m,fk,fj,fi);
+          de3(zm,ck,cj,ci) = e3(zm,ck,cj,ci) - ef3(m,fk,fj,fi);
+          // TODO(@mhguo): remove this or set interval
+          // if (ck == cks + 2) {
+          //   printf("DeltaEField: zm=%d, m=%d, ck=%d, cj=%d, ci=%d, \
+          //   e1=%e, ef1=%e, de1=%e, e2=%e, ef2=%e, de2=%e, e3=%e, ef3=%e, de3=%e\n",
+          //        zm, m, ck, cj, ci, 
+          //        e1(zm,ck,cj,ci), ef1(m,fk,fj,fi), de1(zm,ck,cj,ci),
+          //        e2(zm,ck,cj,ci), ef2(m,fk,fj,fi), de2(zm,ck,cj,ci),
+          //        e3(zm,ck,cj,ci), ef3(m,fk,fj,fi), de3(zm,ck,cj,ci));
+          // }
+        });
+      }
+    }
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::SyncDeltaEField()
+//! \brief Syncronize variables between different ranks
+
+// TODO (@mhguo): may not be necessary, consider removing
+void Zoom::SyncDeltaEField() {
+#if MPI_PARALLEL_ENABLED
+  if (zamr.zone == 0) return;
+  if (global_variable::my_rank == 0) {
+    std::cout << "Zoom: SyncDeltaEField" << std::endl;
+  }
+  // broadcast zoom data
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
+  int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
+  int n_ccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
+  int e1_slice_size = (n_ccells3+1) * (n_ccells2+1) * n_ccells1;
+  int e2_slice_size = (n_ccells3+1) * n_ccells2 * (n_ccells1+1);
+  int e3_slice_size = n_ccells3 * (n_ccells2+1) * (n_ccells1+1);
+
+  int zid = nleaf*(zamr.zone-1);
+  for (int leaf=0; leaf<nleaf; ++leaf) {
+    // determine which rank is the "root" rank
+    int zm = zid + leaf;
+    int x1r = (leaf%2 == 1); int x2r = (leaf%4 > 1); int x3r = (leaf > 3);
+    int zm_rank = 0;
+    for (int m=0; m<pmy_pack->pmesh->nmb_total; ++m) {
+      auto lloc = pmy_pack->pmesh->lloc_eachmb[m];
+      if (lloc.level == zamr.level) {
+        if ((lloc.lx1 == pow(2,zamr.level-1)+x1r-1) &&
+            (lloc.lx2 == pow(2,zamr.level-1)+x2r-1) &&
+            (lloc.lx3 == pow(2,zamr.level-1)+x3r-1)) {
+          zm_rank = pmy_pack->pmesh->rank_eachmb[m];
+          // print basic information
+          // std::cout << "Zoom: Syncing delta efield for zoom meshblock " << zm
+          //           << " from rank " << zm_rank << std::endl;
+        }
+      }
+    }
+    // It looks device to device communication is not supported, so copy to host first
+    Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2+1, n_ccells1);
+    auto e1_slice = Kokkos::subview(delta_efld.x1e, Kokkos::make_pair(zm,zm+1), 
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_4d, e1_slice);
+    MPI_Bcast(harr_4d.data(), e1_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(e1_slice, harr_4d);
+    
+    Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2, n_ccells1+1);
+    auto e2_slice = Kokkos::subview(delta_efld.x2e, Kokkos::make_pair(zm,zm+1),
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_4d, e2_slice);
+    MPI_Bcast(harr_4d.data(), e2_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(e2_slice, harr_4d);
+    
+    Kokkos::realloc(harr_4d, 1, n_ccells3, n_ccells2+1, n_ccells1+1);
+    auto e3_slice = Kokkos::subview(delta_efld.x3e, Kokkos::make_pair(zm,zm+1), 
+                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    Kokkos::deep_copy(harr_4d, e3_slice);
+    MPI_Bcast(harr_4d.data(), e3_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
+    Kokkos::deep_copy(e3_slice, harr_4d);
+  }
+#endif
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::SphericalFlux()
+//! \brief Compute fluxes on the zoomed grid
+
+// TODO (@mhguo): consider: 1. whether we really need this, 2: where to put this
+void Zoom::SphericalFlux(int aim_id, int grid_id) {
+  int &g = grid_id;
+  auto pmbp = pmy_pack;
+
+  // extract BH parameters
+  bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+  Real &spin = pmbp->pcoord->coord_data.bh_spin;
+
+  // capture variables
+  auto &w0_ = pmbp->pmhd->w0;
+  auto &bcc_ = pmbp->pmhd->bcc0;
+  int nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+
+  // extract grids
+  auto &grids = spherical_grids;
+  // interpolate cell-centered magnetic fields and store
+  // NOTE(@pdmullen): We later reuse the interp_vals array to interpolate primitives.
+  // Therefore, we must stow interpolated field components.
+  grids[g]->InterpolateToSphere(3, bcc_);
+  DualArray2D<Real> interpolated_bcc;
+  Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
+  Kokkos::deep_copy(interpolated_bcc, grids[g]->interp_vals);
+  interpolated_bcc.template modify<DevExeSpace>();
+  interpolated_bcc.template sync<HostMemSpace>();
+
+  // interpolate primitives
+  grids[g]->InterpolateToSphere(nvars, w0_);
+
+  // compute poynting flux power
+  int &nflx = nflux;
+  std::vector<Real> zfluxes(nflx);
+  for (int n=0; n<nflx; ++n) {
+    zfluxes[n] = 0.0;
+  }
+  for (int n=0; n<grids[g]->nangles; ++n) {
+    // extract coordinate data at this angle
+    Real r = grids[g]->radius;
+    Real theta = grids[g]->polar_pos.h_view(n,0);
+    Real x1 = grids[g]->interp_coord.h_view(n,0);
+    Real x2 = grids[g]->interp_coord.h_view(n,1);
+    Real x3 = grids[g]->interp_coord.h_view(n,2);
+    Real glower[4][4], gupper[4][4];
+    ComputeMetricAndInverse(x1,x2,x3,flat,spin,glower,gupper);
+
+    // extract interpolated primitives
+    Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);  
+    Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+    Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+    Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+    Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+
+    // extract interpolated field components
+    Real &int_bx = interpolated_bcc.h_view(n,IBX);
+    Real &int_by = interpolated_bcc.h_view(n,IBY);
+    Real &int_bz = interpolated_bcc.h_view(n,IBZ);
+
+    // Compute interpolated u^\mu in CKS
+    Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
+             2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
+             2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
+    Real alpha = sqrt(-1.0/gupper[0][0]);
+    Real gamma = sqrt(1.0 + q);
+    Real u0 = gamma/alpha;
+    Real u1 = int_vx - alpha * gamma * gupper[0][1];
+    Real u2 = int_vy - alpha * gamma * gupper[0][2];
+    Real u3 = int_vz - alpha * gamma * gupper[0][3];
+
+    // Lower vector indices
+    Real u_0 = glower[0][0]*u0 + glower[0][1]*u1 + glower[0][2]*u2 + glower[0][3]*u3;  
+    Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
+    Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
+    Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
+
+    // Calculate 4-magnetic field (returns zero if not MHD)
+    Real b0 = u_1*int_bx + u_2*int_by + u_3*int_bz;
+    Real b1 = (int_bx + b0 * u1) / u0;
+    Real b2 = (int_by + b0 * u2) / u0;
+    Real b3 = (int_bz + b0 * u3) / u0;
+
+    // compute b_\mu in CKS and b_sq (returns zero if not MHD)
+    Real b_0 = glower[0][0]*b0 + glower[0][1]*b1 + glower[0][2]*b2 + glower[0][3]*b3;
+    Real b_1 = glower[1][0]*b0 + glower[1][1]*b1 + glower[1][2]*b2 + glower[1][3]*b3;
+    Real b_2 = glower[2][0]*b0 + glower[2][1]*b1 + glower[2][2]*b2 + glower[2][3]*b3;
+    Real b_3 = glower[3][0]*b0 + glower[3][1]*b1 + glower[3][2]*b2 + glower[3][3]*b3;
+    Real b_sq = b0*b_0 + b1*b_1 + b2*b_2 + b3*b_3;
+
+    // Transform CKS 4-velocity and 4-magnetic field to spherical KS
+    Real a2 = SQR(spin);
+    Real rad2 = SQR(x1)+SQR(x2)+SQR(x3);
+    Real r2 = SQR(r);
+    Real sth = sin(theta);
+    Real drdx = r*x1/(2.0*r2 - rad2 + a2);
+    Real drdy = r*x2/(2.0*r2 - rad2 + a2);
+    Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
+    Real dphdx = (-x2/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdx);
+    Real dphdy = ( x1/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdy);
+    Real dphdz = (spin/(r2 + a2)*drdz);
+    // r,phi component of 4-velocity in spherical KS
+    Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
+    Real uph = dphdx*u1 + dphdy*u2 + dphdz*u3;
+    // r,phi component of 4-magnetic field in spherical KS
+    Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+    Real bph = dphdx*b1 + dphdy*b2 + dphdz*b3;
+
+    // integration params
+    Real &domega = grids[g]->solid_angles.h_view(n);
+    Real sqrtmdet = (r2+SQR(spin*cos(theta)));
+
+    // flags
+    Real on = (int_dn != 0.0)? 1.0 : 0.0; // check if angle is on this rank
+
+    // compute mass flux
+    Real m_flx = int_dn*ur;
+    // compute hydro energy flux
+    Real t1_0_h = (int_dn + gamma*int_ie)*ur*u_0;
+    Real ehyd_flx = -t1_0_h - m_flx;
+    // compute poynting flux
+    Real t1_0_m = (b_sq)*ur*u_0 - br*b_0;
+    Real poy_flx = -t1_0_m;
+
+    // accumulate mass accretion rate
+    zfluxes[0] += m_flx*sqrtmdet*domega*on;
+    // accumulate hydro energy power
+    zfluxes[1] += ehyd_flx*sqrtmdet*domega*on;
+    // accumulate poynting flux power
+    zfluxes[2] += poy_flx*sqrtmdet*domega*on;
+  }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, zfluxes.data(), nflx,
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  for (int n=0; n<nflx; ++n) {
+    // zoom_fluxes[aim_id][g][n] = zfluxes[n];
+    zoom_fluxes(aim_id,g,n) = zfluxes[n];
+  }
+
+  // TODO(@mhguo): remove this or set interval
+  // if (global_variable::my_rank == 0) {
+  //     std::cout << " Zoom Spherical Fluxes: id=" << aim_id << " zone=" << g
+  //               << " mdot = " << zoom_fluxes(aim_id,zamr.zone,0)
+  //               << " ehdot = " << zoom_fluxes(aim_id,zamr.zone,1)
+  //               << " emdot = " << zoom_fluxes(aim_id,zamr.zone,2)
+  //               << std::endl;
+  // }
 
   return;
 }

@@ -27,6 +27,7 @@ typedef struct ZoomAMR {
   Real radius;                  // radius of inner boundary
   Real runtime;                 // interval for zoom
   bool just_zoomed;             // flag for just zoomed
+  bool first_emf;               // flag for first electric field
   bool dump_rst;                // flag for dumping restart file
 } ZoomAMR;
 
@@ -73,14 +74,16 @@ class Zoom
   int mzoom;               // number of zoom meshblocks
   int nleaf;               // number of zoom meshblocks on each level
   int nvars;               // number of variables
+  int nflux;               // number of fluxes through spherical surfaces
+  int emf_flag;            // flag for modifying electric field
   Real r_in;               // radius of iner boundary
   Real d_zoom;             // density within inner boundary
   Real p_zoom;             // pressure within inner boundary
-  Real efld_fac;           // electric field factor
+  Real emf_f0, emf_f1;     // electric field factor, e = f0 * e0 + f1 * e1
 
   ZoomAMR zamr;            // zoom AMR parameters
   ZoomInterval zint;       // zoom interval parameters
-  ZoomRun zrun;          // zoom time parameters
+  ZoomRun zrun;            // zoom time parameters
 
   DvceArray5D<Real> u0;    // conserved variables
   DvceArray5D<Real> w0;    // primitive variables
@@ -91,6 +94,10 @@ class Zoom
 
   // following only used for time-evolving flow
   DvceEdgeFld4D<Real> efld;   // edge-centered electric fields (fluxes of B)
+  DvceEdgeFld4D<Real> delta_efld; // change in electric fields
+
+  // fluxes through spherical surfaces
+  HostArray3D<Real> zoom_fluxes;
 
   // vector of SphericalGrid objects for analysis
   std::vector<std::unique_ptr<SphericalGrid>> spherical_grids;
@@ -107,6 +114,7 @@ class Zoom
   void AMR();
   void SetInterval();
   void DumpRestartFile();
+  void DumpData();
   void RefineCondition();
   void UpdateVariables();
   void UpdateHydroVariables(int zm, int m);
@@ -114,7 +122,12 @@ class Zoom
   void CommunicateVariables();
   void ApplyVariables();
   void FixEField(DvceEdgeFld4D<Real> emf);
+  void MeanEField(DvceEdgeFld4D<Real> emf);
   void ApplyEField(DvceEdgeFld4D<Real> emf);
+  void AddDeltaEField(DvceEdgeFld4D<Real> emf);
+  void UpdateDeltaEField(DvceEdgeFld4D<Real> emf);
+  void SyncDeltaEField();
+  void SphericalFlux(int n, int g);
   Real NewTimeStep(Mesh* pm);
 
  private:
