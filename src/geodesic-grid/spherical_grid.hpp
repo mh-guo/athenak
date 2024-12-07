@@ -25,7 +25,7 @@ class SphericalGrid: public GeodesicGrid {
     ~SphericalGrid();
 
     Real radius;  // const radius for SphericalGrid
-    int ninterp;  // number of interpolation points
+    int ninterp;  // number of interpolation points along each dimension
     DualArray2D<Real> interp_coord;  // Cartesian coordinates for grid points
     DualArray2D<Real> interp_vals;   // container for data interpolated to sphere
     void InterpolateToSphere(int nvars, DvceArray5D<Real> &val);  // interpolate to sphere

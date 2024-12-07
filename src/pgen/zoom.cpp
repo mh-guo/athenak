@@ -26,6 +26,7 @@ namespace zoom {
 
 Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     pmy_pack(ppack),
+    ndiag(-1),
     u0("cons",1,1,1,1,1),
     w0("prim",1,1,1,1,1),
     coarse_u0("ccons",1,1,1,1,1),
@@ -39,6 +40,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zoom_ref = pin->GetOrAddBoolean("zoom","zoom_ref",true);
   zoom_dt = pin->GetOrAddBoolean("zoom","zoom_dt",false);
   fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
+  ndiag = pin->GetOrAddInteger("zoom","ndiag",-1);
   zint.t_run_fac = pin->GetOrAddReal("zoom","t_run_fac",1.0);
   zint.t_run_pow = pin->GetOrAddReal("zoom","t_run_pow",0.0);
   zint.t_run_max = pin->GetOrAddReal("zoom","t_run_max",FLT_MAX);
@@ -63,7 +65,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zamr.direction = pin->GetOrAddInteger("zoom","direction",-1);
   zamr.just_zoomed = false;
   zamr.first_emf = false;
-  zamr.dump_rst = false;
+  zamr.dump_rst = true;
   zrun.id = 0;
   zrun.next_time = 0.0;
   SetInterval();
@@ -118,13 +120,15 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     }
   }
   // TODO(@mhguo): only do this when needed, it is slow
-  // construct spherical grids
-  int anglevel = 10;
-  int ninterp = 1;
-  auto &grids = spherical_grids;
-  for (int i = 0; i < zamr.nlevels; i++) {
-    Real rzoom = 0.9*static_cast<Real>(1<<i); // 2^i*0.9 to avoid active zone
-    grids.push_back(std::make_unique<SphericalGrid>(pmy_pack, anglevel, rzoom, ninterp));
+  if (emf_flag >= 3) {
+    // construct spherical grids
+    int anglevel = 10;
+    int ninterp = 1;
+    auto &grids = spherical_grids;
+    for (int i = 0; i < zamr.nlevels; i++) {
+      Real rzoom = 0.9*static_cast<Real>(1<<i); // 2^i*0.9 to avoid active zone
+      grids.push_back(std::make_unique<SphericalGrid>(pmy_pack, anglevel, rzoom, ninterp));
+    }
   }
 
   Initialize();
@@ -219,7 +223,7 @@ void Zoom::PrintInfo()
     std::cout << "============== Zoom Information ==============" << std::endl;
     // print basic parameters
     std::cout << "Basic: is_set = " << is_set << " read_rst = " << read_rst
-              << " write_rst = " << write_rst << std::endl;
+              << " write_rst = " << write_rst << " ndiag = " << ndiag << std::endl;
     std::cout << "Funcs: zoom_bcs = " << zoom_bcs << " zoom_ref = " << zoom_ref 
               << " zoom_dt = " << zoom_dt << " fix_efield = " << fix_efield
               << " emf_flag = " << emf_flag << std::endl;
@@ -399,6 +403,7 @@ void Zoom::BoundaryConditions()
 void Zoom::AMR() {
   if (!zoom_ref) return;
   zamr.just_zoomed = false;
+  zamr.dump_rst = (zamr.zone == 0);
   if (pmy_pack->pmesh->time >= zrun.next_time) {
     if (global_variable::my_rank == 0) {
       std::cout << "Zoom AMR: old level = " << zamr.level << std::endl;
@@ -407,10 +412,14 @@ void Zoom::AMR() {
       UpdateVariables();
       // TODO(@mhguo): only store the data needed on this rank instead of holding all
       SyncVariables();
-      CommunicateVariables();;
-      if (fix_efield && emf_flag >= 1) {
-        SphericalFlux(0,zamr.zone+1); // store fluxes
-        zamr.first_emf = true;
+      UpdateGhostVariables();
+      if (fix_efield) {
+        if (emf_flag >=1) {
+          zamr.first_emf = true;
+        }
+        if (emf_flag >= 3) {
+          SphericalFlux(0,zamr.zone+1); // store fluxes
+        }
       }
     }
     RefineCondition();
@@ -444,22 +453,6 @@ void Zoom::SetInterval() {
   if (zamr.runtime > zint.t_run_max) {zamr.runtime = zint.t_run_max;}
   zrun.id++;
   zrun.next_time = pmy_pack->pmesh->time + zamr.runtime;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn void Zoom::DumpRestartFile()
-//! \brief Set flag to dump restart file
-
-// TODO(@mhguo): Implement this function
-void Zoom::DumpRestartFile() {
-  if (zamr.dump_rst) {
-    if (global_variable::my_rank == 0) {
-      std::cout << "Zoom: Dumping restart file" << std::endl;
-    }
-    // dump restart file
-    zamr.dump_rst = false;
-  }
-  
 }
 
 //----------------------------------------------------------------------------------------
@@ -910,11 +903,11 @@ void Zoom::SyncVariables() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void Zoom::CommunicateVariables()
-//! \brief Communicate variables between different meshblocks
+//! \fn void Zoom::UpdateGhostVariables()
+//! \brief Update variables in ghost cells between different meshblocks
 
 // TODO(@mhguo): add emf
-void Zoom::CommunicateVariables() {
+void Zoom::UpdateGhostVariables() {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &ng = indcs.ng;
   int &is = indcs.is;  int &ie  = indcs.ie;
@@ -1687,13 +1680,35 @@ void Zoom::SphericalFlux(int aim_id, int grid_id) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Zoom::NewTimeStep()
-//! \brief New time step for zoom, only for GR since others are already handled
+//! \brief New time step for zoom
 
 Real Zoom::NewTimeStep(Mesh* pm) {
   Real dt = pm->dt/pm->cfl_no;
-  auto &is_general_relativistic_ = pmy_pack->pcoord->is_general_relativistic;
-  if (!is_general_relativistic_) return dt;
-  
+  if (!zoom_dt) return dt;
+  bool &is_gr = pmy_pack->pcoord->is_general_relativistic;
+  bool is_mhd = (pmy_pack->pmhd != nullptr);
+  dt = (is_gr)? GRTimeStep(pm) : dt; // replace dt with GRTimeStep
+  // TODO(@mhguo): 1. EMFTimeStep is too small, 2. we may use v=c instead
+  // Real dt_emf = dt;
+  // if (emf_dt && is_mhd) {
+  //   dt_emf = EMFTimeStep(pm);
+  //   if (ndiag > 0 && (pm->ncycle % ndiag == 0) && (zamr.zone > 0)) {
+  //     if (dt_emf < dt) {
+  //       std::cout << "Zoom: dt_emf = " << dt_emf << " dt = " << dt
+  //                 << " on rank " << global_variable::my_rank << std::endl;
+  //     }
+  //   }
+  // }
+  // dt = fmin(dt_emf, dt); // get minimum of EMFTimeStep and dt
+  // TODO(@mhguo): can the flux speed in EMFTimeStep be larger than c? Need to check
+  return dt;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::GRTimeStep()
+//! \brief New time step for GR zoom, only for GR since others are already handled
+
+Real Zoom::GRTimeStep(Mesh* pm) {
   auto &indcs = pm->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
   int js = indcs.js, nx2 = indcs.nx2;
@@ -1896,6 +1911,104 @@ Real Zoom::NewTimeStep(Mesh* pm) {
       min_dt3 = fmin((size.d_view(m).dx3/max_dv3), min_dt3);
     }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
   }
+
+  // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems
+  Real dtnew = dt1;
+  if (pmy_pack->pmesh->multi_d) { dtnew = std::min(dtnew, dt2); }
+  if (pmy_pack->pmesh->three_d) { dtnew = std::min(dtnew, dt3); }
+
+  return dtnew;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::EMFTimeStep()
+//! \brief New time step for emf in zoom
+
+// TODO(@mhguo): not working now, need to update
+Real Zoom::EMFTimeStep(Mesh* pm) {
+  if (zamr.zone == 0) return std::numeric_limits<float>::max();
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+  int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
+
+  Real dt1 = std::numeric_limits<float>::max();
+  Real dt2 = std::numeric_limits<float>::max();
+  Real dt3 = std::numeric_limits<float>::max();
+
+  // capture class variables for kernel
+  auto &size = pmy_pack->pmb->mb_size;
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+
+  auto &eos = pmy_pack->pmhd->peos->eos_data;
+  auto &bcc0_ = pmy_pack->pmhd->bcc0;
+
+  auto de1 = delta_efld.x1e;
+  auto de2 = delta_efld.x2e;
+  auto de3 = delta_efld.x3e;
+  Real rzoom = zamr.radius;
+
+  int zid = nleaf*(zamr.zone-1);
+  Real &f0 = emf_f0; //(rad-rzoom)/rzoom;
+  Real &f1 = emf_f1; //(rzoom-rad)/rzoom;
+
+  // find smallest dx*|B/E| in each direction for mhd problems
+  Kokkos::parallel_reduce("ZEMFNudt",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
+    // compute m,k,j,i indices of thread and call function
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+    // Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
+    Real max_de1 = 0.0, max_de2 = 0.0, max_de3 = 0.0;
+
+    // Use the GR fast magnetosonic speed to compute the time step
+    // References to left primitives
+    Real &bcc1 = bcc0_(m,IBX,k,j,i);
+    Real &bcc2 = bcc0_(m,IBY,k,j,i);
+    Real &bcc3 = bcc0_(m,IBZ,k,j,i);
+
+    // Extract components of metric
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
+    bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
+    int leaf_id = 1*x1r + 2*x2r + 4*x3r;
+    int zm = zid + leaf_id;
+    // TODO: check if this is correct
+    int ci = i - cnx1 * x1l;
+    int cj = j - cnx2 * x2l;
+    int ck = k - cnx3 * x3l;
+    // should be face centered or edge centered, but use cell centered for now
+    if (rad < rzoom) {
+      max_de1 = fmax(fabs(de1(zm,ck,cj,ci)), fmax(fabs(de1(zm,ck+1,cj,ci)),
+                fmax(fabs(de1(zm,ck,cj+1,ci)), fabs(de1(zm,ck+1,cj+1,ci)))));
+      max_de2 = fmax(fabs(de2(zm,ck,cj,ci)), fmax(fabs(de2(zm,ck+1,cj,ci)),
+                fmax(fabs(de2(zm,ck,cj,ci+1)), fabs(de2(zm,ck+1,cj,ci+1)))));
+      max_de3 = fmax(fabs(de3(zm,ck,cj,ci)), fmax(fabs(de3(zm,ck,cj+1,ci)),
+                fmax(fabs(de3(zm,ck,cj,ci+1)), fabs(de3(zm,ck,cj+1,ci+1)))));
+    }
+    Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2, dx3 = size.d_view(m).dx3;
+    min_dt1 = fmin(fabs(bcc1)/(max_de2/dx3+max_de3/dx2), min_dt1);
+    min_dt2 = fmin(fabs(bcc2)/(max_de3/dx1+max_de1/dx3), min_dt2);
+    min_dt3 = fmin(fabs(bcc3)/(max_de1/dx2+max_de2/dx1), min_dt3);
+  }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
 
   // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems
   Real dtnew = dt1;

@@ -120,8 +120,8 @@ void SphericalGrid::SetInterpolationIndices() {
       Real &dx3 = size.h_view(m).dx3;
 
       // save MeshBlock and zone indicies for nearest position to spherical patch center
-      // if this angle position resides in this MeshBlock
-      // make sure there is no double count and the index is always in the active cells
+      // if this angle position resides in the active cells of this MeshBlock without
+      // double count between different ranks
       if ((rcoord.h_view(n,0) >= x1min && rcoord.h_view(n,0) < x1max) &&
           (rcoord.h_view(n,1) >= x2min && rcoord.h_view(n,1) < x2max) &&
           (rcoord.h_view(n,2) >= x3min && rcoord.h_view(n,2) < x3max)) {
@@ -250,7 +250,6 @@ void SphericalGrid::InterpolateToSphere(int nvars, DvceArray5D<Real> &val) {
         for (int j=0; j<nintp; j++) {
           for (int k=0; k<nintp; k++) {
             Real iwght = iwghts.d_view(n,i,0)*iwghts.d_view(n,j,1)*iwghts.d_view(n,k,2);
-            // int_value += iwght*val(ii0,v,ii3-(ng-k-ks)+1,ii2-(ng-j-js)+1,ii1-(ng-i-is)+1);
             int_value += iwght*val(ii0,v,ii3+k+ks-nleft,ii2+j+js-nleft,ii1+i+is-nleft);
           }
         }

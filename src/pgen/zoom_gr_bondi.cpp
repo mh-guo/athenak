@@ -1059,6 +1059,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
               << " NHISTORY_VARIABLES" << std::endl;
     exit(EXIT_FAILURE);
   }
+  // TODO: add angular momentum components
   // no more than 7 characters per label
   std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
     "lx","ly","lz","lzout","phi","eint","b^2","alpha","lor","u0","u_0","ur","uph","b0",

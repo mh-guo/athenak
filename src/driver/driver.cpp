@@ -414,19 +414,23 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
         float next_32 = static_cast<float>(out->out_params.last_time+out->out_params.dt);
         float tlim_32 = static_cast<float>(tlim);
         int &dcycle_ = out->out_params.dcycle;
-
+        // temporary fix to dump restart file only when zoom says so
+        if ((out->out_params.file_type.compare("rst") == 0) &&
+          (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
+          ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)))) {
+          auto *pzoom = pmesh->pmb_pack->pzoom;
+          if (pzoom != nullptr && pzoom->is_set) {
+            if (pzoom->zamr.dump_rst) {
+              out->LoadOutputData(pmesh);
+              out->WriteOutputFile(pmesh, pin);
+            }
+            continue;
+          }
+        }
         if (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
             ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
           out->LoadOutputData(pmesh);
           out->WriteOutputFile(pmesh, pin);
-        }
-        if (out->out_params.file_type.compare("rst") == 0) {
-          zoom::Zoom *pzoom = pmesh->pmb_pack->pzoom;
-          if (pzoom != nullptr && pzoom->is_set && pzoom->zamr.dump_rst) {
-            out->LoadOutputData(pmesh);
-            out->WriteOutputFile(pmesh, pin);
-            pzoom->zamr.dump_rst = false;
-          }
         }
       }
 
@@ -453,6 +457,17 @@ void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
   // cycle through output Types and load data / write files
   //  This design allows for asynchronous outputs to implemented in the future.
   for (auto &out : pout->pout_list) {
+    // temporary fix to dump restart file only when zoom says so
+    if (out->out_params.file_type.compare("rst") == 0) {
+      auto *pzoom = pmesh->pmb_pack->pzoom;
+      if (pzoom != nullptr && pzoom->is_set) {
+        if (pzoom->zamr.dump_rst) {
+          out->LoadOutputData(pmesh);
+          out->WriteOutputFile(pmesh, pin);
+        }
+        continue;
+      }
+    }
     out->LoadOutputData(pmesh);
     out->WriteOutputFile(pmesh, pin);
   }

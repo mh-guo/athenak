@@ -71,6 +71,7 @@ class Zoom
   bool zoom_ref;           // flag for zoom refinement
   bool zoom_dt;            // flag for zoom time step
   bool fix_efield;         // flag for fixing electric field
+  int ndiag;               // cycles between diagostic output
   int mzoom;               // number of zoom meshblocks
   int nleaf;               // number of zoom meshblocks on each level
   int nvars;               // number of variables
@@ -113,13 +114,12 @@ class Zoom
   void BoundaryConditions();
   void AMR();
   void SetInterval();
-  void DumpRestartFile();
   void DumpData();
   void RefineCondition();
   void UpdateVariables();
   void UpdateHydroVariables(int zm, int m);
   void SyncVariables();
-  void CommunicateVariables();
+  void UpdateGhostVariables();
   void ApplyVariables();
   void FixEField(DvceEdgeFld4D<Real> emf);
   void MeanEField(DvceEdgeFld4D<Real> emf);
@@ -129,6 +129,8 @@ class Zoom
   void SyncDeltaEField();
   void SphericalFlux(int n, int g);
   Real NewTimeStep(Mesh* pm);
+  Real GRTimeStep(Mesh* pm);
+  Real EMFTimeStep(Mesh* pm);
 
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD
