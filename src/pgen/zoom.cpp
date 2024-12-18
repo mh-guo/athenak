@@ -32,7 +32,11 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     coarse_u0("ccons",1,1,1,1,1),
     coarse_w0("cprim",1,1,1,1,1),
     efld("efld",1,1,1,1),
-    delta_efld("delta_efld",1,1,1,1) {
+    emf0("emf0",1,1,1,1),
+    delta_efld("delta_efld",1,1,1,1),
+    max_emf0("max_emf0",1,1),
+    zoom_fluxes("zoom_fluxes",1,1,1)
+  {
   is_set = pin->GetOrAddBoolean("zoom","is_set",false);
   read_rst = pin->GetOrAddBoolean("zoom","read_rst",true);
   write_rst = pin->GetOrAddBoolean("zoom","write_rst",true);
@@ -40,6 +44,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zoom_ref = pin->GetOrAddBoolean("zoom","zoom_ref",true);
   zoom_dt = pin->GetOrAddBoolean("zoom","zoom_dt",false);
   fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
+  dump_diag  = pin->GetOrAddBoolean("zoom","dump_diag",false);
   ndiag = pin->GetOrAddInteger("zoom","ndiag",-1);
   zint.t_run_fac = pin->GetOrAddReal("zoom","t_run_fac",1.0);
   zint.t_run_pow = pin->GetOrAddReal("zoom","t_run_pow",0.0);
@@ -83,9 +88,11 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   emf_flag = 0;
   emf_f0 = 1.0;
   emf_f1 = 0.0;
+  emf_fmax = 1.0;
   if (fix_efield) {
     emf_flag = pin->GetInteger("zoom","emf_flag");
     emf_f1 = pin->GetReal("zoom","emf_f1");
+    emf_fmax = pin->GetReal("zoom","emf_fmax");
   }
 
   // allocate memory for primitive variables
@@ -106,10 +113,22 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   Kokkos::realloc(efld.x2e, mzoom, n_ccells3+1, n_ccells2, n_ccells1+1);
   Kokkos::realloc(efld.x3e, mzoom, n_ccells3, n_ccells2+1, n_ccells1+1);
 
+  // allocate electric fields just after zoom
+  Kokkos::realloc(emf0.x1e, mzoom, n_ccells3+1, n_ccells2+1, n_ccells1);
+  Kokkos::realloc(emf0.x2e, mzoom, n_ccells3+1, n_ccells2, n_ccells1+1);
+  Kokkos::realloc(emf0.x3e, mzoom, n_ccells3, n_ccells2+1, n_ccells1+1);
+
   // allocate delta electric fields
   Kokkos::realloc(delta_efld.x1e, mzoom, n_ccells3+1, n_ccells2+1, n_ccells1);
   Kokkos::realloc(delta_efld.x2e, mzoom, n_ccells3+1, n_ccells2, n_ccells1+1);
   Kokkos::realloc(delta_efld.x3e, mzoom, n_ccells3, n_ccells2+1, n_ccells1+1);
+
+  Kokkos::realloc(max_emf0, mzoom, 3);
+  for (int i = 0; i < mzoom; i++) {
+    for (int j = 0; j < 3; j++) {
+      max_emf0(i,j) = 0.0;
+    }
+  }
 
   Kokkos::realloc(zoom_fluxes, 2, zamr.nlevels, nflux);
   for (int i = 0; i < 2; i++) {
@@ -160,6 +179,9 @@ void Zoom::Initialize()
   auto e1 = efld.x1e;
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
+  auto e01 = emf0.x1e;
+  auto e02 = emf0.x2e;
+  auto e03 = emf0.x3e;
   auto de1 = delta_efld.x1e;
   auto de2 = delta_efld.x2e;
   auto de3 = delta_efld.x3e;
@@ -197,16 +219,19 @@ void Zoom::Initialize()
   par_for("zoom_init_e1",DevExeSpace(),0,mzoom-1,0,nc3,0,nc2,0,nc1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     e1(m,k,j,i) = 0.0;
+    e01(m,k,j,i) = 0.0;
     de1(m,k,j,i) = 0.0;
   });
   par_for("zoom_init_e2",DevExeSpace(),0,mzoom-1,0,nc3,0,nc2-1,0,nc1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     e2(m,k,j,i) = 0.0;
+    e02(m,k,j,i) = 0.0;
     de2(m,k,j,i) = 0.0;
   });
   par_for("zoom_init_e3",DevExeSpace(),0,mzoom-1,0,nc3-1,0,nc2,0,nc1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     e3(m,k,j,i) = 0.0;
+    e03(m,k,j,i) = 0.0;
     de3(m,k,j,i) = 0.0;
   });
 
@@ -462,7 +487,6 @@ void Zoom::SetInterval() {
 // TODO(@mhguo): consider whether we need to dump data
 // TODO: dumping on a single rank now, should consider parallel dumping
 void Zoom::DumpData() {
-  return;
   if (global_variable::my_rank == 0) {
     std::cout << "Zoom: Dumping data" << std::endl;
     auto pm = pmy_pack->pmesh;
@@ -484,8 +508,11 @@ void Zoom::DumpData() {
       std::exit(EXIT_FAILURE);
     }
     int datasize = sizeof(Real);
+    // xyz? bcc?
+    IOWrapperSizeT cnt = mzoom*nvars*(n_ccells3)*(n_ccells2)*(n_ccells1);
+    std::fwrite(coarse_w0.data(),datasize,cnt,pfile);
     auto mbptr = efld.x1e;
-    IOWrapperSizeT cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
+    cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
     mbptr = efld.x2e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2)*(n_ccells1+1);
@@ -493,13 +520,13 @@ void Zoom::DumpData() {
     mbptr = efld.x3e;
     cnt = mzoom*(n_ccells3)*(n_ccells2+1)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = delta_efld.x1e;
+    mbptr = emf0.x1e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = delta_efld.x2e;
+    mbptr = emf0.x2e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = delta_efld.x3e;
+    mbptr = emf0.x3e;
     cnt = mzoom*(n_ccells3)*(n_ccells2+1)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
     std::fclose(pfile);
@@ -651,7 +678,8 @@ void Zoom::UpdateVariables() {
             Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
             Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
             Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-            if (zid>0 && rad < 0.5*rzoom) {
+            // TODO(@mhguo): or 0.8? or a free parameter?
+            if (zid>0 && rad < 0.8*rzoom) {
               int zmp = zm-nlf;
               int prei = finei - cnx1 * x1l;
               int prej = finej - cnx2 * x2l;
@@ -813,6 +841,7 @@ void Zoom::UpdateHydroVariables(int zm, int m) {
 //! \brief Syncronize variables between different ranks
 
 // TODO (@mhguo): check whether this is correct
+// TODO(@mhguo): consider use SyncZoomEField
 void Zoom::SyncVariables() {
 #if MPI_PARALLEL_ENABLED
   // broadcast zoom data
@@ -1304,8 +1333,12 @@ void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
   int nmb1 = pmy_pack->nmb_thispack-1;
   if (zamr.first_emf) {
     UpdateDeltaEField(emf);
-    SyncDeltaEField();
-    DumpData();
+    SyncZoomEField(emf0,nleaf*(zamr.zone-1));
+    SyncZoomEField(delta_efld,nleaf*(zamr.zone-1));
+    SetMaxEField();
+    if (dump_diag) {
+      DumpData();
+    }
     // TODO(@mhguo): print basic information or not
     zamr.first_emf = false;
   }
@@ -1347,6 +1380,10 @@ void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
     //             << " poy_pow = " << poy_pow << " emf_f1 = " << f1 << std::endl;
     // }
   }
+  // TODO(@mhguo): may set the coefficient as a free parameter?
+  Real emax1 = emf_fmax*max_emf0(zamr.zone-1,0);
+  Real emax2 = emf_fmax*max_emf0(zamr.zone-1,1);
+  Real emax3 = emf_fmax*max_emf0(zamr.zone-1,2);
   par_for("apply-emf", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1 ,is-1, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -1375,13 +1412,19 @@ void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
     int cj = j - cnx2 * x2l;
     int ck = k - cnx3 * x3l;
     if (sqrt(SQR(x1v)+SQR(x2f)+SQR(x3f)) < rzoom) {
-      ef1(m,k,j,i) = f0*ef1(m,k,j,i) + f1*de1(zm,ck,cj,ci);
+      // ef1(m,k,j,i) = f0*ef1(m,k,j,i) + f1*de1(zm,ck,cj,ci);
+      // limit de1 to be between -emax1 and emax1
+      ef1(m,k,j,i) = f0*ef1(m,k,j,i) + f1*fmax(-emax1, fmin(emax1, de1(zm,ck,cj,ci)));
     }
     if (sqrt(SQR(x1f)+SQR(x2v)+SQR(x3f)) < rzoom) {
-      ef2(m,k,j,i) = f0*ef2(m,k,j,i) + f1*de2(zm,ck,cj,ci);
+      // ef2(m,k,j,i) = f0*ef2(m,k,j,i) + f1*de2(zm,ck,cj,ci);
+      // limit de2 to be between -emax2 and emax2
+      ef2(m,k,j,i) = f0*ef2(m,k,j,i) + f1*fmax(-emax2, fmin(emax2, de2(zm,ck,cj,ci)));
     }
     if (sqrt(SQR(x1f)+SQR(x2f)+SQR(x3v)) < rzoom) {
-      ef3(m,k,j,i) = f0*ef3(m,k,j,i) + f1*de3(zm,ck,cj,ci);
+      // ef3(m,k,j,i) = f0*ef3(m,k,j,i) + f1*de3(zm,ck,cj,ci);
+      // limit de3 to be between -emax3 and emax3
+      ef3(m,k,j,i) = f0*ef3(m,k,j,i) + f1*fmax(-emax3, fmin(emax3, de3(zm,ck,cj,ci)));
     }
   });
 
@@ -1408,6 +1451,9 @@ void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
   auto e1 = efld.x1e;
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
+  auto e01 = emf0.x1e;
+  auto e02 = emf0.x2e;
+  auto e03 = emf0.x3e;
   auto de1 = delta_efld.x1e;
   auto de2 = delta_efld.x2e;
   auto de3 = delta_efld.x3e;
@@ -1439,6 +1485,9 @@ void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
           int fi = ci + cnx1 * x1l; // correct if cis = is
           int fj = cj + cnx2 * x2l; // correct if cjs = js
           int fk = ck + cnx3 * x3l; // correct if cks = ks
+          e01(zm,ck,cj,ci) = ef1(m,fk,fj,fi);
+          e02(zm,ck,cj,ci) = ef2(m,fk,fj,fi);
+          e03(zm,ck,cj,ci) = ef3(m,fk,fj,fi);
           de1(zm,ck,cj,ci) = e1(zm,ck,cj,ci) - ef1(m,fk,fj,fi);
           de2(zm,ck,cj,ci) = e2(zm,ck,cj,ci) - ef2(m,fk,fj,fi);
           de3(zm,ck,cj,ci) = e3(zm,ck,cj,ci) - ef3(m,fk,fj,fi);
@@ -1459,15 +1508,15 @@ void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void Zoom::SyncDeltaEField()
+//! \fn void Zoom::SyncZoomEField()
 //! \brief Syncronize variables between different ranks
 
 // TODO (@mhguo): may not be necessary, consider removing
-void Zoom::SyncDeltaEField() {
+void Zoom::SyncZoomEField(DvceEdgeFld4D<Real> emf, int zid) {
 #if MPI_PARALLEL_ENABLED
   if (zamr.zone == 0) return;
   if (global_variable::my_rank == 0) {
-    std::cout << "Zoom: SyncDeltaEField" << std::endl;
+    std::cout << "Zoom: SyncZoomEField" << std::endl;
   }
   // broadcast zoom data
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -1478,7 +1527,7 @@ void Zoom::SyncDeltaEField() {
   int e2_slice_size = (n_ccells3+1) * n_ccells2 * (n_ccells1+1);
   int e3_slice_size = n_ccells3 * (n_ccells2+1) * (n_ccells1+1);
 
-  int zid = nleaf*(zamr.zone-1);
+  // int zid = nleaf*(zamr.zone-1);
   for (int leaf=0; leaf<nleaf; ++leaf) {
     // determine which rank is the "root" rank
     int zm = zid + leaf;
@@ -1499,27 +1548,68 @@ void Zoom::SyncDeltaEField() {
     }
     // It looks device to device communication is not supported, so copy to host first
     Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2+1, n_ccells1);
-    auto e1_slice = Kokkos::subview(delta_efld.x1e, Kokkos::make_pair(zm,zm+1), 
-                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    auto e1_slice = Kokkos::subview(emf.x1e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL, Kokkos::ALL);
     Kokkos::deep_copy(harr_4d, e1_slice);
     MPI_Bcast(harr_4d.data(), e1_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
     Kokkos::deep_copy(e1_slice, harr_4d);
     
     Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2, n_ccells1+1);
-    auto e2_slice = Kokkos::subview(delta_efld.x2e, Kokkos::make_pair(zm,zm+1),
-                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    auto e2_slice = Kokkos::subview(emf.x2e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL, Kokkos::ALL);
     Kokkos::deep_copy(harr_4d, e2_slice);
     MPI_Bcast(harr_4d.data(), e2_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
     Kokkos::deep_copy(e2_slice, harr_4d);
     
     Kokkos::realloc(harr_4d, 1, n_ccells3, n_ccells2+1, n_ccells1+1);
-    auto e3_slice = Kokkos::subview(delta_efld.x3e, Kokkos::make_pair(zm,zm+1), 
-                                    Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
+    auto e3_slice = Kokkos::subview(emf.x3e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
+                                    Kokkos::ALL, Kokkos::ALL);
     Kokkos::deep_copy(harr_4d, e3_slice);
     MPI_Bcast(harr_4d.data(), e3_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
     Kokkos::deep_copy(e3_slice, harr_4d);
   }
 #endif
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::SetMaxEField()
+//! \brief Set maximum E field on the zoomed grid
+
+void Zoom::SetMaxEField() {
+  if (zamr.zone == 0) return;
+  auto pm = pmy_pack->pmesh;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, cnx1p1 = indcs.cnx1+1;
+  int js = indcs.js, cnx2p1 = indcs.cnx2+1;
+  int ks = indcs.ks, cnx3p1 = indcs.cnx3+1;
+  const int zid = nleaf*(zamr.zone-1);
+  const int nmkji = nleaf*cnx3p1*cnx2p1*cnx1p1;
+  const int nkji = cnx3p1*cnx2p1*cnx1p1;
+  const int nji  = cnx2p1*cnx1p1;
+  const int ni = cnx1p1;
+  auto e01 = emf0.x1e;
+  auto e02 = emf0.x2e;
+  auto e03 = emf0.x3e;
+  Real emax1 = 0.0;
+  Real emax2 = 0.0;
+  Real emax3 = 0.0;
+  Kokkos::parallel_reduce("max_emf0_1",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &max_e1, Real &max_e2, Real &max_e3) {
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/ni;
+    int i = (idx - m*nkji - k*nji - j*ni) + is;
+    k += ks;
+    j += js;
+    m += zid;
+    max_e1 = fmax(max_e1, fabs(e01(m,k,j,i)));
+    max_e2 = fmax(max_e2, fabs(e02(m,k,j,i)));
+    max_e3 = fmax(max_e3, fabs(e03(m,k,j,i)));
+  }, Kokkos::Max<Real>(emax1), Kokkos::Max<Real>(emax2),Kokkos::Max<Real>(emax3));
+  max_emf0(zamr.zone-1,0) = emax1;
+  max_emf0(zamr.zone-1,1) = emax2;
+  max_emf0(zamr.zone-1,2) = emax3;
   return;
 }
 

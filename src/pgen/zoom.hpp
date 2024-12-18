@@ -71,6 +71,7 @@ class Zoom
   bool zoom_ref;           // flag for zoom refinement
   bool zoom_dt;            // flag for zoom time step
   bool fix_efield;         // flag for fixing electric field
+  bool dump_diag;          // flag for dumping diagnostic output
   int ndiag;               // cycles between diagostic output
   int mzoom;               // number of zoom meshblocks
   int nleaf;               // number of zoom meshblocks on each level
@@ -81,6 +82,7 @@ class Zoom
   Real d_zoom;             // density within inner boundary
   Real p_zoom;             // pressure within inner boundary
   Real emf_f0, emf_f1;     // electric field factor, e = f0 * e0 + f1 * e1
+  Real emf_fmax;           // maximum electric field factor
 
   ZoomAMR zamr;            // zoom AMR parameters
   ZoomInterval zint;       // zoom interval parameters
@@ -95,7 +97,10 @@ class Zoom
 
   // following only used for time-evolving flow
   DvceEdgeFld4D<Real> efld;   // edge-centered electric fields (fluxes of B)
+  DvceEdgeFld4D<Real> emf0;   // edge-centered electric fields just after zoom
   DvceEdgeFld4D<Real> delta_efld; // change in electric fields
+
+  HostArray2D<Real> max_emf0;  // maximum electric field
 
   // fluxes through spherical surfaces
   HostArray3D<Real> zoom_fluxes;
@@ -126,7 +131,8 @@ class Zoom
   void ApplyEField(DvceEdgeFld4D<Real> emf);
   void AddDeltaEField(DvceEdgeFld4D<Real> emf);
   void UpdateDeltaEField(DvceEdgeFld4D<Real> emf);
-  void SyncDeltaEField();
+  void SyncZoomEField(DvceEdgeFld4D<Real> emf, int zid);
+  void SetMaxEField();
   void SphericalFlux(int n, int g);
   Real NewTimeStep(Mesh* pm);
   Real GRTimeStep(Mesh* pm);
