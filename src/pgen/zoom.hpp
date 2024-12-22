@@ -128,7 +128,7 @@ class Zoom
   void ApplyVariables();
   void FixEField(DvceEdgeFld4D<Real> emf);
   void MeanEField(DvceEdgeFld4D<Real> emf);
-  void ApplyEField(DvceEdgeFld4D<Real> emf);
+  void AddEField(DvceEdgeFld4D<Real> emf);
   void AddDeltaEField(DvceEdgeFld4D<Real> emf);
   void UpdateDeltaEField(DvceEdgeFld4D<Real> emf);
   void SyncZoomEField(DvceEdgeFld4D<Real> emf, int zid);

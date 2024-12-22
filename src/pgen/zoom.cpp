@@ -58,8 +58,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zint.t_run_fac_zone_6 = pin->GetOrAddReal("zoom","t_run_fac_zone_6",zint.t_run_fac);
   zint.t_run_fac_zone_max = pin->GetOrAddReal("zoom","t_run_fac_zone_max",zint.t_run_fac);
 
-  // TODO(@mhguo): consider a new way to set these parameters such that the initial level 
-  // TODO(@mhguo): is same as the initial max level of the mesh,
+  // TODO(@mhguo): may set the parameters so that the initial level equals the max level
   // TODO(@mhguo): currently we need to check whether zamr.level is correct by hand
   auto pmesh = pmy_pack->pmesh;
   zamr.nlevels = pin->GetOrAddInteger("zoom","nlevels",4);
@@ -138,7 +137,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
       }
     }
   }
-  // TODO(@mhguo): only do this when needed, it is slow
+  // only do this when needed since it is slow
   if (emf_flag >= 3) {
     // construct spherical grids
     int anglevel = 10;
@@ -159,8 +158,6 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
 //! \fn void Zoom::Initialize()
 //! \brief Initialize Zoom variables
 
-// TODO(@mhguo): Check whether this is correct
-// Set density, velocity, pressure
 void Zoom::Initialize()
 {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -292,8 +289,6 @@ void Zoom::PrintInfo()
 //! \fn void Zoom::BoundaryConditions()
 //! \brief User-defined boundary conditions
 
-// TODO(@mhguo): not including ghost cells now, should determine if we need
-// TODO(@Mhguo): decide whehter we still need the sink condition
 void Zoom::BoundaryConditions()
 {
   if (!zoom_bcs) return;
@@ -358,16 +353,6 @@ void Zoom::BoundaryConditions()
 
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-    // vacuum boundary conditions
-    // // apply initial conditions to boundary cells
-    // if (rad < rin) {
-    //   // store conserved quantities in 3D array
-    //   u0_(m,IDN,k,j,i) = dzoom;
-    //   u0_(m,IM1,k,j,i) = 0.0;
-    //   u0_(m,IM2,k,j,i) = 0.0;
-    //   u0_(m,IM3,k,j,i) = 0.0;
-    //   u0_(m,IEN,k,j,i) = pzoom/gm1;
-    // }
     if (rad < rzoom) {
       bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
       bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
@@ -425,6 +410,10 @@ void Zoom::BoundaryConditions()
   return;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::AMR()
+//! \brief Main function for Zoom Adaptive Mesh Refinement
+
 void Zoom::AMR() {
   if (!zoom_ref) return;
   zamr.just_zoomed = false;
@@ -438,13 +427,13 @@ void Zoom::AMR() {
       // TODO(@mhguo): only store the data needed on this rank instead of holding all
       SyncVariables();
       UpdateGhostVariables();
-      if (fix_efield) {
-        if (emf_flag >=1) {
-          zamr.first_emf = true;
-        }
-        if (emf_flag >= 3) {
-          SphericalFlux(0,zamr.zone+1); // store fluxes
-        }
+    }
+    if (fix_efield && zamr.direction < 0) {
+      if (emf_flag >=1) {
+        zamr.first_emf = true;
+      }
+      if (emf_flag >= 3) {
+        SphericalFlux(0,zamr.zone+1); // store fluxes
       }
     }
     RefineCondition();
@@ -462,6 +451,10 @@ void Zoom::AMR() {
     zamr.just_zoomed = true;
   }
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void Zoom::SetInterval()
+//! \brief Set the time interval for the next zoom
 
 void Zoom::SetInterval() {
   zamr.radius = std::pow(2.0,static_cast<Real>(zamr.zone));
@@ -484,7 +477,6 @@ void Zoom::SetInterval() {
 //! \fn void Zoom::DumpData()
 //! \brief dump zoom data to file
 
-// TODO(@mhguo): consider whether we need to dump data
 // TODO: dumping on a single rank now, should consider parallel dumping
 void Zoom::DumpData() {
   if (global_variable::my_rank == 0) {
@@ -584,7 +576,7 @@ void Zoom::RefineCondition() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Zoom::UpdateVariables()
-//! \brief User-defined update of variables
+//! \brief Update variables before zooming
 
 void Zoom::UpdateVariables() {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -672,13 +664,11 @@ void Zoom::UpdateVariables() {
             e2(zm,k,j,i) = 0.5*(ef2(m,finek,finej,finei) + ef2(m,finek,finej+1,finei));
             e3(zm,k,j,i) = 0.5*(ef3(m,finek,finej,finei) + ef3(m,finek+1,finej,finei));
             
-            // TODO (@mhguo): is this the correct radius? No it is not! Fix it ASAP
-            // now it looks 0.5*rzoom works, but need to set a better value
+            // TODO(@mhguo): it looks 0.8*rzoom works, but ideally should use edge center
             Real x1v = CellCenterX(i-cis, cnx1, x1min, x1max);
             Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
             Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
             Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-            // TODO(@mhguo): or 0.8? or a free parameter?
             if (zid>0 && rad < 0.8*rzoom) {
               int zmp = zm-nlf;
               int prei = finei - cnx1 * x1l;
@@ -705,9 +695,8 @@ void Zoom::UpdateVariables() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Zoom::UpdateHydroVariables()
-//! \brief User-defined update of variables
+//! \brief Update hydro variables using conserved hydro variables
 
-// TODO(@mhguo): only for GR now, need to implement for Newtonian
 void Zoom::UpdateHydroVariables(int zm, int m) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
@@ -840,8 +829,6 @@ void Zoom::UpdateHydroVariables(int zm, int m) {
 //! \fn void Zoom::SyncVariables()
 //! \brief Syncronize variables between different ranks
 
-// TODO (@mhguo): check whether this is correct
-// TODO(@mhguo): consider use SyncZoomEField
 void Zoom::SyncVariables() {
 #if MPI_PARALLEL_ENABLED
   // broadcast zoom data
@@ -856,10 +843,6 @@ void Zoom::SyncVariables() {
   int w0_slice_size = nvars * ncells1 * ncells2 * ncells3;
   int cu_slice_size = nvars * n_ccells1 * n_ccells2 * n_ccells3;
   int cw_slice_size = nvars * n_ccells1 * n_ccells2 * n_ccells3;
-  int e1_slice_size = (n_ccells3+1) * (n_ccells2+1) * n_ccells1;
-  int e2_slice_size = (n_ccells3+1) * n_ccells2 * (n_ccells1+1);
-  int e3_slice_size = n_ccells3 * (n_ccells2+1) * (n_ccells1+1);
-  
   int zid = nleaf*zamr.zone;
   for (int leaf=0; leaf<nleaf; ++leaf) {
     // determine which rank is the "root" rank
@@ -905,28 +888,8 @@ void Zoom::SyncVariables() {
     Kokkos::deep_copy(harr_5d, cw_slice);
     MPI_Bcast(harr_5d.data(), cw_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
     Kokkos::deep_copy(cw_slice, harr_5d);
-    
-    Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2+1, n_ccells1);
-    auto e1_slice = Kokkos::subview(efld.x1e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
-                                    Kokkos::ALL,Kokkos::ALL);
-    Kokkos::deep_copy(harr_4d, e1_slice);
-    MPI_Bcast(harr_4d.data(), e1_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
-    Kokkos::deep_copy(e1_slice, harr_4d);
-    
-    Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2, n_ccells1+1);
-    auto e2_slice = Kokkos::subview(efld.x2e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
-                                    Kokkos::ALL,Kokkos::ALL);
-    Kokkos::deep_copy(harr_4d, e2_slice);
-    MPI_Bcast(harr_4d.data(), e2_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
-    Kokkos::deep_copy(e2_slice, harr_4d);
-    
-    Kokkos::realloc(harr_4d, 1, n_ccells3, n_ccells2+1, n_ccells1+1);
-    auto e3_slice = Kokkos::subview(efld.x3e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
-                                    Kokkos::ALL,Kokkos::ALL);
-    Kokkos::deep_copy(harr_4d, e3_slice);
-    MPI_Bcast(harr_4d.data(), e3_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
-    Kokkos::deep_copy(e3_slice, harr_4d);
   }
+  SyncZoomEField(efld,nleaf*zamr.zone);
 #endif
   return;
 }
@@ -935,7 +898,7 @@ void Zoom::SyncVariables() {
 //! \fn void Zoom::UpdateGhostVariables()
 //! \brief Update variables in ghost cells between different meshblocks
 
-// TODO(@mhguo): add emf
+// TODO(@mhguo): add emf?
 void Zoom::UpdateGhostVariables() {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &ng = indcs.ng;
@@ -996,7 +959,6 @@ void Zoom::UpdateGhostVariables() {
 //! \fn void Zoom::ApplyVariables()
 //! \brief Apply finer level variables to coarser level
 
-// TODO(@mhguo): looks not correct, need to check with b-field
 void Zoom::ApplyVariables() {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
@@ -1117,7 +1079,7 @@ void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
   if (emf_flag == 0) {
     MeanEField(emf);
   } else if (emf_flag == 1) {
-    ApplyEField(emf);
+    AddEField(emf);
   } else if (emf_flag == 2) {
     AddDeltaEField(emf);
   } else if (emf_flag == 3) {
@@ -1245,11 +1207,11 @@ void Zoom::MeanEField(DvceEdgeFld4D<Real> emf) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void Zoom::ApplyEField()
-//! \brief Fix E field on the zoomed grid
+//! \fn void Zoom::AddEField()
+//! \brief Add E field from small scale
 
 // TODO(@mhguo): check the corner case in ghost zones
-void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
+void Zoom::AddEField(DvceEdgeFld4D<Real> emf) {
   if (zamr.zone == 0) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
@@ -1292,7 +1254,6 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
     bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
     int leaf_id = 1*x1r + 2*x2r + 4*x3r;
     int zm = zid + leaf_id;
-    // TODO: check if this is correct
     int ci = i - cnx1 * x1l;
     int cj = j - cnx2 * x2l;
     int ck = k - cnx3 * x3l;
@@ -1313,16 +1274,12 @@ void Zoom::ApplyEField(DvceEdgeFld4D<Real> emf) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void Zoom::AaptiveEField()
-//! \brief Add adaptive E field on the zoomed grid
+//! \fn void Zoom::AddDeltaEField()
+//! \brief Add delta E field from small scale or adaptive E field
 
 // TODO(@mhguo): check the corner case in ghost zones
 void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
   if (zamr.zone == 0) return;
-  // TODO(@mhguo): remove this or set interval
-  // if (global_variable::my_rank == 0) {
-  //   std::cout << "Zoom: AddDeltaEField" << std::endl;
-  // }
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size = pmy_pack->pmb->mb_size;
   int &is = indcs.is;  int &ie  = indcs.ie;
@@ -1380,7 +1337,6 @@ void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
     //             << " poy_pow = " << poy_pow << " emf_f1 = " << f1 << std::endl;
     // }
   }
-  // TODO(@mhguo): may set the coefficient as a free parameter?
   Real emax1 = emf_fmax*max_emf0(zamr.zone-1,0);
   Real emax2 = emf_fmax*max_emf0(zamr.zone-1,1);
   Real emax3 = emf_fmax*max_emf0(zamr.zone-1,2);
@@ -1407,7 +1363,6 @@ void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
     bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
     int leaf_id = 1*x1r + 2*x2r + 4*x3r;
     int zm = zid + leaf_id;
-    // TODO: check if this is correct
     int ci = i - cnx1 * x1l;
     int cj = j - cnx2 * x2l;
     int ck = k - cnx3 * x3l;
@@ -1491,15 +1446,6 @@ void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
           de1(zm,ck,cj,ci) = e1(zm,ck,cj,ci) - ef1(m,fk,fj,fi);
           de2(zm,ck,cj,ci) = e2(zm,ck,cj,ci) - ef2(m,fk,fj,fi);
           de3(zm,ck,cj,ci) = e3(zm,ck,cj,ci) - ef3(m,fk,fj,fi);
-          // TODO(@mhguo): remove this or set interval
-          // if (ck == cks + 2) {
-          //   printf("DeltaEField: zm=%d, m=%d, ck=%d, cj=%d, ci=%d, \
-          //   e1=%e, ef1=%e, de1=%e, e2=%e, ef2=%e, de2=%e, e3=%e, ef3=%e, de3=%e\n",
-          //        zm, m, ck, cj, ci, 
-          //        e1(zm,ck,cj,ci), ef1(m,fk,fj,fi), de1(zm,ck,cj,ci),
-          //        e2(zm,ck,cj,ci), ef2(m,fk,fj,fi), de2(zm,ck,cj,ci),
-          //        e3(zm,ck,cj,ci), ef3(m,fk,fj,fi), de3(zm,ck,cj,ci));
-          // }
         });
       }
     }
@@ -1511,10 +1457,8 @@ void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
 //! \fn void Zoom::SyncZoomEField()
 //! \brief Syncronize variables between different ranks
 
-// TODO (@mhguo): may not be necessary, consider removing
 void Zoom::SyncZoomEField(DvceEdgeFld4D<Real> emf, int zid) {
 #if MPI_PARALLEL_ENABLED
-  if (zamr.zone == 0) return;
   if (global_variable::my_rank == 0) {
     std::cout << "Zoom: SyncZoomEField" << std::endl;
   }
@@ -1610,6 +1554,10 @@ void Zoom::SetMaxEField() {
   max_emf0(zamr.zone-1,0) = emax1;
   max_emf0(zamr.zone-1,1) = emax2;
   max_emf0(zamr.zone-1,2) = emax3;
+  if (global_variable::my_rank == 0) {
+    std::cout << "Zoom: MaxEField: max_emf0 = " << emax1 << " " << emax2 << " " << emax3
+              << std::endl;
+  }
   return;
 }
 
@@ -1790,7 +1738,6 @@ Real Zoom::NewTimeStep(Mesh* pm) {
   //   }
   // }
   // dt = fmin(dt_emf, dt); // get minimum of EMFTimeStep and dt
-  // TODO(@mhguo): can the flux speed in EMFTimeStep be larger than c? Need to check
   return dt;
 }
 
@@ -2081,7 +2028,6 @@ Real Zoom::EMFTimeStep(Mesh* pm) {
     bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
     int leaf_id = 1*x1r + 2*x2r + 4*x3r;
     int zm = zid + leaf_id;
-    // TODO: check if this is correct
     int ci = i - cnx1 * x1l;
     int cj = j - cnx2 * x2l;
     int ck = k - cnx3 * x3l;
