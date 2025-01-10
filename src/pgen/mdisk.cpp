@@ -29,6 +29,7 @@ struct mdisk_pgen {
   Real iso_cs;              // isothermal sound speed
   Real r_refine = 0.0;      // refinement radius
   int  refine_type = 1;     // refinement type
+  int  refine_l_max = 0;    // maximum refinement level
   int  refine_res_l = 5;    // resolution level
   Real refine_res_r = 64.0; // region with the resolution we want
   Real r_in = 1.0;          // inner radius
@@ -101,12 +102,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     mdisk.r_refine = pin->GetReal("problem","r_refine");
     mdisk.refine_type = pin->GetOrAddInteger("problem","refine_type",1);
     if (mdisk.refine_type == 2) {
+      mdisk.refine_l_max = pin->GetOrAddInteger("problem","refine_l_max",pmy_mesh_->max_level);
       mdisk.refine_res_l = pin->GetOrAddInteger("problem","refine_res_l",5);
       mdisk.refine_res_r = pin->GetOrAddReal("problem","refine_res_r",64.0);
     }
     if (global_variable::my_rank == 0) {
       std::cout << "Refinement radius: " << mdisk.r_refine << std::endl;
       std::cout << "Refinement type: " << mdisk.refine_type << std::endl;
+      std::cout << "Refinement level max: " << mdisk.refine_l_max << std::endl;
       std::cout << "Refinement res level: " << mdisk.refine_res_l << std::endl;
       std::cout << "Refinement res region: " << mdisk.refine_res_r << std::endl;
     }
@@ -1067,6 +1070,7 @@ void UserRefine(MeshBlockPack* pmbp) {
 
   // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
   auto refine_flag_ = pm->pmr->refine_flag;
+  auto lloc_mb = pm->lloc_eachmb;
   Real rad_thresh  = mdisk.r_refine;
   int nmb = pmbp->nmb_thispack;
   int mbs = pm->gids_eachrank[global_variable::my_rank];
@@ -1091,31 +1095,64 @@ void UserRefine(MeshBlockPack* pmbp) {
     });
   }
   if (mdisk.refine_type==2) {
+    int l_max = mdisk.refine_l_max;
     int res_l = mdisk.refine_res_l;
     Real res_min = std::pow(2.0,res_l);
     Real res_max = std::pow(2.0,res_l+1);
     Real res_r = mdisk.refine_res_r;
-    par_for_outer("UserRefine2",DevExeSpace(), 0, 0, 0, (nmb-1),
-    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
+    for (int m = 0; m < nmb; ++m) {
+      Real &x1min = size.h_view(m).x1min;
+      Real &x1max = size.h_view(m).x1max;
+      Real &x2min = size.h_view(m).x2min;
+      Real &x2max = size.h_view(m).x2max;
+      Real &x3min = size.h_view(m).x3min;
+      Real &x3max = size.h_view(m).x3max;
       Real ax1max = fmax(fabs(x1min), fabs(x1max));
       Real ax2max = fmax(fabs(x2min), fabs(x2max));
       Real ax3max = fmax(fabs(x3min), fabs(x3max));
       Real xmax   = fmax(ax1max, fmax(ax2max, ax3max));
-      Real dx     = fmin(fmin(size.d_view(m).dx1,size.d_view(m).dx2),size.d_view(m).dx3);
-      Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+      Real dx     = fmin(fmin(size.h_view(m).dx1,size.h_view(m).dx2),size.h_view(m).dx3);
+      Real vol = size.h_view(m).dx1*size.h_view(m).dx2*size.h_view(m).dx3;
       // if (xmax<=64.0 && xmax > 8.0) {
       if (xmax<=res_r) {
-        if (xmax <= res_min*dx) {refine_flag_.d_view(m+mbs) = 1;}
-        else if (xmax > res_max*dx) {refine_flag_.d_view(m+mbs) = -1;}
-        else {refine_flag_.d_view(m+mbs) = 0;}
+        if (xmax <= res_min*dx) {refine_flag_.h_view(m+mbs) = 1;}
+        else if (xmax > res_max*dx) {refine_flag_.h_view(m+mbs) = -1;}
+        else {refine_flag_.h_view(m+mbs) = 0;}
+        // set upper limit on refinement level
+        if (lloc_mb[m+mbs].level > l_max) {refine_flag_.h_view(m+mbs) = -1;}
+        else if (lloc_mb[m+mbs].level == l_max && refine_flag_.h_view(m+mbs) == 1) {
+          refine_flag_.h_view(m+mbs) = 0;
+        }
+        else {}
+        // std cout mbs, m, level, xmax, dx, refine_flag
+        // std::cout << "mbs: " << mbs << " m: " << m << " level: " << lloc_mb[m+mbs].level
+        //           << " xmax: " << xmax << " dx: " << dx << " refine_flag: " 
+        //           << refine_flag_.h_view(m+mbs) << std::endl;
       }
-    });
+    }
+    refine_flag_.template modify<HostMemSpace>();
+    refine_flag_.template sync<DevExeSpace>();
+    // par_for_outer("UserRefine2",DevExeSpace(), 0, 0, 0, (nmb-1),
+    // KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+    //   Real &x1min = size.d_view(m).x1min;
+    //   Real &x1max = size.d_view(m).x1max;
+    //   Real &x2min = size.d_view(m).x2min;
+    //   Real &x2max = size.d_view(m).x2max;
+    //   Real &x3min = size.d_view(m).x3min;
+    //   Real &x3max = size.d_view(m).x3max;
+    //   Real ax1max = fmax(fabs(x1min), fabs(x1max));
+    //   Real ax2max = fmax(fabs(x2min), fabs(x2max));
+    //   Real ax3max = fmax(fabs(x3min), fabs(x3max));
+    //   Real xmax   = fmax(ax1max, fmax(ax2max, ax3max));
+    //   Real dx     = fmin(fmin(size.d_view(m).dx1,size.d_view(m).dx2),size.d_view(m).dx3);
+    //   Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    //   // if (xmax<=64.0 && xmax > 8.0) {
+    //   if (xmax<=res_r) {
+    //     if (xmax <= res_min*dx) {refine_flag_.d_view(m+mbs) = 1;}
+    //     else if (xmax > res_max*dx) {refine_flag_.d_view(m+mbs) = -1;}
+    //     else {refine_flag_.d_view(m+mbs) = 0;}
+    //   }
+    // });
   }
 }
 
