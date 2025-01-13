@@ -29,8 +29,10 @@
 #include "geodesic-grid/spherical_grid.hpp"
 #include "eos/eos.hpp"
 #include "globals.hpp"
+#include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
+#include "pgen/zoom.hpp"
 
 namespace {
 
@@ -39,6 +41,9 @@ void ReflectingMonopole(Mesh *pm);
 
 // user-defined analysis called at end of run
 void MonopoleDiagnostic(ParameterInput *pin, Mesh *pm);
+
+// user-defined history function
+void MonopoleFluxes(HistoryData *pdata, Mesh *pm);
 
 // prototypes for functions used internally to this pgen
 
@@ -83,6 +88,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // User boundary function
   user_bcs_func = ReflectingMonopole;
 
+  // User history function
+  user_hist_func = MonopoleFluxes;
+
   // Capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -104,6 +112,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Extract problem parameters
   Real sigma_max = pin->GetOrAddReal("problem", "sigma_max", 1.e2);
+  Real sigma_n = pin->GetOrAddReal("problem", "sigma_n", -1.0); // sigma slope
   Real rhomin = pin->GetOrAddReal("problem", "rhomin", 1.e-6);
   Real umin = pin->GetOrAddReal("problem", "umin", 1.e-8);
   Real a_norm = pin->GetOrAddReal("problem", "a_norm", 1.0);
@@ -111,6 +120,30 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real rc = 10.0*rh;
   Real &dexcise = coord.dexcise;
   Real &pexcise = coord.pexcise;
+  bool whole_domain = pmy_mesh_->mesh_size.x3min < 0.0;
+  if (global_variable::my_rank == 0) {
+    std::cout << "Whole domain: " << whole_domain << std::endl;
+  }
+
+  // Spherical Grid for user-defined history
+  auto &grids = spherical_grids;
+  const Real rflux = 1.0 + sqrt(1.0 - SQR(spin));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5)));
+  int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
+  Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 3.0);
+  Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
+  for (int i=0; i<hist_nr-2; i++) {
+    Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-3))*rmin;
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i));
+  }
+  if (global_variable::my_rank == 0) {
+    std::cout << "Spherical grids for user-defined history:" << std::endl;
+    for (auto &grid : grids) {
+      std::cout << "  r = " << grid->radius << std::endl;
+    }
+  }
+  if (restart) return;
 
   // initialize primitive variables for new run ------------------------------------------
 
@@ -135,8 +168,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     // Calculate background primitives
     Real rho_bg, pgas_bg;
     if (r > 1.0) {
-      rho_bg  =     (rhomin + (r/rc)/pow(r,4.)/sigma_max);
-      pgas_bg = gm1*(umin   + (r/rc)/pow(r,4.)/sigma_max);
+      rho_bg  =     (rhomin + pow(r/rc,-sigma_n)/pow(r,4.)/sigma_max);
+      pgas_bg = gm1*(umin   + pow(r/rc,-sigma_n)/pow(r,4.)/sigma_max);
     } else {
       rho_bg  = dexcise;
       pgas_bg = pexcise;
@@ -454,6 +487,7 @@ void ReflectingMonopole(Mesh *pm) {
   int &js = indcs.js;  int &je  = indcs.je;
   int &ks = indcs.ks;  int &ke  = indcs.ke;
   auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
+  bool whole_domain = pm->mesh_size.x3min < 0.0;
 
   // Select either Hydro or MHD
   auto &u0_ = pm->pmb_pack->pmhd->u0;
@@ -616,7 +650,8 @@ void ReflectingMonopole(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
       for (int k=0; k<ng; ++k) {
         if (n==(IVZ)) {
-          w0_(m,n,ks-k-1,j,i) = fmin(0.0,w0_(m,n,ks,j,i));
+          w0_(m,n,ks-k-1,j,i) = -w0_(m,n,ks,j,i);
+          if (whole_domain) { w0_(m,n,ks-k-1,j,i) = fmin(0.0,w0_(m,n,ks,j,i)); }
         } else {
           w0_(m,n,ks-k-1,j,i) = w0_(m,n,ks,j,i);
         }
@@ -641,7 +676,8 @@ void ReflectingMonopole(Mesh *pm) {
         if (i == n1-1) {b0.x1f(m,ks-k-1,j,i+1) = b0.x1f(m,ks,j,i+1);}
         b0.x2f(m,ks-k-1,j,i) = b0.x2f(m,ks,j,i);
         if (j == n2-1) {b0.x2f(m,ks-k-1,j+1,i) = b0.x2f(m,ks,j+1,i);}
-        b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i);
+        b0.x3f(m,ks-k-1,j,i) = -b0.x3f(m,ks,j,i);
+        if (whole_domain) { b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i); }
       }
     }
     if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
@@ -776,7 +812,14 @@ void MonopoleDiagnostic(ParameterInput *pin, Mesh *pm) {
     // Compute field rotation rate (in units of rotation rate of horizon)
     // Should give value ~1/2
     Real omega = 0.0;
-    if (x3 > 0) {omega = ((uph*br - ur*bph)/fmax(u0*br - ur*b0, 1.0e-12))/(0.5*spin/rh);}
+    // if (x3 > 0) {omega = ((uph*br - ur*bph)/fmax(u0*br - ur*b0, 1.0e-12))/(0.5*spin/rh);}
+    if (u0*br - ur*b0 > 0.0) {
+      omega = ((uph*br - ur*bph)/fmax(u0*br - ur*b0, 1.0e-12))/(0.5*spin/rh);
+    } else if (u0*br - ur*b0 < 0.0) {
+      omega = ((uph*br - ur*bph)/fmin(u0*br - ur*b0, -1.0e-12))/(0.5*spin/rh);
+    } else {
+      omega = 0.0;
+    }
 
     // store field rotation rate at theta, phi locations
     monopole_diag[n] = omega;
@@ -804,7 +847,7 @@ void MonopoleDiagnostic(ParameterInput *pin, Mesh *pm) {
 
     // write diagnostics
     for (int n=0; n<psph->nangles; ++n) {
-      if (psph->interp_coord.h_view(n,2) > 0.0) {
+      if (psph->interp_coord.h_view(n,2) != 0.0) {
         std::fprintf(pfile, "%12.5e ", psph->polar_pos.h_view(n,0));
         std::fprintf(pfile, "%12.5e ", psph->polar_pos.h_view(n,1));
         std::fprintf(pfile, "%12.5e ", monopole_diag[n]);
@@ -816,6 +859,223 @@ void MonopoleDiagnostic(ParameterInput *pin, Mesh *pm) {
 
   // delete SphericalGrid object
   delete psph;
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+// Function for computing accretion fluxes through constant spherical KS radius surfaces
+
+void MonopoleFluxes(HistoryData *pdata, Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+
+  // extract BH parameters
+  bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+  Real &spin = pmbp->pcoord->coord_data.bh_spin;
+  Real rh = 1.0 + sqrt(1.-SQR(spin));
+
+  // set nvars, adiabatic index, primitive array w0, and field array bcc0 if is_mhd
+  int nvars; Real gamma; bool is_mhd = false;
+  DvceArray5D<Real> w0_, bcc0_;
+  if (pmbp->phydro != nullptr) {
+    nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
+    gamma = pmbp->phydro->peos->eos_data.gamma;
+    w0_ = pmbp->phydro->w0;
+  } else if (pmbp->pmhd != nullptr) {
+    is_mhd = true;
+    nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+    gamma = pmbp->pmhd->peos->eos_data.gamma;
+    w0_ = pmbp->pmhd->w0;
+    bcc0_ = pmbp->pmhd->bcc0;
+  }
+
+  // extract grids, number of radii, number of fluxes, and history appending index
+  auto &grids = pm->pgen->spherical_grids;
+  int nradii = grids.size();
+  // int nflux = (is_mhd) ? 4 : 3;
+  const int nflux = 29;
+
+  // set number of and names of history variables for hydro or mhd
+  //  (1) mass accretion rate
+  //  (2) energy flux
+  //  (3) angular momentum flux
+  //  (4) magnetic flux (iff MHD)
+  pdata->nhist = nradii*nflux;
+  if (pdata->nhist > NHISTORY_VARIABLES) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "User history function specified pdata->nhist larger than"
+              << " NHISTORY_VARIABLES" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  // no more than 7 characters per label
+  std::string data_label[nflux] = {"r","area","out","m","mout","mdot","mdotout","edot","edotout",
+    "lx","ly","lz","lzout","phi","eint","b^2","u0","u_0","ur","uph","b0","b_0","br","bph",
+    "edothyd","edho","edotadv","edao","omegab"
+  };
+  int gi0 = 0;
+  if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
+    gi0 = 1;
+    pdata->nhist += 1;
+    pdata->label[0] = "zone";
+    pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zamr.zone : 0.0;
+  }
+  for (int g=0; g<nradii; ++g) {
+    std::string gstr = std::to_string(g);
+    for (int i=0; i<nflux; ++i) {
+      pdata->label[gi0+nflux*g+i] = data_label[i] + "_" + gstr;
+    }
+  }
+
+  // go through angles at each radii:
+  DualArray2D<Real> interpolated_bcc;  // needed for MHD
+  for (int g=0; g<nradii; ++g) {
+    // zero fluxes at this radius
+    for (int i=0; i<nflux; ++i) {
+      pdata->hdata[gi0+nflux*g+i] = 0.0;
+    }
+
+    // interpolate primitives (and cell-centered magnetic fields iff mhd)
+    if (is_mhd) {
+      grids[g]->InterpolateToSphere(3, bcc0_);
+      Kokkos::realloc(interpolated_bcc, grids[g]->nangles, 3);
+      Kokkos::deep_copy(interpolated_bcc, grids[g]->interp_vals);
+      interpolated_bcc.template modify<DevExeSpace>();
+      interpolated_bcc.template sync<HostMemSpace>();
+    }
+    grids[g]->InterpolateToSphere(nvars, w0_);
+
+    // compute fluxes
+    for (int n=0; n<grids[g]->nangles; ++n) {
+      // extract coordinate data at this angle
+      Real r = grids[g]->radius;
+      Real theta = grids[g]->polar_pos.h_view(n,0);
+      Real phi = grids[g]->polar_pos.h_view(n,1);
+      Real x1 = grids[g]->interp_coord.h_view(n,0);
+      Real x2 = grids[g]->interp_coord.h_view(n,1);
+      Real x3 = grids[g]->interp_coord.h_view(n,2);
+      Real glower[4][4], gupper[4][4];
+      ComputeMetricAndInverse(x1,x2,x3,flat,spin,glower,gupper);
+
+      // extract interpolated primitives
+      Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+      Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+      Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+      Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+      Real &int_ie = grids[g]->interp_vals.h_view(n,IEN);
+
+      // extract interpolated field components (iff is_mhd)
+      Real int_bx = 0.0, int_by = 0.0, int_bz = 0.0;
+      if (is_mhd) {
+        int_bx = interpolated_bcc.h_view(n,IBX);
+        int_by = interpolated_bcc.h_view(n,IBY);
+        int_bz = interpolated_bcc.h_view(n,IBZ);
+      }
+
+      // Compute interpolated u^\mu in CKS
+      Real q = glower[1][1]*int_vx*int_vx + 2.0*glower[1][2]*int_vx*int_vy +
+               2.0*glower[1][3]*int_vx*int_vz + glower[2][2]*int_vy*int_vy +
+               2.0*glower[2][3]*int_vy*int_vz + glower[3][3]*int_vz*int_vz;
+      Real alpha = sqrt(-1.0/gupper[0][0]);
+      Real lor = sqrt(1.0 + q);
+      Real u0 = lor/alpha;
+      Real u1 = int_vx - alpha * lor * gupper[0][1];
+      Real u2 = int_vy - alpha * lor * gupper[0][2];
+      Real u3 = int_vz - alpha * lor * gupper[0][3];
+
+      // Lower vector indices
+      Real u_0 = glower[0][0]*u0 + glower[0][1]*u1 + glower[0][2]*u2 + glower[0][3]*u3;
+      Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
+      Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
+      Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
+
+      // Calculate 4-magnetic field (returns zero if not MHD)
+      Real b0 = u_1*int_bx + u_2*int_by + u_3*int_bz;
+      Real b1 = (int_bx + b0 * u1) / u0;
+      Real b2 = (int_by + b0 * u2) / u0;
+      Real b3 = (int_bz + b0 * u3) / u0;
+
+      // compute b_\mu in CKS and b_sq (returns zero if not MHD)
+      Real b_0 = glower[0][0]*b0 + glower[0][1]*b1 + glower[0][2]*b2 + glower[0][3]*b3;
+      Real b_1 = glower[1][0]*b0 + glower[1][1]*b1 + glower[1][2]*b2 + glower[1][3]*b3;
+      Real b_2 = glower[2][0]*b0 + glower[2][1]*b1 + glower[2][2]*b2 + glower[2][3]*b3;
+      Real b_3 = glower[3][0]*b0 + glower[3][1]*b1 + glower[3][2]*b2 + glower[3][3]*b3;
+      Real b_sq = b0*b_0 + b1*b_1 + b2*b_2 + b3*b_3;
+
+      // Transform CKS 4-velocity and 4-magnetic field to spherical KS
+      Real a2 = SQR(spin);
+      Real rad2 = SQR(x1)+SQR(x2)+SQR(x3);
+      Real r2 = SQR(r);
+      Real sth = sin(theta);
+      Real sph = sin(phi);
+      Real cph = cos(phi);
+      Real drdx = r*x1/(2.0*r2 - rad2 + a2);
+      Real drdy = r*x2/(2.0*r2 - rad2 + a2);
+      Real drdz = (r*x3 + a2*x3/r)/(2.0*r2-rad2+a2);
+      Real dphdx = (-x2/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdx);
+      Real dphdy = ( x1/(SQR(x1)+SQR(x2)) + (spin/(r2 + a2))*drdy);
+      Real dphdz = (spin/(r2 + a2)*drdz);
+      // contravariant r,phi component of 4-velocity in spherical KS
+      Real ur  = drdx *u1 + drdy *u2 + drdz *u3;
+      Real uph = dphdx*u1 + dphdy*u2 + dphdz*u3;
+      // contravariant r,phi component of 4-magnetic field in spherical KS
+      Real br  = drdx *b1 + drdy *b2 + drdz *b3;
+      Real bph = dphdx*b1 + dphdy*b2 + dphdz*b3;
+      // covariant phi component of 4-velocity
+      Real u_ph = (-r*sph-spin*cph)*sth*u_1 + (r*cph-spin*sph)*sth*u_2;
+      // covariant phi component of 4-magnetic field (returns zero if not MHD)
+      Real b_ph = (-r*sph-spin*cph)*sth*b_1 + (r*cph-spin*sph)*sth*b_2;
+
+      // integration params
+      Real &domega = grids[g]->solid_angles.h_view(n);
+      Real sqrtmdet = (r2+SQR(spin*cos(theta)));
+
+      // flags
+      Real on = (int_dn != 0.0)? 1.0 : 0.0; // check if angle is on this rank
+      Real is_out = (ur>0.0)? 1.0 : 0.0;
+
+      // compute mass flux
+      Real m_flx = int_dn*ur;
+
+      // compute energy flux
+      Real t1_0 = (int_dn + gamma*int_ie + b_sq)*ur*u_0 - br*b_0;
+      // compute angular momentum flux
+      // TODO(@mhguo): may add angular momentum? not just flux
+      // TODO(@mhguo): add field rotation rate
+      Real t1_1 = 0.0;
+      Real t1_2 = 0.0;
+      Real t1_3 = (int_dn + gamma*int_ie + b_sq)*ur*u_ph - br*b_ph;
+      Real phi_flx = (is_mhd) ? 0.5*fabs(br*u0 - b0*ur) : 0.0;
+      Real t1_0_hyd = (int_dn + gamma*int_ie)*ur*u_0;
+      Real bernl_hyd = (on)? -(1.0 + gamma*int_ie/int_dn)*u_0-1.0 : 0.0;
+
+      Real omegab = 0.0;
+      if (on) {
+        if (u0*br - ur*b0 > 0.0) {
+          omegab = ((uph*br - ur*bph)/fmax(u0*br - ur*b0, 1.0e-12))/(0.5*spin/rh);
+        } else if (u0*br - ur*b0 < 0.0) {
+          omegab = ((uph*br - ur*bph)/fmin(u0*br - ur*b0, -1.0e-12))/(0.5*spin/rh);
+        } else {
+          omegab = 0.0;
+        }
+      }
+
+      Real flux_data[nflux] = {r, 1.0, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
+        t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
+        int_ie, b_sq, u0, u_0, ur, u_ph, b0, b_0, br, b_ph,
+        t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out, omegab,
+      };
+
+      pdata->hdata[gi0+nflux*g+0] = (global_variable::my_rank == 0)? flux_data[0] : 0.0;
+      for (int i=1; i<nflux; ++i) {
+        pdata->hdata[gi0+nflux*g+i] += flux_data[i]*sqrtmdet*domega*on;
+      }
+    }
+  }
+
+  // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
+  for (int n=pdata->nhist; n<NHISTORY_VARIABLES; ++n) {
+    pdata->hdata[n] = 0.0;
+  }
 
   return;
 }
