@@ -45,6 +45,9 @@ void MonopoleDiagnostic(ParameterInput *pin, Mesh *pm);
 // user-defined history function
 void MonopoleFluxes(HistoryData *pdata, Mesh *pm);
 
+void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
+Real ZoomNewTimeStep(Mesh* pm) {return pm->pmb_pack->pzoom->NewTimeStep(pm);}
+
 // prototypes for functions used internally to this pgen
 
 KOKKOS_INLINE_FUNCTION
@@ -90,6 +93,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // User history function
   user_hist_func = MonopoleFluxes;
+
+  if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
+    pmbp->pzoom->PrintInfo();
+    user_ref_func = ZoomAMR;
+    if (pmbp->pzoom->zoom_dt) user_dt_func = ZoomNewTimeStep;
+  }
 
   // Capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -710,6 +719,10 @@ void ReflectingMonopole(Mesh *pm) {
   // PrimToCons on x3 ghost zones
   pm->pmb_pack->pmhd->peos->PrimToCons(w0_,bcc_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
   pm->pmb_pack->pmhd->peos->PrimToCons(w0_,bcc_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+
+  if (pm->pmb_pack->pzoom != nullptr && pm->pmb_pack->pzoom->is_set) {
+    pm->pmb_pack->pzoom->BoundaryConditions();
+  }
 
   return;
 }
