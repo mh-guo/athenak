@@ -1067,10 +1067,18 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   };
   int gi0 = 0;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
-    gi0 = 1;
+    gi0 += 1;
     pdata->nhist += 1;
     pdata->label[0] = "zone";
     pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zamr.zone : 0.0;
+    if (pmbp->pzoom->calc_cons_change) {
+      gi0 += 2;
+      pdata->nhist += 2;
+      pdata->label[1] = "dm";
+      pdata->hdata[1] = (global_variable::my_rank == 0)? pmbp->pzoom->zchg.dmass : 0.0;
+      pdata->label[2] = "de";
+      pdata->hdata[2] = (global_variable::my_rank == 0)? pmbp->pzoom->zchg.dengy : 0.0;
+    }
   }
   for (int g=0; g<nradii; ++g) {
     std::string gstr = std::to_string(g);

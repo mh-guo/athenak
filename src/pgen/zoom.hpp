@@ -45,6 +45,12 @@ typedef struct ZoomInterval {
   Real t_run_fac_zone_max;      // runtime factor for zone max
 } ZoomInterval;
 
+typedef struct ZoomChange {
+  Real dvol;                    // mask zone volume
+  Real dmass;                   // mass change
+  Real dengy;                    // energy change
+} ZoomChange;
+
 typedef struct ZoomRun {
   int id;                       // run number
   Real next_time;               // time of next zoom
@@ -72,6 +78,7 @@ class Zoom
   bool zoom_dt;            // flag for zoom time step
   bool fix_efield;         // flag for fixing electric field
   bool dump_diag;          // flag for dumping diagnostic output
+  bool calc_cons_change;   // flag for calculating conserved variable change in mask zone
   int ndiag;               // cycles between diagostic output
   int mzoom;               // number of zoom meshblocks
   int nleaf;               // number of zoom meshblocks on each level
@@ -86,6 +93,7 @@ class Zoom
 
   ZoomAMR zamr;            // zoom AMR parameters
   ZoomInterval zint;       // zoom interval parameters
+  ZoomChange zchg;         // zoom change of conserved variables in mask zone
   ZoomRun zrun;            // zoom time parameters
 
   DvceArray5D<Real> u0;    // conserved variables

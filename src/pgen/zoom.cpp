@@ -46,6 +46,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   fix_efield = pin->GetOrAddBoolean("zoom","fix_efield",false);
   dump_diag  = pin->GetOrAddBoolean("zoom","dump_diag",false);
   ndiag = pin->GetOrAddInteger("zoom","ndiag",-1);
+  calc_cons_change = pin->GetOrAddBoolean("zoom","calc_cons_change",false);
   zint.t_run_fac = pin->GetOrAddReal("zoom","t_run_fac",1.0);
   zint.t_run_pow = pin->GetOrAddReal("zoom","t_run_pow",0.0);
   zint.t_run_max = pin->GetOrAddReal("zoom","t_run_max",FLT_MAX);
@@ -70,6 +71,9 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zamr.just_zoomed = false;
   zamr.first_emf = false;
   zamr.dump_rst = true;
+  zchg.dvol = 0.0;
+  zchg.dmass = 0.0;
+  zchg.dengy = 0.0;
   zrun.id = 0;
   zrun.next_time = 0.0;
   SetInterval();
@@ -301,6 +305,7 @@ void Zoom::BoundaryConditions()
       std::cout << "Zoom: Apply variables after zooming" << std::endl;
     }
   }
+  zchg.dvol = 0.0; zchg.dmass = 0.0; zchg.dengy = 0.0;
   if (zamr.zone == 0) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &ng = indcs.ng;
@@ -337,6 +342,115 @@ void Zoom::BoundaryConditions()
   int zid = nleaf*(zamr.zone-1);
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
+  // calculate change in conserved variables
+  if (calc_cons_change) {
+    const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+    const int nkji = nx3*nx2*nx1;
+    const int nji  = nx2*nx1;
+    Real dvol = 0.0, mass = 0.0, engy = 0.0, dmass = 0.0, dengy = 0.0;
+    Kokkos::parallel_reduce("cons_change",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &dv, Real &m0, Real &e0, Real &dm, Real &de) {
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+      if (rad < rzoom) {
+        Real dx1 = size.d_view(m).dx1;
+        Real dx2 = size.d_view(m).dx2;
+        Real dx3 = size.d_view(m).dx3;
+        bool x1r = (x1max > 0.0); bool x2r = (x2max > 0.0); bool x3r = (x3max > 0.0);
+        bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
+        int leaf_id = 1*x1r + 2*x2r + 4*x3r;
+        int zm = zid + leaf_id;
+        int ci = i - cnx1 * x1l;
+        int cj = j - cnx2 * x2l;
+        int ck = k - cnx3 * x3l;
+        if (is_mhd) {
+          w0_(m,IDN,k,j,i) = cw0(zm,IDN,ck,cj,ci);
+          w0_(m,IM1,k,j,i) = cw0(zm,IM1,ck,cj,ci);
+          w0_(m,IM2,k,j,i) = cw0(zm,IM2,ck,cj,ci);
+          w0_(m,IM3,k,j,i) = cw0(zm,IM3,ck,cj,ci);
+          w0_(m,IEN,k,j,i) = cw0(zm,IEN,ck,cj,ci);
+
+          // Load single state of primitive variables
+          MHDPrim1D w;
+          w.d  = w0_(m,IDN,k,j,i);
+          w.vx = w0_(m,IVX,k,j,i);
+          w.vy = w0_(m,IVY,k,j,i);
+          w.vz = w0_(m,IVZ,k,j,i);
+          w.e  = w0_(m,IEN,k,j,i);
+
+          // load cell-centered fields into primitive state
+          w.bx = bcc(m,IBX,k,j,i);
+          w.by = bcc(m,IBY,k,j,i);
+          w.bz = bcc(m,IBZ,k,j,i);
+
+          // call p2c function
+          HydCons1D u;
+          if (is_gr) {
+            Real glower[4][4], gupper[4][4];
+            ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+            SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
+          } else {
+            SingleP2C_IdealMHD(w, u);
+          }
+
+          // store conserved quantities in 3D array
+          // u0_(m,IDN,k,j,i) = u.d;
+          // u0_(m,IM1,k,j,i) = u.mx;
+          // u0_(m,IM2,k,j,i) = u.my;
+          // u0_(m,IM3,k,j,i) = u.mz;
+          // u0_(m,IEN,k,j,i) = u.e;
+          dv += dx1*dx2*dx3;
+          m0 += dx1*dx2*dx3*u.d;
+          e0 += dx1*dx2*dx3*u.e;
+          dm += dx1*dx2*dx3*(u.d-u0_(m,IDN,k,j,i));
+          de += dx1*dx2*dx3*(u.e-u0_(m,IEN,k,j,i));
+        } else {
+          // u0_(m,IDN,k,j,i) = cu0(zm,IDN,ck,cj,ci);
+          // u0_(m,IM1,k,j,i) = cu0(zm,IM1,ck,cj,ci);
+          // u0_(m,IM2,k,j,i) = cu0(zm,IM2,ck,cj,ci);
+          // u0_(m,IM3,k,j,i) = cu0(zm,IM3,ck,cj,ci);
+          // u0_(m,IEN,k,j,i) = cu0(zm,IEN,ck,cj,ci);
+          dv += dx1*dx2*dx3;
+          m0 += dx1*dx2*dx3*cu0(zm,IDN,ck,cj,ci);
+          e0 += dx1*dx2*dx3*cu0(zm,IEN,ck,cj,ci);
+          dm += dx1*dx2*dx3*(cu0(zm,IDN,ck,cj,ci)-u0_(m,IDN,k,j,i));
+          de += dx1*dx2*dx3*(cu0(zm,IEN,ck,cj,ci)-u0_(m,IEN,k,j,i));
+        }
+      }
+    }, Kokkos::Sum<Real>(dvol), Kokkos::Sum<Real>(mass), Kokkos::Sum<Real>(engy),
+       Kokkos::Sum<Real>(dmass), Kokkos::Sum<Real>(dengy));
+#if MPI_PARALLEL_ENABLED
+    Real m_sum[5] = {dvol,mass,engy,dmass,dengy};
+    Real gm_sum[5];
+    MPI_Allreduce(m_sum, gm_sum, 5, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    dvol = gm_sum[0]; mass = gm_sum[1]; engy = gm_sum[2]; dmass = gm_sum[3]; dengy = gm_sum[4];
+#endif
+    zchg.dvol = dvol;
+    zchg.dmass = dmass;
+    zchg.dengy = dengy;
+    // if (global_variable::my_rank == 0) {
+    //   std::cout << "Zoom: Conserved quantities change: dvol = " << dvol
+    //             << " mass = " << mass << " engy = " << engy
+    //             << " dmass = " << dmass << " dengy = " << dengy << std::endl;
+    // }
+  }
   par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -390,7 +504,6 @@ void Zoom::BoundaryConditions()
         } else {
           SingleP2C_IdealMHD(w, u);
         }
-        
 
         // store conserved quantities in 3D array
         u0_(m,IDN,k,j,i) = u.d;
@@ -601,6 +714,8 @@ void Zoom::UpdateVariables() {
   Real rzoom = zamr.radius;
   int nvar = nvars;
   Real rin = r_in;
+  // TODO(@mhguo): it looks 0.8*rzoom works, but ideally should use edge center
+  Real rzfac = 0.8; // r < rzfac*rzoom
 
   for (int m=0; m<nmb; ++m) {
     if (pmy_pack->pmesh->lloc_eachmb[m+mbs].level == zamr.level) {
@@ -663,21 +778,37 @@ void Zoom::UpdateVariables() {
             e1(zm,k,j,i) = 0.5*(ef1(m,finek,finej,finei) + ef1(m,finek,finej,finei+1));
             e2(zm,k,j,i) = 0.5*(ef2(m,finek,finej,finei) + ef2(m,finek,finej+1,finei));
             e3(zm,k,j,i) = 0.5*(ef3(m,finek,finej,finei) + ef3(m,finek+1,finej,finei));
-            
+
             // TODO(@mhguo): it looks 0.8*rzoom works, but ideally should use edge center
             Real x1v = CellCenterX(i-cis, cnx1, x1min, x1max);
             Real x2v = CellCenterX(j-cjs, cnx2, x2min, x2max);
             Real x3v = CellCenterX(k-cks, cnx3, x3min, x3max);
+            Real x1f = LeftEdgeX  (i-cis, cnx1, x1min, x1max);
+            Real x2f = LeftEdgeX  (j-cjs, cnx2, x2min, x2max);
+            Real x3f = LeftEdgeX  (k-cks, cnx3, x3min, x3max);
             Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-            if (zid>0 && rad < 0.8*rzoom) {
+            Real rade1 = sqrt(SQR(x1v)+SQR(x2f)+SQR(x3f));
+            Real rade2 = sqrt(SQR(x1f)+SQR(x2v)+SQR(x3f));
+            Real rade3 = sqrt(SQR(x1f)+SQR(x2f)+SQR(x3v));
+            if (zid>0) {
               int zmp = zm-nlf;
               int prei = finei - cnx1 * x1l;
               int prej = finej - cnx2 * x2l;
               int prek = finek - cnx3 * x3l;
-              e1(zm,k,j,i) = 0.5*(e1(zmp,prek,prej,prei) + e1(zmp,prek,prej,prei+1));
-              e2(zm,k,j,i) = 0.5*(e2(zmp,prek,prej,prei) + e2(zmp,prek,prej+1,prei));
-              e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
+              if (rade1 < rzfac*rzoom) {
+                e1(zm,k,j,i) = 0.5*(e1(zmp,prek,prej,prei) + e1(zmp,prek,prej,prei+1));
+              }
+              if (rade2 < rzfac*rzoom) {
+                e2(zm,k,j,i) = 0.5*(e2(zmp,prek,prej,prei) + e2(zmp,prek,prej+1,prei));
+              }
+              if (rade3 < rzfac*rzoom) {
+                e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
+              }
             }
+            // TODO(@mhguo): think to what extent we should zero out the electric field
+            if (rade1 < 0.5*rzfac*rin) {e1(zm,k,j,i) = 0.0;}
+            if (rade2 < 0.5*rzfac*rin) {e2(zm,k,j,i) = 0.0;}
+            if (rade3 < 0.5*rzfac*rin) {e3(zm,k,j,i) = 0.0;}
           });
         }
         std::cout << "Zoom: Update variables for zoom meshblock " << zm << std::endl;
@@ -762,7 +893,7 @@ void Zoom::UpdateHydroVariables(int zm, int m) {
           } else {
             SingleP2C_IdealHyd(w, u);
           }
-          
+
           // store conserved quantities using cw
           cw(zm,IDN,ck,cj,ci) += 0.125*u.d;
           cw(zm,IM1,ck,cj,ci) += 0.125*u.mx;
@@ -1479,6 +1610,7 @@ void Zoom::SyncZoomEField(DvceEdgeFld4D<Real> emf, int zid) {
     int zm_rank = 0;
     for (int m=0; m<pmy_pack->pmesh->nmb_total; ++m) {
       auto lloc = pmy_pack->pmesh->lloc_eachmb[m];
+      // TODO(@mhguo): not working for half domain
       if (lloc.level == zamr.level) {
         if ((lloc.lx1 == pow(2,zamr.level-1)+x1r-1) &&
             (lloc.lx2 == pow(2,zamr.level-1)+x2r-1) &&
@@ -1497,14 +1629,14 @@ void Zoom::SyncZoomEField(DvceEdgeFld4D<Real> emf, int zid) {
     Kokkos::deep_copy(harr_4d, e1_slice);
     MPI_Bcast(harr_4d.data(), e1_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
     Kokkos::deep_copy(e1_slice, harr_4d);
-    
+
     Kokkos::realloc(harr_4d, 1, n_ccells3+1, n_ccells2, n_ccells1+1);
     auto e2_slice = Kokkos::subview(emf.x2e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                     Kokkos::ALL, Kokkos::ALL);
     Kokkos::deep_copy(harr_4d, e2_slice);
     MPI_Bcast(harr_4d.data(), e2_slice_size, MPI_ATHENA_REAL, zm_rank, MPI_COMM_WORLD);
     Kokkos::deep_copy(e2_slice, harr_4d);
-    
+
     Kokkos::realloc(harr_4d, 1, n_ccells3, n_ccells2+1, n_ccells1+1);
     auto e3_slice = Kokkos::subview(emf.x3e, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                     Kokkos::ALL, Kokkos::ALL);
@@ -1780,7 +1912,7 @@ Real Zoom::GRTimeStep(Mesh* pm) {
       k += ks;
       j += js;
       Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
-      
+
       // Use the GR sound speed to compute the time step
       // References to left primitives
       Real &wd = w0_(m,IDN,k,j,i);
