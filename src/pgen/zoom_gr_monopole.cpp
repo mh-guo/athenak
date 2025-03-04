@@ -129,22 +129,30 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real rc = 10.0*rh;
   Real &dexcise = coord.dexcise;
   Real &pexcise = coord.pexcise;
+  bool zero_bz0 = pin->GetOrAddBoolean("problem", "zero_bz0", false); // set Bz=0 at z=0
   bool whole_domain = pmy_mesh_->mesh_size.x3min < 0.0;
   if (global_variable::my_rank == 0) {
+    std::cout << "sigma_max = " << sigma_max << std::endl;
+    std::cout << "sigma_n = " << sigma_n << std::endl;
+    std::cout << "rhomin = " << rhomin << std::endl;
+    std::cout << "umin = " << umin << std::endl;
+    std::cout << "a_norm = " << a_norm << std::endl;
+    std::cout << "zero_bz0 = " << zero_bz0 << std::endl;
     std::cout << "Whole domain: " << whole_domain << std::endl;
   }
 
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
   const Real rflux = 1.0 + sqrt(1.0 - SQR(spin));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5)));
+  int nintp = pin->GetOrAddInteger("problem", "hist_nintp", 2);
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux, nintp));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5), nintp));
   int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
   Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 3.0);
   Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
   for (int i=0; i<hist_nr-2; i++) {
     Real r_i = std::pow(rmax/rmin,static_cast<Real>(i)/static_cast<Real>(hist_nr-3))*rmin;
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i, nintp));
   }
   if (global_variable::my_rank == 0) {
     std::cout << "Spherical grids for user-defined history:" << std::endl;
@@ -330,6 +338,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   });
 
   auto &b0 = pmbp->pmhd->b0;
+  auto &mb_bcs = pmbp->pmb->mb_bcs;
   par_for("pgen_torus2", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // Compute face-centered fields from curl(A).
@@ -356,6 +365,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (k==ke) {
       b0.x3f(m,k+1,j,i) = ((a2(m,k+1,j,i+1) - a2(m,k+1,j,i))/dx1 -
                            (a1(m,k+1,j+1,i) - a1(m,k+1,j,i))/dx2);
+    }
+    if (zero_bz0 && k == ks) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+        b0.x3f(m,k,j,i) = 0.0;
+      }
     }
   });
 
@@ -414,7 +428,7 @@ Real A1(Real a_norm, Real spin, Real x1, Real x2, Real x3) {
   Real r, theta, phi;
   GetKerrSchildCoordinates(spin, x1, x2, x3, &r, &theta, &phi);
 
-  Real aphi =  1.-fabs(cos(theta));
+  Real aphi =  1.-cos(theta);
   aphi *= a_norm;
 
   Real sqrt_term =  2.0*SQR(r) - SQR(rad) + SQR(spin);
@@ -440,7 +454,7 @@ Real A2(Real a_norm, Real spin, Real x1, Real x2, Real x3) {
   Real r, theta, phi;
   GetKerrSchildCoordinates(spin, x1, x2, x3, &r, &theta, &phi);
 
-  Real aphi =  1.-fabs(cos(theta));
+  Real aphi =  1.-cos(theta);
   aphi *= a_norm;
 
   Real sqrt_term =  2.0*SQR(r) - SQR(rad) + SQR(spin);
@@ -466,7 +480,7 @@ Real A3(Real a_norm, Real spin, Real x1, Real x2, Real x3) {
   Real rad = sqrt(SQR(x1) + SQR(x2) + SQR(x3));
   x3 = (rad < 1.0 && fabs(x3) < 1.0e-5) ? 1.0e-5 : x3;
 
-  Real aphi =  1.-fabs(cos(theta));
+  Real aphi =  1.-cos(theta);
   aphi *= a_norm;
 
   Real sqrt_term =  2.0*SQR(r) - SQR(rad) + SQR(spin);
@@ -685,7 +699,7 @@ void ReflectingMonopole(Mesh *pm) {
         if (i == n1-1) {b0.x1f(m,ks-k-1,j,i+1) = b0.x1f(m,ks,j,i+1);}
         b0.x2f(m,ks-k-1,j,i) = b0.x2f(m,ks,j,i);
         if (j == n2-1) {b0.x2f(m,ks-k-1,j+1,i) = b0.x2f(m,ks,j+1,i);}
-        b0.x3f(m,ks-k-1,j,i) = -b0.x3f(m,ks,j,i);
+        b0.x3f(m,ks-k-1,j,i) = -b0.x3f(m,ks+1,j,i);
         if (whole_domain) { b0.x3f(m,ks-k-1,j,i) = b0.x3f(m,ks,j,i); }
       }
     }

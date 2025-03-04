@@ -1133,7 +1133,7 @@ void Zoom::ApplyVariables() {
         bool x1l = (x1min < 0.0); bool x2l = (x2min < 0.0); bool x3l = (x3min < 0.0);
         int leaf_id = 1*x1r + 2*x2r + 4*x3r;
         int zm = zid + leaf_id;
-        if (pmy_pack->phydro != nullptr) {
+        if (pmy_pack->phydro != nullptr) { // TODO: this seems wrong, may use 2*r_zoom
           auto src_slice = Kokkos::subview(u0_, Kokkos::make_pair(zm,zm+1), Kokkos::ALL,
                                            Kokkos::ALL,Kokkos::ALL,Kokkos::ALL);
           auto des_slice = Kokkos::subview(u_, Kokkos::make_pair(m,m+1), Kokkos::ALL,
