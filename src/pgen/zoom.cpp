@@ -67,6 +67,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zamr.min_level = zamr.max_level - zamr.nlevels + 1;
   zamr.level = pin->GetOrAddInteger("zoom","level",zamr.max_level);
   zamr.zone = zamr.max_level - zamr.level;
+  zamr.last_zone = zamr.zone;
   zamr.direction = pin->GetOrAddInteger("zoom","direction",-1);
   zamr.just_zoomed = false;
   zamr.first_emf = false;
@@ -92,10 +93,12 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   emf_f0 = 1.0;
   emf_f1 = 0.0;
   emf_fmax = 1.0;
+  r0_efld = 0.0;
   if (fix_efield) {
     emf_flag = pin->GetInteger("zoom","emf_flag");
     emf_f1 = pin->GetReal("zoom","emf_f1");
     emf_fmax = pin->GetReal("zoom","emf_fmax");
+    r0_efld = pin->GetOrAddReal("zoom","r0_efld",0.0); // default value
   }
 
   // allocate memory for primitive variables
@@ -257,7 +260,8 @@ void Zoom::PrintInfo()
     std::cout << "Model: mzoom = " << mzoom << " nvars = " << nvars
               << " r_in = " << r_in << " d_zoom = " << d_zoom
               << " p_zoom = " << p_zoom << " emf_f0 = " << emf_f0
-              << " emf_f1 = " << emf_f1 << std::endl;
+              << " emf_f1 = " << emf_f1 << " emf_fmax = " << emf_fmax
+              << " r0_efld = " << r0_efld << std::endl;
     // print interval parameters
     std::cout << "Interval: t_run_fac = " << zint.t_run_fac
               << " t_run_pow = " << zint.t_run_pow
@@ -298,7 +302,7 @@ void Zoom::BoundaryConditions()
   if (!zoom_bcs) return;
   // put here because BoundaryConditions() is called in InitBoundaryValuesAndPrimitives(),
   // just after RedistAndRefineMeshBlocks() in AdaptiveMeshRefinement()
-  if (zamr.just_zoomed && zamr.direction > 0 && zamr.level != zamr.min_level) {
+  if (zamr.just_zoomed && zamr.zone < zamr.last_zone) {
     ApplyVariables();
     zamr.just_zoomed = false;
     if (global_variable::my_rank == 0) {
@@ -553,6 +557,7 @@ void Zoom::AMR() {
     zamr.level += zamr.direction;
     zamr.direction = (zamr.level==zamr.max_level) ? -1 : zamr.direction;
     zamr.direction = (zamr.level==zamr.min_level) ? 1 : zamr.direction;
+    zamr.last_zone = zamr.zone;
     zamr.zone = zamr.max_level - zamr.level;
     SetInterval();
     if (global_variable::my_rank == 0) {
@@ -716,6 +721,7 @@ void Zoom::UpdateVariables() {
   Real rin = r_in;
   // TODO(@mhguo): it looks 0.8*rzoom works, but ideally should use edge center
   Real rzfac = 0.8; // r < rzfac*rzoom
+  Real r0ef = r0_efld; // r < r0_efld
 
   for (int m=0; m<nmb; ++m) {
     if (pmy_pack->pmesh->lloc_eachmb[m+mbs].level == zamr.level) {
@@ -805,10 +811,9 @@ void Zoom::UpdateVariables() {
                 e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
               }
             }
-            // TODO(@mhguo): think to what extent we should zero out the electric field
-            if (rade1 < 0.5*rzfac*rin) {e1(zm,k,j,i) = 0.0;}
-            if (rade2 < 0.5*rzfac*rin) {e2(zm,k,j,i) = 0.0;}
-            if (rade3 < 0.5*rzfac*rin) {e3(zm,k,j,i) = 0.0;}
+            if (rade1 < r0ef) {e1(zm,k,j,i) = 0.0;}
+            if (rade2 < r0ef) {e2(zm,k,j,i) = 0.0;}
+            if (rade3 < r0ef) {e3(zm,k,j,i) = 0.0;}
           });
         }
         std::cout << "Zoom: Update variables for zoom meshblock " << zm << std::endl;
@@ -1100,14 +1105,14 @@ void Zoom::ApplyVariables() {
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   int nmb = pmy_pack->nmb_thispack;
   int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];
-  Real gamma = 0.0;
+  auto eos = (pmy_pack->pmhd != nullptr)? pmy_pack->pmhd->peos->eos_data : 
+              pmy_pack->phydro->peos->eos_data;
+  Real gamma = eos.gamma;
   DvceArray5D<Real> u_, w_;
   if (pmy_pack->phydro != nullptr) {
-    gamma = pmy_pack->phydro->peos->eos_data.gamma;
     u_ = pmy_pack->phydro->u0;
     w_ = pmy_pack->phydro->w0;
   } else if (pmy_pack->pmhd != nullptr) {
-    gamma = pmy_pack->pmhd->peos->eos_data.gamma;
     u_ = pmy_pack->pmhd->u0;
     w_ = pmy_pack->pmhd->w0;
   }
@@ -1152,7 +1157,7 @@ void Zoom::ApplyVariables() {
             Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
             Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
             Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-            if (rad < 2*rzoom) { // apply to 2*rzoom since rzoom is already updated
+            if (rad < 2.0*rzoom) { // apply to 2*rzoom since rzoom is already updated
               w_(m,IDN,k,j,i) = w0_(zm,IDN,k,j,i);
               w_(m,IM1,k,j,i) = w0_(zm,IM1,k,j,i);
               w_(m,IM2,k,j,i) = w0_(zm,IM2,k,j,i);
@@ -1214,7 +1219,7 @@ void Zoom::FixEField(DvceEdgeFld4D<Real> emf) {
   } else if (emf_flag == 2) {
     AddDeltaEField(emf);
   } else if (emf_flag == 3) {
-    AddDeltaEField(emf);
+    AddDeltaEField(emf); // adaptive
   } else {
     std::cerr << "Error: Zoom::FixEField() failed: emf_flag = " << emf_flag << std::endl;
     std::exit(1);
@@ -1388,6 +1393,7 @@ void Zoom::AddEField(DvceEdgeFld4D<Real> emf) {
     int ci = i - cnx1 * x1l;
     int cj = j - cnx2 * x2l;
     int ck = k - cnx3 * x3l;
+    // ef1(m,k,j,i) += fac*e1(zm,ck,cj,ci);
     // ef2(m,k,j,i) += fac*e2(zm,ck,cj,ci);
     // ef3(m,k,j,i) += fac*e3(zm,ck,cj,ci);
     if (sqrt(SQR(x1v)+SQR(x2f)+SQR(x3f)) < rzoom) {
@@ -1530,7 +1536,6 @@ void Zoom::UpdateDeltaEField(DvceEdgeFld4D<Real> emf) {
   int &cis = indcs.cis;  int &cie  = indcs.cie;
   int &cjs = indcs.cjs;  int &cje  = indcs.cje;
   int &cks = indcs.cks;  int &cke  = indcs.cke;
-  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   int cnx1 = indcs.cnx1, cnx2 = indcs.cnx2, cnx3 = indcs.cnx3;
   int nmb = pmy_pack->nmb_thispack;
   int mbs = pmy_pack->pmesh->gids_eachrank[global_variable::my_rank];

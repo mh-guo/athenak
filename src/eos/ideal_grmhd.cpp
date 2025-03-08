@@ -136,7 +136,21 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       }
     }
 
-    if (!(excised)) {
+    bool zoom_masked = false;
+    if (use_zoom && rzoom > 1.0) {
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+      if (rad < rzoom) {
+        // revert to previous state if in zoom mask region
+        w.d = prim(m,IDN,k,j,i);
+        w.vx = prim(m,IVX,k,j,i);
+        w.vy = prim(m,IVY,k,j,i);
+        w.vz = prim(m,IVZ,k,j,i);
+        w.e = prim(m,IEN,k,j,i);
+        zoom_masked = true;
+      }
+    }
+
+    if (!(excised) && !(zoom_masked)) {
       // calculate SR conserved quantities
       MHDCons1D u_sr;
       Real s2, b2, rpar;
@@ -176,19 +190,6 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       if (c2p_failure) {sumf++;}
       max_it = (iter_used > max_it) ? iter_used : max_it;
 
-      // TODO: still doing SingleC2P_IdealSRMHD() now, should optimize this
-      if (use_zoom && rzoom > 1.0) {
-        Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-        if (rad < rzoom) {
-          // revert to previous state if in zoom mask region
-          w.d = prim(m,IDN,k,j,i);
-          w.vx = prim(m,IVX,k,j,i);
-          w.vy = prim(m,IVY,k,j,i);
-          w.vz = prim(m,IVZ,k,j,i);
-          w.e = prim(m,IEN,k,j,i);
-        }
-      }
-
       // store primitive state in 3D array
       prim(m,IDN,k,j,i) = w.d;
       prim(m,IVX,k,j,i) = w.vx;
@@ -202,7 +203,8 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       bcc(m,IBZ,k,j,i) = u.bz;
 
       // reset conserved variables if floor, ceiling, failure, or excision encountered
-      if (dfloor_used || efloor_used || vceiling_used || c2p_failure || excised) {
+      if (dfloor_used || efloor_used || vceiling_used || c2p_failure || excised
+          || zoom_masked) {
         MHDPrim1D w_in;
         w_in.d  = w.d;
         w_in.vx = w.vx;

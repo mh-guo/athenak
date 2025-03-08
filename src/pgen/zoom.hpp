@@ -23,6 +23,7 @@ typedef struct ZoomAMR {
   int min_level;                // minimum level number
   int level;                    // level number
   int zone;                     // zone number = level_max - level
+  int last_zone;                // last zone number
   int direction;                // direction of zoom
   Real radius;                  // radius of inner boundary
   Real runtime;                 // interval for zoom
@@ -71,8 +72,8 @@ class Zoom
 
   // data
   bool is_set;
-  bool read_rst;           // flag for reading restart file
-  bool write_rst;          // flag for writing restart file
+  bool read_rst;           // flag for reading zoom data restart file
+  bool write_rst;          // flag for writing zoom data restart file
   bool zoom_bcs;           // flag for zoom boundary conditions
   bool zoom_ref;           // flag for zoom refinement
   bool zoom_dt;            // flag for zoom time step
@@ -90,6 +91,7 @@ class Zoom
   Real p_zoom;             // pressure within inner boundary
   Real emf_f0, emf_f1;     // electric field factor, e = f0 * e0 + f1 * e1
   Real emf_fmax;           // maximum electric field factor
+  Real r0_efld;            // modify e if r < r0_efld
 
   ZoomAMR zamr;            // zoom AMR parameters
   ZoomInterval zint;       // zoom interval parameters
