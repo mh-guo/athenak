@@ -28,6 +28,11 @@
 #include "pgen/turb_mhd.hpp"
 #include "pgen/zoom.hpp"
 
+#include "eos/ideal_c2p_hyd.hpp"
+#include "eos/ideal_c2p_mhd.hpp"
+#include "srcterms/ismcooling.hpp"
+#include "units/units.hpp"
+
 #include <Kokkos_Random.hpp>
 
 namespace {
@@ -74,6 +79,9 @@ struct bondi_pgen {
   Real rho_inf, pgas_inf;   // asymptotic density and pressure
   Real r_bondi;             // Bondi radius 2GM/c_s^2
   bool reset_ic = false;    // reset initial conditions after run
+  bool cooling = false;     // add ISM cooling
+  Real mu_h = 0.6;          // mean molecular weight of hydrogen
+  Real tau_cool = -1.0;     // cooling time in dynamical time
 };
 
   bondi_pgen bondi;
@@ -82,6 +90,9 @@ struct bondi_pgen {
 void FixedBondiInflow(Mesh *pm);
 void BondiErrors(ParameterInput *pin, Mesh *pm);
 void BondiFluxes(HistoryData *pdata, Mesh *pm);
+void AddUserSrcs(Mesh *pm, const Real bdt);
+void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+                   const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
 Real ZoomNewTimeStep(Mesh* pm) {return pm->pmb_pack->pzoom->NewTimeStep(pm);}
 
@@ -102,6 +113,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // set user-defined BCs and error function pointers
   // pgen_final_func = BondiErrors;
   user_bcs_func = FixedBondiInflow;
+  user_srcs_func = AddUserSrcs;
   user_hist_func = BondiFluxes;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
     pmbp->pzoom->PrintInfo();
@@ -147,14 +159,33 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
   bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
 
+  bondi.cooling = pin->GetOrAddBoolean("problem", "cooling", false);
+  bondi.mu_h = pin->GetOrAddReal("problem", "mu_h", 1.0);
+  bondi.tau_cool = pin->GetOrAddReal("problem", "tau_cool", -1.0);
+
   if (ic_type > 0) {
     // Prepare various constants for determining primitives
     bondi.temp_inf = pin->GetReal("problem", "temp_inf");
     bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
+    bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
     bondi.rho_inf = pow(bondi.temp_inf/bondi.k_adi, bondi.n_adi);
     bondi.rho_inf = pin->GetOrAddReal("problem", "dens_inf", bondi.rho_inf);
+    if (bondi.cooling) {
+      Real t_char = bondi.r_bondi / bondi.c_s_inf;
+      auto punit = pmbp->punit;
+      Real temp_unit = punit->temperature_cgs();
+      Real n_h_unit = punit->density_cgs()/bondi.mu_h/punit->atomic_mass_unit_cgs;
+      Real cooling_unit = punit->pressure_cgs()/punit->time_cgs()/SQR(n_h_unit);
+      Real lambda_cooling = ISMCoolFn(bondi.temp_inf*temp_unit)/cooling_unit;
+      if (bondi.tau_cool > 0.0) {
+        Real t_cool = bondi.tau_cool * t_char;
+        bondi.rho_inf = bondi.temp_inf / (t_cool * gm1 * lambda_cooling);  
+      } else {
+        Real t_cool = bondi.temp_inf / (bondi.rho_inf * gm1 * lambda_cooling);
+        bondi.tau_cool = t_cool / t_char;
+      }
+    }
     bondi.pgas_inf = bondi.rho_inf * bondi.temp_inf;
-    bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
     // bondi.r_crit = (5.0-3.0*bondi.gm)/4.0;
     // bondi.c1 = 0.25*pow(2.0/(5.0-3.0*bondi.gm), (5.0-3.0*bondi.gm)*0.5*bondi.n_adi);
     // bondi.c2 = -bondi.n_adi; // useless in Newtonian case
@@ -164,6 +195,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
     std::cout << " Critical radius = " << bondi.r_crit << std::endl;
     std::cout << " c1 = " << bondi.c1 << std::endl;
+    std::cout << " rho_inf = " << bondi.rho_inf << std::endl;
+    if (bondi.cooling) {
+      std::cout << " t_cool / t_bondi = " << bondi.tau_cool << std::endl;
+    }
   }
 
   // Extract BH parameters
@@ -1229,6 +1264,176 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
     pdata->hdata[n] = 0.0;
   }
 
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void AddUserSrcs()
+//! \brief Add User Source Terms
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+void AddUserSrcs(Mesh *pm, const Real bdt) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  DvceArray5D<Real> &u0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+  DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
+                             pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
+  if (bondi.cooling) {
+    //std::cout << "AddISMCooling" << std::endl;
+    AddISMCooling(pm,bdt,u0,w0,eos_data);
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void AddISMCooling()
+//! \brief Add explict ISM cooling and heating source terms in the energy equations.
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+
+void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+                   const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji = nx2*nx1;
+  auto &size = pmbp->pmb->mb_size;
+  Real beta = bdt/pm->dt;
+  Real cfl_no = pm->cfl_no;
+  auto &eos = eos_data;
+  Real use_e = eos_data.use_e;
+  Real tfloor = eos_data.tfloor;
+  Real gamma = eos_data.gamma;
+  Real gm1 = gamma - 1.0;
+  Real temp_unit = pmbp->punit->temperature_cgs();
+  Real n_h_unit = pmbp->punit->density_cgs()/bondi.mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
+  // Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
+  // extract BH parameters
+  bool &flat = pmbp->pcoord->coord_data.is_minkowski;
+  Real &spin = pmbp->pcoord->coord_data.bh_spin;
+
+  bool is_hydro = true;
+  DvceArray5D<Real> bcc;
+  if (pmbp->pmhd != nullptr) {
+    is_hydro = false;
+    // using bcc is ok here because b0 is not updated yet
+    bcc = pmbp->pmhd->bcc0;
+  }
+
+  int nsubcycle=0, nsubcycle_count=0;
+  Kokkos::parallel_reduce("cooling", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, int &sum0, int &sum1) {
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+    Real dens=1.0, temp = 1.0, eint = 1.0;
+    dens = w0(m,IDN,k,j,i);
+    temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+    eint = w0(m,IEN,k,j,i);
+
+    bool sub_cycling = true;
+    bool sub_cycling_used = false;
+    Real bdt_now = 0.0;
+    if (is_gr) {
+      // add cooling/heating term into the primitive variables
+      Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
+      // soft function
+      // lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
+      Real cooling_heating = dens * dens * lambda_cooling;
+      // conserve energy is minus sign
+      // u0(m,IEN,k,j,i) += bdt * cooling_heating;
+      // Extract components of metric
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real glower[4][4], gupper[4][4];
+      ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+      // load single state conserved variables
+      HydPrim1D w;
+      HydCons1D u;
+      MHDCons1D u_m;
+      MHDPrim1D w_m;
+      bool dfloor_used=false, efloor_used=false, c2p_failure=false;
+      int iter_used=0;
+      if (is_hydro) {
+        u.d  = u0(m,IDN,k,j,i);
+        u.mx = u0(m,IM1,k,j,i);
+        u.my = u0(m,IM2,k,j,i);
+        u.mz = u0(m,IM3,k,j,i);
+        u.e  = u0(m,IEN,k,j,i);
+        HydCons1D u_sr;
+        Real s2;
+        // call c2p function
+        TransformToSRHyd(u,glower,gupper,s2,u_sr);
+        SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
+                            dfloor_used, efloor_used, c2p_failure, iter_used);
+        // add cooling/heating term
+        w.e -= bdt * cooling_heating;
+        SingleP2C_IdealGRHyd(glower, gupper, w, gamma, u);
+      } else {
+        u_m.d  = u0(m,IDN,k,j,i);
+        u_m.mx = u0(m,IM1,k,j,i);
+        u_m.my = u0(m,IM2,k,j,i);
+        u_m.mz = u0(m,IM3,k,j,i);
+        u_m.e  = u0(m,IEN,k,j,i);
+        //TODO: are you sure bcc is updated?
+        u_m.bx = bcc(m,IBX,k,j,i);
+        u_m.by = bcc(m,IBY,k,j,i);
+        u_m.bz = bcc(m,IBZ,k,j,i);
+        MHDCons1D u_sr;
+        Real s2, b2, rpar;
+        TransformToSRMHD(u_m,glower,gupper,s2,b2,rpar,u_sr);
+        // call c2p function
+        // (inline function in ideal_c2p_mhd.hpp file)
+        SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
+                            dfloor_used, efloor_used, c2p_failure, iter_used);
+        // add cooling/heating term
+        // TODO: subcycling here?
+        w.e -= bdt * cooling_heating;
+        // load single state of primitive variables
+        w_m.d  = w.d;
+        w_m.vx = w.vx;
+        w_m.vy = w.vy;
+        w_m.vz = w.vz;
+        w_m.e  = w.e;
+        // load cell-centered fields into primitive state
+        w_m.bx = u_m.bx;
+        w_m.by = u_m.by;
+        w_m.bz = u_m.bz;
+        // call p2c function
+        SingleP2C_IdealGRMHD(glower, gupper, w_m, gamma, u);
+      }
+      u0(m,IDN,k,j,i) = u.d;
+      u0(m,IM1,k,j,i) = u.mx;
+      u0(m,IM2,k,j,i) = u.my;
+      u0(m,IM3,k,j,i) = u.mz;
+      u0(m,IEN,k,j,i) = u.e;
+    } else {
+      sub_cycling = false;
+    }
+    if (sub_cycling_used) {
+      sum0++;
+    }
+  }, Kokkos::Sum<int>(nsubcycle), Kokkos::Sum<int>(nsubcycle_count));
+#if MPI_PARALLEL_ENABLED
+  int* pnsubcycle = &(nsubcycle);
+  int* pnsubcycle_count = &(nsubcycle_count);
+  MPI_Allreduce(MPI_IN_PLACE, pnsubcycle, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, pnsubcycle_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#endif
   return;
 }
 
