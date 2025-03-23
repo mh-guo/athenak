@@ -79,6 +79,8 @@ struct bondi_pgen {
   Real rho_inf, pgas_inf;   // asymptotic density and pressure
   Real r_bondi;             // Bondi radius 2GM/c_s^2
   bool reset_ic = false;    // reset initial conditions after run
+  int  bc_type = 0;         // boundary condition type
+  Real rb_out;              // outer boundary radius
   bool cooling = false;     // add ISM cooling
   Real mu_h = 0.6;          // mean molecular weight of hydrogen
   Real tau_cool = -1.0;     // cooling time in dynamical time
@@ -191,6 +193,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     // bondi.c2 = -bondi.n_adi; // useless in Newtonian case
   }
 
+  std::string bc_type = pin->GetOrAddString("problem","bc_type","none");
+  if (bc_type == "none") { bondi.bc_type = 0;
+  } else if (bc_type == "fixed") { bondi.bc_type = 1;
+  } else {
+    std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Unknown boundary condition type: " << bc_type << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  bondi.rb_out = pin->GetOrAddReal("problem","rb_out",std::numeric_limits<Real>::max());
+
   if (global_variable::my_rank == 0) {
     std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
     std::cout << " Critical radius = " << bondi.r_crit << std::endl;
@@ -199,6 +211,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (bondi.cooling) {
       std::cout << " t_cool / t_bondi = " << bondi.tau_cool << std::endl;
     }
+    std::cout << " Initial conditions type = " << ic_type << std::endl;
+    std::cout << " Boundary condition type = " << bc_type << std::endl;
+    std::cout << " Outer boundary radius = " << bondi.rb_out << std::endl;
   }
 
   // Extract BH parameters
@@ -772,6 +787,9 @@ void FixedBondiInflow(Mesh *pm) {
   auto &size = pmbp->pmb->mb_size;
   auto &coord = pmbp->pcoord->coord_data;
   int &ng = indcs.ng;
+  int nx1 = indcs.nx1;
+  int nx2 = indcs.nx2;
+  int nx3 = indcs.nx3;
   int n1 = indcs.nx1 + 2*ng;
   int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
@@ -787,6 +805,13 @@ void FixedBondiInflow(Mesh *pm) {
   auto u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
   auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
 
+  // extract BH parameters
+  bool &flat = coord.is_minkowski;
+  Real &spin = coord.bh_spin;
+
+  const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
+                              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
+  Real gamma = eos_data.gamma;
 
   // Primitive boundary conditions
   // X1-Boundary
@@ -1043,6 +1068,56 @@ void FixedBondiInflow(Mesh *pm) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ks-ng,ks-1);
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
+  }
+
+  // TODO: assuming MHD!
+  // TODO: think whether need refining check as we don't use u1
+  // bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
+  if (is_mhd && bondi_.bc_type == 1) { // && !refining
+    Real rbout = bondi_.rb_out;
+    auto &b = pmbp->pmhd->b0;
+    par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+      // apply initial conditions to boundary cells
+      if (rad > rbout) {
+        Real glower[4][4], gupper[4][4];
+        ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+        Real rho, pgas, uu1, uu2, uu3;
+        ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+        HydCons1D u;
+        MHDPrim1D w_m;
+        // load single state of primitive variables
+        w_m.d  = rho;
+        w_m.vx = uu1;
+        w_m.vy = uu2;
+        w_m.vz = uu3;
+        w_m.e  = pgas/(bondi_.gm - 1.0);
+        // load cell-centered fields into primitive state
+        w_m.bx = 0.5*(b.x1f(m,k,j,i) + b.x1f(m,k,j,i+1));
+        w_m.by = 0.5*(b.x2f(m,k,j,i) + b.x2f(m,k,j,i+1));
+        w_m.bz = 0.5*(b.x3f(m,k,j,i) + b.x3f(m,k,j,i+1));
+        SingleP2C_IdealGRMHD(glower, gupper, w_m, gamma, u);
+        u0_(m,IDN,k,j,i) = u.d;
+        u0_(m,IM1,k,j,i) = u.mx;
+        u0_(m,IM2,k,j,i) = u.my;
+        u0_(m,IM3,k,j,i) = u.mz;
+        u0_(m,IEN,k,j,i) = u.e;
+      }
+    });
   }
 
   if (pm->pmb_pack->pzoom != nullptr && pm->pmb_pack->pzoom->is_set) {
