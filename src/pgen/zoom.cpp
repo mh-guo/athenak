@@ -98,6 +98,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
     emf_flag = pin->GetInteger("zoom","emf_flag");
     emf_f1 = pin->GetReal("zoom","emf_f1");
     emf_fmax = pin->GetReal("zoom","emf_fmax");
+    emf_zmax = pin->GetOrAddInteger("zoom","emf_zmax",zamr.nlevels);
     r0_efld = pin->GetOrAddReal("zoom","r0_efld",0.0); // default value
   }
 
@@ -259,8 +260,10 @@ void Zoom::PrintInfo()
     // print model parameters
     std::cout << "Model: mzoom = " << mzoom << " nvars = " << nvars
               << " r_in = " << r_in << " d_zoom = " << d_zoom
-              << " p_zoom = " << p_zoom << " emf_f0 = " << emf_f0
-              << " emf_f1 = " << emf_f1 << " emf_fmax = " << emf_fmax
+              << " p_zoom = " << p_zoom  << std::endl;
+    // print electric field parameters
+    std::cout << "Efield: emf_f0 = " << emf_f0 << " emf_f1 = " << emf_f1
+              << " emf_fmax = " << emf_fmax << " emf_zmax = " << emf_zmax
               << " r0_efld = " << r0_efld << std::endl;
     // print interval parameters
     std::cout << "Interval: t_run_fac = " << zint.t_run_fac
@@ -1445,8 +1448,11 @@ void Zoom::AddDeltaEField(DvceEdgeFld4D<Real> emf) {
   Real rzoom = zamr.radius;
 
   int zid = nleaf*(zamr.zone-1);
-  Real &f0 = emf_f0; //(rad-rzoom)/rzoom;
-  Real &f1 = emf_f1; //(rzoom-rad)/rzoom;
+  Real f0 = emf_f0; //(rad-rzoom)/rzoom;
+  Real f1 = emf_f1; //(rzoom-rad)/rzoom;
+  if (zamr.zone > emf_zmax) {
+    f1 = 0.0;
+  }
   // TODO: add adaptive E field
   if (emf_flag == 3) { // 3 = adaptive
     SphericalFlux(1,zamr.zone);
