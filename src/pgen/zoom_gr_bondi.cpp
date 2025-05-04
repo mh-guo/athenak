@@ -84,6 +84,7 @@ struct bondi_pgen {
   bool cooling = false;     // add ISM cooling
   Real mu_h = 0.6;          // mean molecular weight of hydrogen
   Real tau_cool = -1.0;     // cooling time in dynamical time
+  int  ndiag = -1;          // diagnostic interval
 };
 
   bondi_pgen bondi;
@@ -202,6 +203,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::exit(EXIT_FAILURE);
   }
   bondi.rb_out = pin->GetOrAddReal("problem","rb_out",std::numeric_limits<Real>::max());
+
+  bondi.ndiag = pin->GetOrAddInteger("problem", "ndiag", -1);
 
   if (global_variable::my_rank == 0) {
     std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
@@ -517,7 +520,7 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
                                    struct bondi_pgen pgen,
                                    Real& rho, Real& pgas,
                                    Real& uu1, Real& uu2, Real& uu3) {
-  if (pgen.ic_type>0) {
+  if (pgen.ic_type == 1) {
     rho = pgen.rho_inf;
     pgas = pgen.pgas_inf;
     uu1 = 0.0;
@@ -528,6 +531,17 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
   // Calculate Boyer-Lindquist coordinates of cell
   Real r, theta, phi;
   GetBoyerLindquistCoordinates(pgen, x1v, x2v, x3v, &r, &theta, &phi);
+
+  // TODO(@mhguo): change this!
+  if (pgen.ic_type == 2) {
+    // rho = pgen.rho_inf/(1.0 + (fmax(r-pgen.r_bondi,0.0)/pgen.r_bondi));
+    rho = pgen.rho_inf/((r>pgen.r_bondi) ? r/pgen.r_bondi : 1.0);
+    pgas = pgen.pgas_inf;
+    uu1 = 0.0;
+    uu2 = 0.0;
+    uu3 = 0.0;
+    return;
+  }
 
   // Compute primitive in BL coordinates, transform to Cartesian KS
   Real my_rho, my_pgas, my_ur;
@@ -1138,16 +1152,18 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   Real &spin = pmbp->pcoord->coord_data.bh_spin;
 
   // set nvars, adiabatic index, primitive array w0, and field array bcc0 if is_mhd
-  int nvars; Real gamma; bool is_mhd = false;
+  int nvars; Real gamma; Real tfloor; bool is_mhd = false;
   DvceArray5D<Real> w0_, bcc0_;
   if (pmbp->phydro != nullptr) {
     nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
     gamma = pmbp->phydro->peos->eos_data.gamma;
+    tfloor = pmbp->phydro->peos->eos_data.tfloor;
     w0_ = pmbp->phydro->w0;
   } else if (pmbp->pmhd != nullptr) {
     is_mhd = true;
     nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
     gamma = pmbp->pmhd->peos->eos_data.gamma;
+    tfloor = pmbp->pmhd->peos->eos_data.tfloor;
     w0_ = pmbp->pmhd->w0;
     bcc0_ = pmbp->pmhd->bcc0;
   }
@@ -1156,34 +1172,21 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   // int nflux = (is_mhd) ? 4 : 3;
-  const int nflux = 29;
+  const int nflux = 30;
 
   // set number of and names of history variables for hydro or mhd
   //  (1) mass accretion rate
   //  (2) energy flux
   //  (3) angular momentum flux
   //  (4) magnetic flux (iff MHD)
-  pdata->nhist = nradii*nflux;
-  if (pdata->nhist > NHISTORY_VARIABLES) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "User history function specified pdata->nhist larger than"
-              << " NHISTORY_VARIABLES" << std::endl;
-    exit(EXIT_FAILURE);
-  }
-  // TODO: add angular momentum components
-  // no more than 7 characters per label
-  std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
-    "lx","ly","lz","lzout","phi","eint","b^2","alpha","lor","u0","u_0","ur","uph","b0",
-    "b_0","br","bph","edothyd","edho","edotadv","edao"
-  };
-  int gi0 = 0;
+  pdata->nhist = 0;
+
+  // history of zoom variables
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
-    gi0 += 1;
     pdata->nhist += 1;
     pdata->label[0] = "zone";
     pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zamr.zone : 0.0;
     if (pmbp->pzoom->calc_cons_change) {
-      gi0 += 2;
       pdata->nhist += 2;
       pdata->label[1] = "dm";
       pdata->hdata[1] = (global_variable::my_rank == 0)? pmbp->pzoom->zchg.dmass : 0.0;
@@ -1191,19 +1194,137 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[2] = (global_variable::my_rank == 0)? pmbp->pzoom->zchg.dengy : 0.0;
     }
   }
+
+  // history of global sum variables
+  int sn0 = pdata->nhist;
+  const int nsum = 9;
+  pdata->nhist += nsum;
+  std::string sdata_label[nsum] = {
+    // 6 letters for the first 7 labels, 5 for the rest
+    "Vglb ", "Mglb ", "Eglb ", "Cglb ",  "Eint ", "Ekin ", "Emag ",
+    "Vcold", "Mcold",
+  };
+  for (int n=0; n<nsum; ++n) {
+    pdata->label[sn0+n] = sdata_label[n];
+  }
+
+  // history of spherical grid variables
+  int gn0 = pdata->nhist;
+  pdata->nhist += nradii*nflux;
+  // TODO: add angular momentum components
+  // no more than 7 characters per label
+  std::string gdata_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
+    "lx","ly","lz","lzout","phi","eint","b^2","alpha","lor","u0","u_0","ur","uph","b0",
+    "b_0","br","bph","edothyd","edho","edotadv","edao","cooling"
+  };
   for (int g=0; g<nradii; ++g) {
     std::string gstr = std::to_string(g);
-    for (int i=0; i<nflux; ++i) {
-      pdata->label[gi0+nflux*g+i] = data_label[i] + "_" + gstr;
+    for (int n=0; n<nflux; ++n) {
+      pdata->label[gn0+nflux*g+n] = gdata_label[n] + "_" + gstr;
     }
+  }
+
+  if (pdata->nhist > NHISTORY_VARIABLES) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "User history function specified pdata->nhist larger than"
+              << " NHISTORY_VARIABLES" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  Real temp_unit = pmbp->punit->temperature_cgs();
+  Real n_h_unit = pmbp->punit->density_cgs()/bondi.mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
+
+  // compute global sum
+  // capture class variabels for kernel
+  auto &size = pmbp->pmb->mb_size;
+  // loop over all MeshBlocks in this pack
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is; int nx1 = indcs.nx1;
+  int js = indcs.js; int nx2 = indcs.nx2;
+  int ks = indcs.ks; int nx3 = indcs.nx3;
+  const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji = nx2*nx1;
+  array_sum::GlobalSum sum_this_mb0;
+  // store data into hdata array
+  for (int n=0; n<NREDUCTION_VARIABLES; ++n) {
+    sum_this_mb0.the_array[n] = 0.0;
+  }
+  Real rbout = bondi.rb_out;
+  Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum0) {
+    // compute n,k,j,i indices of thread
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+
+    Real glower[4][4], gupper[4][4];
+    ComputeMetricAndInverse(x1v,x2v,x3v,flat,spin,glower,gupper);
+
+    Real dens = w0_(m,IDN,k,j,i);
+    Real temp = (gamma-1.0) * w0_(m,IEN,k,j,i)/w0_(m,IDN,k,j,i);
+    
+    // flags
+    Real on = (rad <= rbout)? 1.0 : 0.0; // check if angle is on this rank
+    Real dv_cold = (temp<0.1/rad)? vol : 0.0;
+
+    // TODO: consider relativistic correction
+    Real mass = vol * w0_(m,IDN,k,j,i);
+    Real eint = vol * w0_(m,IEN,k,j,i);
+    Real lambda_cooling = (temp>tfloor) ? ISMCoolFn(temp*temp_unit)/cooling_unit : 0.0;
+    Real cooling_rate = dens * dens * lambda_cooling;
+    Real cooling = vol * cooling_rate;
+    Real dm_cold = dv_cold * w0_(m,IDN,k,j,i);
+    // TODO: consider add these terms, either in Newtonian or relativistic
+    Real etot = vol * 0.0;
+    Real ekin = vol * 0.0;
+    Real emag = vol * 0.0;
+
+    Real vars[nsum] = {
+      vol,     mass,    etot,    cooling, eint,    ekin,    emag,
+      dv_cold, dm_cold,
+    };
+
+    // sum variables:
+    array_sum::GlobalSum hvars0;
+    for (int n=0; n<nsum; ++n) {
+      hvars0.the_array[n] = vars[n]*on;
+    }
+
+    // sum into parallel reduce
+    mb_sum0 += hvars0;
+  }, Kokkos::Sum<array_sum::GlobalSum>(sum_this_mb0));
+
+  // store data into hdata array
+  for (int n=0; n<nsum; ++n) {
+    pdata->hdata[sn0+n] = sum_this_mb0.the_array[n];
   }
 
   // go through angles at each radii:
   DualArray2D<Real> interpolated_bcc;  // needed for MHD
   for (int g=0; g<nradii; ++g) {
     // zero fluxes at this radius
-    for (int i=0; i<nflux; ++i) {
-      pdata->hdata[gi0+nflux*g+i] = 0.0;
+    for (int n=0; n<nflux; ++n) {
+      pdata->hdata[gn0+nflux*g+n] = 0.0;
     }
 
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
@@ -1320,16 +1441,19 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       Real phi_flx = (is_mhd) ? 0.5*fabs(br*u0 - b0*ur) : 0.0;
       Real t1_0_hyd = (int_dn + gamma*int_ie)*ur*u_0;
       Real bernl_hyd = (on)? -(1.0 + gamma*int_ie/int_dn)*u_0-1.0 : 0.0;
+      Real temp = (on) ? (gamma-1.0)*int_ie/int_dn : 0.0;
+      Real lambda_cooling = (temp>tfloor) ? ISMCoolFn(temp*temp_unit)/cooling_unit : 0.0;
+      Real cooling_rate = int_dn * int_dn * lambda_cooling;
 
       Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
         t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
         int_ie, b_sq, alpha, lor, u0, u_0, ur, uph, b0, b_0, br, bph,
-        t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
+        t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out, cooling_rate
       };
 
-      pdata->hdata[gi0+nflux*g+0] = (global_variable::my_rank == 0)? flux_data[0] : 0.0;
-      for (int i=1; i<nflux; ++i) {
-        pdata->hdata[gi0+nflux*g+i] += flux_data[i]*sqrtmdet*domega*on;
+      pdata->hdata[gn0+nflux*g+0] = (global_variable::my_rank == 0)? flux_data[0] : 0.0;
+      for (int n=1; n<nflux; ++n) {
+        pdata->hdata[gn0+nflux*g+n] += flux_data[n]*sqrtmdet*domega*on;
       }
     }
   }
@@ -1408,22 +1532,17 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     int i = (idx - m*nkji - k*nji - j*nx1) + is;
     k += ks;
     j += js;
-    Real dens=1.0, temp = 1.0, eint = 1.0;
-    dens = w0(m,IDN,k,j,i);
-    temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
-    eint = w0(m,IEN,k,j,i);
+    Real dens = w0(m,IDN,k,j,i);
+    Real temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
+    Real eint = w0(m,IEN,k,j,i);
+    // compute cooling/heating terms
+    Real lambda_cooling = (temp<=tfloor) ? 0.0 : ISMCoolFn(temp*temp_unit)/cooling_unit;
+    Real cooling_heating = dens * dens * lambda_cooling;
 
     bool sub_cycling = true;
     bool sub_cycling_used = false;
     Real bdt_now = 0.0;
     if (is_gr) {
-      // add cooling/heating term into the primitive variables
-      Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
-      // soft function
-      // lambda_cooling *= exp(-1.0e1*pow(tfloor/temp,4.0));
-      Real cooling_heating = dens * dens * lambda_cooling;
-      // conserve energy is minus sign
-      // u0(m,IEN,k,j,i) += bdt * cooling_heating;
       // Extract components of metric
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
@@ -1475,9 +1594,25 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         // (inline function in ideal_c2p_mhd.hpp file)
         SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
                             dfloor_used, efloor_used, c2p_failure, iter_used);
-        // add cooling/heating term
-        // TODO: subcycling here?
-        w.e -= bdt * cooling_heating;
+        // add cooling/heating term using subcycling if necessary
+        // TODO: w.d is updated, not equal to dens, should think which one to use
+        do {
+          Real dt_cool = (w.e/(FLT_MIN + fabs(cooling_heating)));
+          // half of the timestep
+          Real bdt_cool = 0.5*beta*cfl_no*dt_cool;
+          if (bdt_now+bdt_cool<bdt) {
+            w.e -= bdt_cool * cooling_heating;
+            temp = w.e/w.d*gm1;
+            lambda_cooling = (temp>tfloor) ? ISMCoolFn(temp*temp_unit)/cooling_unit : 0.0;
+            cooling_heating = w.d * w.d * lambda_cooling;
+            sub_cycling_used = true;
+            sum1++;
+          } else {
+            w.e -= (bdt-bdt_now) * cooling_heating;
+            sub_cycling = false;
+          }
+          bdt_now += bdt_cool;
+        } while (sub_cycling);
         // load single state of primitive variables
         w_m.d  = w.d;
         w_m.vx = w.vx;
@@ -1509,6 +1644,14 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   MPI_Allreduce(MPI_IN_PLACE, pnsubcycle, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE, pnsubcycle_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 #endif
+  if (global_variable::my_rank == 0) {
+    if (bondi.ndiag>0 && pm->ncycle % bondi.ndiag == 0) {
+      if (nsubcycle>0 || nsubcycle_count >0) {
+        std::cout << " nsubcycle_cell=" << nsubcycle << std::endl
+                  << " nsubcycle_count=" << nsubcycle_count << std::endl;
+      }
+    }
+  }
   return;
 }
 
