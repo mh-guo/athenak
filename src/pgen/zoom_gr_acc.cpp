@@ -4,7 +4,7 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file zoom_gr_acc.cpp
-//! \brief Problem generator for spherically symmetric black hole accretion.
+//! \brief (@mhguo) Problem generator for black hole accretion from galactic scale
 
 #include <cmath>   // abs(), NAN, pow(), sqrt()
 #include <cstring> // strcmp()
@@ -39,35 +39,38 @@ namespace {
 
 KOKKOS_INLINE_FUNCTION
 static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord,
-                                   struct bondi_pgen pgen,
+                                   struct acc_pgen pgen,
                                    Real& rho, Real& pgas,
                                    Real& uu1, Real& uu2, Real& uu3);
 
 KOKKOS_INLINE_FUNCTION
-static void GetBoyerLindquistCoordinates(struct bondi_pgen pgen,
+static void GetBoyerLindquistCoordinates(struct acc_pgen pgen,
                                          Real x1, Real x2, Real x3,
                                          Real *pr, Real *ptheta, Real *pphi);
 
 KOKKOS_INLINE_FUNCTION
-static void TransformVector(struct bondi_pgen pgen,
+static void TransformVector(struct acc_pgen pgen,
                             Real a1_bl, Real a2_bl, Real a3_bl,
                             Real x1, Real x2, Real x3,
                             Real *pa1, Real *pa2, Real *pa3);
 
 KOKKOS_INLINE_FUNCTION
-static void CalculatePrimitives(struct bondi_pgen pgen, Real r,
+static void CalculatePrimitives(struct acc_pgen pgen, Real r,
                                 Real *prho, Real *ppgas, Real *pur);
 
 KOKKOS_INLINE_FUNCTION
-static Real TemperatureMin(struct bondi_pgen pgen, Real r, Real t_min, Real t_max);
+static Real TemperatureMin(struct acc_pgen pgen, Real r, Real t_min, Real t_max);
 
 KOKKOS_INLINE_FUNCTION
-static Real TemperatureBisect(struct bondi_pgen pgen, Real r, Real t_min, Real t_max);
+static Real TemperatureBisect(struct acc_pgen pgen, Real r, Real t_min, Real t_max);
 
 KOKKOS_INLINE_FUNCTION
-static Real TemperatureResidual(struct bondi_pgen pgen, Real t, Real r);
+static Real TemperatureResidual(struct acc_pgen pgen, Real t, Real r);
 
-struct bondi_pgen {
+KOKKOS_INLINE_FUNCTION
+static Real Acceleration(struct acc_pgen pgen, const Real r);
+
+struct acc_pgen {
   Real spin;                // black hole spin
   Real dexcise, pexcise;    // excision parameters
   int  ic_type;             // initial condition type
@@ -75,29 +78,42 @@ struct bondi_pgen {
   Real r_crit;              // sonic point radius
   Real c1, c2;              // useful constants
   Real temp_min, temp_max;  // bounds for temperature root find
-  Real temp_inf, c_s_inf;   // asymptotic temperature and sound speed
-  Real rho_inf, pgas_inf;   // asymptotic density and pressure
+  Real temp_norm, c_s_norm; // normalization of temperature and sound speed
+  Real rho_norm, pgas_norm; // normalization of density and pressure
   Real r_bondi;             // Bondi radius 2GM/c_s^2
   bool reset_ic = false;    // reset initial conditions after run
   int  bc_type = 0;         // boundary condition type
   Real rb_out;              // outer boundary radius
+  bool potential = false;   // add potential term
+  Real sigma2 = 0.0;        // potential term coefficient
+  Real r_iso = 0.0;         // radius of isothermal core
   bool cooling = false;     // add ISM cooling
   Real mu_h = 0.6;          // mean molecular weight of hydrogen
   Real tau_cool = -1.0;     // cooling time in dynamical time
+  Real r_entropy;              // radius of entropy core
   int  ndiag = -1;          // diagnostic interval
 };
 
-  bondi_pgen bondi;
+  acc_pgen acc;
+
+struct acc_arr {
+  DualArray1D<Real> temp_arr;
+};
+
+acc_arr* accarr = new acc_arr();
 
 // prototypes for user-defined BCs and error functions
 void FixedBondiInflow(Mesh *pm);
 void BondiErrors(ParameterInput *pin, Mesh *pm);
 void BondiFluxes(HistoryData *pdata, Mesh *pm);
 void AddUserSrcs(Mesh *pm, const Real bdt);
+void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+              const DvceArray5D<Real> &w0);
 void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data);
 void ZoomAMR(MeshBlockPack* pmbp) {pmbp->pzoom->AMR();}
 Real ZoomNewTimeStep(Mesh* pm) {return pm->pmb_pack->pzoom->NewTimeStep(pm);}
+void AccFinalWork(ParameterInput *pin, Mesh *pm);
 
 } // namespace
 
@@ -123,100 +139,122 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     user_ref_func = ZoomAMR;
     if (pmbp->pzoom->zoom_dt) user_dt_func = ZoomNewTimeStep;
   }
+  pgen_final_func = AccFinalWork;
 
   // Read problem-specific parameters from input file
   // global parameters
-  bondi.k_adi = pin->GetReal("problem", "k_adi");
-  bondi.r_crit = pin->GetReal("problem", "r_crit");
+  acc.k_adi = pin->GetReal("problem", "k_adi");
+  acc.r_crit = pin->GetReal("problem", "r_crit");
 
   // Get ideal gas EOS data
-  bondi.gm = peos->eos_data.gamma;
-  Real gm1 = bondi.gm - 1.0;
+  acc.gm = peos->eos_data.gamma;
+  Real gm1 = acc.gm - 1.0;
 
   // Parameters
-  bondi.temp_min = 1.0e-7;  // lesser temperature root must be greater than this
-  bondi.temp_max = 1.0e0;   // greater temperature root must be less than this
+  acc.temp_min = 1.0e-7;  // lesser temperature root must be greater than this
+  acc.temp_max = 1.0e0;   // greater temperature root must be less than this
 
   // Get spin of black hole
-  bondi.spin = pmbp->pcoord->coord_data.bh_spin;
+  acc.spin = pmbp->pcoord->coord_data.bh_spin;
 
   // Get excision parameters
-  bondi.dexcise = pmbp->pcoord->coord_data.dexcise;
-  bondi.pexcise = pmbp->pcoord->coord_data.pexcise;
+  acc.dexcise = pmbp->pcoord->coord_data.dexcise;
+  acc.pexcise = pmbp->pcoord->coord_data.pexcise;
+
+  acc.potential = pin->GetOrAddBoolean("problem", "potential", false);
+  acc.sigma2 = pin->GetOrAddReal("problem", "sigma2", 0.0);
+  acc.r_iso = pin->GetOrAddReal("problem", "r_iso", 0.0);
 
   // Get initial condition type
-  int ic_type = bondi.ic_type = pin->GetOrAddInteger("problem", "ic_type", 0);
+  std::string ic_type = pin->GetOrAddString("problem","ic_type","gr_bondi");
+  if (ic_type == "gr_bondi") { acc.ic_type = 0;
+  } else if (ic_type == "uniform") { acc.ic_type = 1;
+  } else if (ic_type == "entropy") { acc.ic_type = 2;
+  } else {
+    std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Unknown boundary condition type: " << ic_type << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // Get ratio of specific heats
-  bondi.n_adi = 1.0/(bondi.gm - 1.0);
+  acc.n_adi = 1.0/(acc.gm - 1.0);
 
   // Prepare various constants for determining primitives
-  Real u_crit_sq = 1.0/(2.0*bondi.r_crit);                           // (HSW 71)
+  Real u_crit_sq = 1.0/(2.0*acc.r_crit);                           // (HSW 71)
   Real u_crit = -sqrt(u_crit_sq);
-  Real t_crit = (bondi.n_adi/(bondi.n_adi+1.0)
-                 * u_crit_sq/(1.0-(bondi.n_adi+3.0)*u_crit_sq));     // (HSW 74)
-  bondi.c1 = pow(t_crit, bondi.n_adi) * u_crit * SQR(bondi.r_crit);  // (HSW 68)
-  bondi.c2 = (SQR(1.0 + (bondi.n_adi+1.0) * t_crit)
-              * (1.0 - 3.0/(2.0*bondi.r_crit)));                     // (HSW 69)
-  bondi.temp_inf = (sqrt(bondi.c2)-1.0)/(1.0+bondi.n_adi);           // (HSW 69)
-  bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
-  bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
+  Real t_crit = (acc.n_adi/(acc.n_adi+1.0)
+                 * u_crit_sq/(1.0-(acc.n_adi+3.0)*u_crit_sq));     // (HSW 74)
+  acc.c1 = pow(t_crit, acc.n_adi) * u_crit * SQR(acc.r_crit);  // (HSW 68)
+  acc.c2 = (SQR(1.0 + (acc.n_adi+1.0) * t_crit)
+              * (1.0 - 3.0/(2.0*acc.r_crit)));                     // (HSW 69)
+  acc.temp_norm = (sqrt(acc.c2)-1.0)/(1.0+acc.n_adi);           // (HSW 69)
+  acc.c_s_norm = sqrt(acc.gm * acc.temp_norm);
+  acc.r_bondi = 2.0/SQR(acc.c_s_norm);
 
-  bondi.cooling = pin->GetOrAddBoolean("problem", "cooling", false);
-  bondi.mu_h = pin->GetOrAddReal("problem", "mu_h", 1.0);
-  bondi.tau_cool = pin->GetOrAddReal("problem", "tau_cool", -1.0);
+  acc.cooling = pin->GetOrAddBoolean("problem", "cooling", false);
+  acc.mu_h = pin->GetOrAddReal("problem", "mu_h", 1.0);
+  acc.tau_cool = pin->GetOrAddReal("problem", "tau_cool", -1.0);
+  acc.r_entropy = pin->GetOrAddReal("problem", "r_entropy", std::numeric_limits<Real>::max());
 
-  if (ic_type > 0) {
+  if (acc.ic_type > 0) {
     // Prepare various constants for determining primitives
-    bondi.temp_inf = pin->GetReal("problem", "temp_inf");
-    bondi.c_s_inf = sqrt(bondi.gm * bondi.temp_inf);
-    bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
-    bondi.rho_inf = pow(bondi.temp_inf/bondi.k_adi, bondi.n_adi);
-    bondi.rho_inf = pin->GetOrAddReal("problem", "dens_inf", bondi.rho_inf);
-    if (bondi.cooling) {
-      Real t_char = bondi.r_bondi / bondi.c_s_inf;
+    acc.temp_norm = pin->GetReal("problem", "temp_norm");
+    acc.c_s_norm = sqrt(acc.gm * acc.temp_norm);
+    acc.r_bondi = 2.0/SQR(acc.c_s_norm);
+    acc.rho_norm = pow(acc.temp_norm/acc.k_adi, acc.n_adi);
+    acc.rho_norm = pin->GetOrAddReal("problem", "dens_norm", acc.rho_norm);
+    if (acc.cooling) {
+      Real t_char = acc.r_bondi / acc.c_s_norm;
       auto punit = pmbp->punit;
       Real temp_unit = punit->temperature_cgs();
-      Real n_h_unit = punit->density_cgs()/bondi.mu_h/punit->atomic_mass_unit_cgs;
+      Real n_h_unit = punit->density_cgs()/acc.mu_h/punit->atomic_mass_unit_cgs;
       Real cooling_unit = punit->pressure_cgs()/punit->time_cgs()/SQR(n_h_unit);
-      Real lambda_cooling = ISMCoolFn(bondi.temp_inf*temp_unit)/cooling_unit;
-      if (bondi.tau_cool > 0.0) {
-        Real t_cool = bondi.tau_cool * t_char;
-        bondi.rho_inf = bondi.temp_inf / (t_cool * gm1 * lambda_cooling);  
+      Real lambda_cooling = ISMCoolFn(acc.temp_norm*temp_unit)/cooling_unit;
+      if (acc.tau_cool > 0.0) {
+        Real t_cool = acc.tau_cool * t_char;
+        acc.rho_norm = acc.temp_norm / (t_cool * gm1 * lambda_cooling);  
       } else {
-        Real t_cool = bondi.temp_inf / (bondi.rho_inf * gm1 * lambda_cooling);
-        bondi.tau_cool = t_cool / t_char;
+        Real t_cool = acc.temp_norm / (acc.rho_norm * gm1 * lambda_cooling);
+        acc.tau_cool = t_cool / t_char;
       }
     }
-    bondi.pgas_inf = bondi.rho_inf * bondi.temp_inf;
-    // bondi.r_crit = (5.0-3.0*bondi.gm)/4.0;
-    // bondi.c1 = 0.25*pow(2.0/(5.0-3.0*bondi.gm), (5.0-3.0*bondi.gm)*0.5*bondi.n_adi);
-    // bondi.c2 = -bondi.n_adi; // useless in Newtonian case
+    acc.k_adi = acc.temp_norm / pow(acc.rho_norm, gm1); // update k_adi
+    acc.pgas_norm = acc.rho_norm * acc.temp_norm;
+    // acc.r_crit = (5.0-3.0*acc.gm)/4.0;
+    // acc.c1 = 0.25*pow(2.0/(5.0-3.0*acc.gm), (5.0-3.0*acc.gm)*0.5*acc.n_adi);
+    // acc.c2 = -acc.n_adi; // useless in Newtonian case
   }
 
   std::string bc_type = pin->GetOrAddString("problem","bc_type","none");
-  if (bc_type == "none") { bondi.bc_type = 0;
-  } else if (bc_type == "fixed") { bondi.bc_type = 1;
+  if (bc_type == "none") { acc.bc_type = 0;
+  } else if (bc_type == "fixed") { acc.bc_type = 1;
   } else {
     std::cout << "### ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "Unknown boundary condition type: " << bc_type << std::endl;
     std::exit(EXIT_FAILURE);
   }
-  bondi.rb_out = pin->GetOrAddReal("problem","rb_out",std::numeric_limits<Real>::max());
+  acc.rb_out = pin->GetOrAddReal("problem","rb_out", std::numeric_limits<Real>::max());
 
-  bondi.ndiag = pin->GetOrAddInteger("problem", "ndiag", -1);
+  acc.ndiag = pin->GetOrAddInteger("problem", "ndiag", -1);
 
   if (global_variable::my_rank == 0) {
-    std::cout << " Bondi radius = " << bondi.r_bondi << std::endl;
-    std::cout << " Critical radius = " << bondi.r_crit << std::endl;
-    std::cout << " c1 = " << bondi.c1 << std::endl;
-    std::cout << " rho_inf = " << bondi.rho_inf << std::endl;
-    if (bondi.cooling) {
-      std::cout << " t_cool / t_bondi = " << bondi.tau_cool << std::endl;
+    std::cout << " Bondi radius = " << acc.r_bondi << std::endl;
+    std::cout << " Critical radius = " << acc.r_crit << std::endl;
+    std::cout << " c1 = " << acc.c1 << std::endl;
+    std::cout << " rho_norm = " << acc.rho_norm << std::endl;
+    if (acc.potential) {
+      std::cout << " Potential: sigma2 = " << acc.sigma2 << " r_iso = " << acc.r_iso
+                << std::endl;
     }
-    std::cout << " Initial conditions type = " << ic_type << std::endl;
+    if (acc.cooling) {
+      std::cout << " t_cool / t_bondi = " << acc.tau_cool << std::endl;
+    }
+    if (acc.ic_type == 2) {
+      std::cout << " Radius of entropy core: r_entropy = " << acc.r_entropy << std::endl;
+    }
+    std::cout << " Initial condition type  = " << ic_type << std::endl;
     std::cout << " Boundary condition type = " << bc_type << std::endl;
-    std::cout << " Outer boundary radius = " << bondi.rb_out << std::endl;
+    std::cout << " Outer boundary radius   = " << acc.rb_out << std::endl;
   }
 
   // Extract BH parameters
@@ -225,7 +263,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
   const Real rflux =
-    (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(bondi.spin));
+    (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(acc.spin));
   int nintp = pin->GetOrAddInteger("problem", "hist_nintp", 2);
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux, nintp));
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5), nintp));
@@ -249,7 +287,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // capture variables for the kernel
   auto &indcs = pmy_mesh_->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
-  auto bondi_ = bondi;
+  auto acc_ = acc;
   int &ng = indcs.ng;
   int n1 = indcs.nx1 + 2*ng;
   int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
@@ -265,7 +303,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // local parameters
   Real pert_amp = pin->GetOrAddReal("problem", "pert_amp", 0.0);
   Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
-  par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
+  par_for("pgen_acc", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real rho, pgas, uu1, uu2, uu3;
     Real &x1min = size.d_view(m).x1min;
@@ -281,7 +319,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     // TODO: add flat IC
-    ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+    ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
     // Calculate perturbation
     auto rand_gen = rand_pool64.get_state(); // get random number state this thread
     Real perturbation = 2.0*pert_amp*(rand_gen.frand() - 0.5);
@@ -298,7 +336,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (is_mhd && b_ini>0.0) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
-    par_for("pgen_bondi_bfield", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
+    par_for("pgen_acc_bfield", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       b0_.x1f(m,k,j,i) = 0.0;
       if (i==n1m1) b0_.x1f(m,k,j,i+1) = 0.0;
@@ -315,7 +353,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Convert primitives to conserved
   auto &u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
   auto &u1_ = is_mhd ? pmbp->pmhd->u1 : pmbp->phydro->u1;
-  if (bondi.reset_ic) {
+  if (acc.reset_ic) {
     if (pmbp->phydro != nullptr) {
       pmbp->phydro->peos->PrimToCons(w0_, u1_, 0, n1m1, 0, n2m1, 0, n3m1);
     } else if (pmbp->pmhd != nullptr) {
@@ -372,7 +410,7 @@ namespace {
 void BondiErrors(ParameterInput *pin, Mesh *pm) {
   // calculate reference solution by calling pgen again.  Solution stored in second
   // register u1/b1 when flag is false.
-  bondi.reset_ic=true;
+  acc.reset_ic=true;
   pm->pgen->UserProblem(pin, false);
 
   Real l1_err[8];
@@ -509,6 +547,18 @@ void BondiErrors(ParameterInput *pin, Mesh *pm) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn static Real Acceleration()
+//  \brief Computes the gravitational acceleration at a given radius
+
+KOKKOS_INLINE_FUNCTION
+static Real Acceleration(struct acc_pgen pgen, const Real r) {
+  if (pgen.r_iso > 0.0) {
+    return - pgen.sigma2 * (1.0-pgen.r_iso/r*log(1.0+r/pgen.r_iso)) / r;
+  }
+  return - pgen.sigma2 / r;
+};
+
+//----------------------------------------------------------------------------------------
 // Function for returning corresponding Boyer-Lindquist coordinates of point
 // Inputs:
 //   x1,x2,x3: global coordinates to be converted
@@ -517,12 +567,12 @@ void BondiErrors(ParameterInput *pin, Mesh *pm) {
 
 KOKKOS_INLINE_FUNCTION
 static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord,
-                                   struct bondi_pgen pgen,
+                                   struct acc_pgen pgen,
                                    Real& rho, Real& pgas,
                                    Real& uu1, Real& uu2, Real& uu3) {
   if (pgen.ic_type == 1) {
-    rho = pgen.rho_inf;
-    pgas = pgen.pgas_inf;
+    rho = pgen.rho_norm;
+    pgas = pgen.pgas_norm;
     uu1 = 0.0;
     uu2 = 0.0;
     uu3 = 0.0;
@@ -532,11 +582,15 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
   Real r, theta, phi;
   GetBoyerLindquistCoordinates(pgen, x1v, x2v, x3v, &r, &theta, &phi);
 
-  // TODO(@mhguo): change this!
+  // TODO(@mhguo): may add power-law index for entropy
+  // entropy core profile
   if (pgen.ic_type == 2) {
-    // rho = pgen.rho_inf/(1.0 + (fmax(r-pgen.r_bondi,0.0)/pgen.r_bondi));
-    rho = pgen.rho_inf/((r>pgen.r_bondi) ? r/pgen.r_bondi : 1.0);
-    pgas = pgen.pgas_inf;
+    // rho = pgen.rho_norm/(1.0 + (fmax(r-pgen.r_bondi,0.0)/pgen.r_bondi));
+    // rho = pgen.rho_norm/((r>pgen.r_bondi) ? r/pgen.r_bondi : 1.0);
+    Real temp = pgen.temp_norm; // isothermal
+    Real entropy = pgen.k_adi * (1.0 + r/pgen.r_entropy);
+    rho = pow(temp/entropy, pgen.n_adi);
+    pgas = rho * pgen.temp_norm;
     uu1 = 0.0;
     uu2 = 0.0;
     uu3 = 0.0;
@@ -585,7 +639,7 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
 //   pr,ptheta,pphi: variables pointed to set to Boyer-Lindquist coordinates
 
 KOKKOS_INLINE_FUNCTION
-static void GetBoyerLindquistCoordinates(struct bondi_pgen pgen,
+static void GetBoyerLindquistCoordinates(struct acc_pgen pgen,
                                          Real x1, Real x2, Real x3,
                                          Real *pr, Real *ptheta, Real *pphi) {
     Real rad = sqrt(SQR(x1) + SQR(x2) + SQR(x3));
@@ -609,22 +663,22 @@ static void GetBoyerLindquistCoordinates(struct bondi_pgen pgen,
 //   Schwarzschild coordinates match Boyer-Lindquist when a = 0
 
 KOKKOS_INLINE_FUNCTION
-static void TransformVector(struct bondi_pgen pgen,
+static void TransformVector(struct acc_pgen pgen,
                             Real a1_bl, Real a2_bl, Real a3_bl,
                             Real x1, Real x2, Real x3,
                             Real *pa1, Real *pa2, Real *pa3) {
   Real rad = sqrt( SQR(x1) + SQR(x2) + SQR(x3) );
-  Real r = fmax((sqrt( SQR(rad) - SQR(pgen.spin) + sqrt(SQR(SQR(rad)-SQR(pgen.spin))
-                      + 4.0*SQR(pgen.spin)*SQR(x3)) ) / sqrt(2.0)), 1.0);
-  Real delta = SQR(r) - 2.0*r + SQR(pgen.spin);
-  *pa1 = a1_bl * ( (r*x1+pgen.spin*x2)/(SQR(r) + SQR(pgen.spin)) - x2*pgen.spin/delta) +
-         a2_bl * x1*x3/r * sqrt((SQR(r) + SQR(pgen.spin))/(SQR(x1) + SQR(x2))) -
-         a3_bl * x2;
-  *pa2 = a1_bl * ( (r*x2-pgen.spin*x1)/(SQR(r) + SQR(pgen.spin)) + x1*pgen.spin/delta) +
-         a2_bl * x2*x3/r * sqrt((SQR(r) + SQR(pgen.spin))/(SQR(x1) + SQR(x2))) +
-         a3_bl * x1;
-  *pa3 = a1_bl * x3/r -
-         a2_bl * r * sqrt((SQR(x1) + SQR(x2))/(SQR(r) + SQR(pgen.spin)));
+  Real spin = pgen.spin;
+  Real r = fmax((sqrt( SQR(rad) - SQR(spin) + sqrt(SQR(SQR(rad)-SQR(spin))
+                      + 4.0*SQR(spin)*SQR(x3)) ) / sqrt(2.0)), 1.0);
+  Real delta = SQR(r) - 2.0*r + SQR(spin);
+  *pa1 = a1_bl * ( (r*x1+spin*x2)/(SQR(r) + SQR(spin)) - x2*spin/delta) +
+         a2_bl * x1*x3/r * sqrt((SQR(r) + SQR(spin))/(SQR(x1) + SQR(x2)))
+         - a3_bl * x2;
+  *pa2 = a1_bl * ( (r*x2-spin*x1)/(SQR(r) + SQR(spin)) + x1*spin/delta) +
+         a2_bl * x2*x3/r * sqrt((SQR(r) + SQR(spin))/(SQR(x1) + SQR(x2)))
+         + a3_bl * x1;
+  *pa3 = a1_bl * x3/r - a2_bl * r * sqrt((SQR(x1) + SQR(x2))/(SQR(r) + SQR(spin)));
   return;
 }
 
@@ -642,7 +696,7 @@ static void TransformVector(struct bondi_pgen pgen,
 //   references Hawley, Smarr, & Wilson 1984, ApJ 277 296 (HSW)
 
 KOKKOS_INLINE_FUNCTION
-static void CalculatePrimitives(struct bondi_pgen pgen, Real r,
+static void CalculatePrimitives(struct acc_pgen pgen, Real r,
                                 Real *prho, Real *ppgas, Real *pur) {
   // Calculate solution to (HSW 76)
   Real temp_neg_res = TemperatureMin(pgen, r, pgen.temp_min, pgen.temp_max);
@@ -677,7 +731,7 @@ static void CalculatePrimitives(struct bondi_pgen pgen, Real r,
 //   performs golden section search (cf. Numerical Recipes, 3rd ed., 10.2)
 
 KOKKOS_INLINE_FUNCTION
-static Real TemperatureMin(struct bondi_pgen pgen, Real r, Real t_min, Real t_max) {
+static Real TemperatureMin(struct acc_pgen pgen, Real r, Real t_min, Real t_max) {
   // Parameters
   const Real ratio = 0.3819660112501051;  // (3+\sqrt{5})/2
   const int max_iterations = 40;          // maximum number of iterations
@@ -732,7 +786,7 @@ static Real TemperatureMin(struct bondi_pgen pgen, Real r, Real t_min, Real t_ma
 //   performs bisection search
 
 KOKKOS_INLINE_FUNCTION
-static Real TemperatureBisect(struct bondi_pgen pgen, Real r, Real t_min, Real t_max) {
+static Real TemperatureBisect(struct acc_pgen pgen, Real r, Real t_min, Real t_max) {
   // Parameters
   const int max_iterations = 40;
   const Real tol_residual = 1.0e-12;
@@ -784,7 +838,7 @@ static Real TemperatureBisect(struct bondi_pgen pgen, Real r, Real t_min, Real t
 //   implements (76) from Hawley, Smarr, & Wilson 1984, ApJ 277 296
 
 KOKKOS_INLINE_FUNCTION
-static Real TemperatureResidual(struct bondi_pgen pgen, Real t, Real r) {
+static Real TemperatureResidual(struct acc_pgen pgen, Real t, Real r) {
   return SQR(1.0 + (pgen.n_adi+1.0) * t)
       * (1.0 - 2.0/r + SQR(pgen.c1)
          / (SQR(SQR(r)) * pow(t, 2.0*pgen.n_adi))) - pgen.c2;
@@ -814,7 +868,7 @@ void FixedBondiInflow(Mesh *pm) {
   auto &mb_bcs = pmbp->pmb->mb_bcs;
   int nmb = pmbp->nmb_thispack;
 
-  auto bondi_ = bondi;
+  auto acc_ = acc;
   bool is_mhd = (pmbp->pmhd != nullptr);
   auto u0_ = is_mhd ? pmbp->pmhd->u0 : pmbp->phydro->u0;
   auto w0_ = is_mhd ? pmbp->pmhd->w0 : pmbp->phydro->w0;
@@ -884,9 +938,9 @@ void FixedBondiInflow(Mesh *pm) {
 
     Real rho, pgas, uu1, uu2, uu3;
     if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,i) = rho;
-      w0_(m,IEN,k,j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,i) = pgas/(acc_.gm - 1.0);
       w0_(m,IM1,k,j,i) = uu1;
       w0_(m,IM2,k,j,i) = uu2;
       w0_(m,IM3,k,j,i) = uu3;
@@ -896,9 +950,9 @@ void FixedBondiInflow(Mesh *pm) {
     x1v = CellCenterX((ie+i+1)-is, indcs.nx1, x1min, x1max);
 
     if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_, rho,pgas,uu1,uu2,uu3);
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_, rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,(ie+i+1)) = rho;
-      w0_(m,IEN,k,j,(ie+i+1)) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,(ie+i+1)) = pgas/(acc_.gm - 1.0);
       w0_(m,IM1,k,j,(ie+i+1)) = uu1;
       w0_(m,IM2,k,j,(ie+i+1)) = uu2;
       w0_(m,IM3,k,j,(ie+i+1)) = uu3;
@@ -969,9 +1023,9 @@ void FixedBondiInflow(Mesh *pm) {
 
     Real rho, pgas, uu1, uu2, uu3;
     if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,i) = rho;
-      w0_(m,IEN,k,j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,i) = pgas/(acc_.gm - 1.0);
       w0_(m,IM1,k,j,i) = uu1;
       w0_(m,IM2,k,j,i) = uu2;
       w0_(m,IM3,k,j,i) = uu3;
@@ -981,9 +1035,9 @@ void FixedBondiInflow(Mesh *pm) {
     x2v = CellCenterX((je+j+1)-js, indcs.nx2, x2min, x2max);
 
     if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,(je+j+1),i) = rho;
-      w0_(m,IEN,k,(je+j+1),i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,(je+j+1),i) = pgas/(acc_.gm - 1.0);
       w0_(m,IM1,k,(je+j+1),i) = uu1;
       w0_(m,IM2,k,(je+j+1),i) = uu2;
       w0_(m,IM3,k,(je+j+1),i) = uu3;
@@ -1054,9 +1108,9 @@ void FixedBondiInflow(Mesh *pm) {
 
     Real rho, pgas, uu1, uu2, uu3;
     if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,i) = rho;
-      w0_(m,IEN,k,j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,i) = pgas/(acc_.gm - 1.0);
       w0_(m,IM1,k,j,i) = uu1;
       w0_(m,IM2,k,j,i) = uu2;
       w0_(m,IM3,k,j,i) = uu3;
@@ -1066,9 +1120,9 @@ void FixedBondiInflow(Mesh *pm) {
     x3v = CellCenterX((ke+k+1)-ks, indcs.nx3, x3min, x3max);
 
     if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
-      ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+      ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,(ke+k+1),j,i) = rho;
-      w0_(m,IEN,(ke+k+1),j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,(ke+k+1),j,i) = pgas/(acc_.gm - 1.0);
       w0_(m,IM1,(ke+k+1),j,i) = uu1;
       w0_(m,IM2,(ke+k+1),j,i) = uu2;
       w0_(m,IM3,(ke+k+1),j,i) = uu3;
@@ -1087,8 +1141,8 @@ void FixedBondiInflow(Mesh *pm) {
   // TODO: assuming MHD!
   // TODO: think whether need refining check as we don't use u1
   // bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
-  if (is_mhd && bondi_.bc_type == 1) { // && !refining
-    Real rbout = bondi_.rb_out;
+  if (is_mhd && acc_.bc_type == 1) { // && !refining
+    Real rbout = acc_.rb_out;
     auto &b = pmbp->pmhd->b0;
     par_for("fixed_radial", DevExeSpace(),0,nmb-1,ks-ng,ke+ng,js-ng,je+ng,is-ng,ie+ng,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -1111,7 +1165,7 @@ void FixedBondiInflow(Mesh *pm) {
         Real glower[4][4], gupper[4][4];
         ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
         Real rho, pgas, uu1, uu2, uu3;
-        ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
+        ComputePrimitiveSingle(x1v,x2v,x3v,coord,acc_,rho,pgas,uu1,uu2,uu3);
         HydCons1D u;
         MHDPrim1D w_m;
         // load single state of primitive variables
@@ -1119,7 +1173,7 @@ void FixedBondiInflow(Mesh *pm) {
         w_m.vx = uu1;
         w_m.vy = uu2;
         w_m.vz = uu3;
-        w_m.e  = pgas/(bondi_.gm - 1.0);
+        w_m.e  = pgas/(acc_.gm - 1.0);
         // load cell-centered fields into primitive state
         w_m.bx = 0.5*(b.x1f(m,k,j,i) + b.x1f(m,k,j,i+1));
         w_m.by = 0.5*(b.x2f(m,k,j,i) + b.x2f(m,k,j,i+1));
@@ -1232,7 +1286,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   }
 
   Real temp_unit = pmbp->punit->temperature_cgs();
-  Real n_h_unit = pmbp->punit->density_cgs()/bondi.mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real n_h_unit = pmbp->punit->density_cgs()/acc.mu_h/pmbp->punit->atomic_mass_unit_cgs;
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
 
   // compute global sum
@@ -1251,7 +1305,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   for (int n=0; n<NREDUCTION_VARIABLES; ++n) {
     sum_this_mb0.the_array[n] = 0.0;
   }
-  Real rbout = bondi.rb_out;
+  Real rout = acc.rb_out;
   Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum0) {
     // compute n,k,j,i indices of thread
@@ -1284,7 +1338,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
     Real temp = (gamma-1.0) * w0_(m,IEN,k,j,i)/w0_(m,IDN,k,j,i);
     
     // flags
-    Real on = (rad <= rbout)? 1.0 : 0.0; // check if angle is on this rank
+    Real on = (rad <= rout)? 1.0 : 0.0; // check if angle is on this rank
     Real dv_cold = (temp<0.1/rad)? vol : 0.0;
 
     // TODO: consider relativistic correction
@@ -1476,10 +1530,71 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
   DvceArray5D<Real> &w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
   const EOS_Data &eos_data = (pmbp->pmhd != nullptr) ?
                              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
-  if (bondi.cooling) {
+  if (acc.potential) {
+    //std::cout << "AddAccel" << std::endl;
+    AddAccel(pm,bdt,u0,w0);
+  }
+  if (acc.cooling) {
     //std::cout << "AddISMCooling" << std::endl;
     AddISMCooling(pm,bdt,u0,w0,eos_data);
   }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void AddAccel()
+//! \brief Add Acceleration
+// NOTE source terms must all be computed using primitive (w0) and NOT conserved (u0) vars
+void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
+              const DvceArray5D<Real> &w0) {
+              // const DvceArray5D<Real> &bcc, const AthenaArray<Real> &rad_arr,
+              // const AthenaArray<Real> &press_arr, const AthenaArray<Real> &mom_arr)
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  auto size = pmbp->pmb->mb_size;
+  auto acc_ = acc;
+  Real rin = 1.0;
+  bool is_gr = pmbp->pcoord->is_general_relativistic;
+
+  par_for("accel", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+
+    Real accel = Acceleration(acc_, rad);
+    if (rad < rin) {
+      accel = 0.0;
+    }
+    Real dmomr = bdt*w0(m,IDN,k,j,i)*accel;
+    Real dmomx1 = dmomr*x1v/rad;
+    Real dmomx2 = dmomr*x2v/rad;
+    Real dmomx3 = dmomr*x3v/rad;
+    Real denergy = bdt*w0(m,IDN,k,j,i)*accel/rad*
+                  (w0(m,IVX,k,j,i)*x1v+w0(m,IVY,k,j,i)*x2v+w0(m,IVZ,k,j,i)*x3v);
+    if (is_gr) {
+      denergy = -denergy;
+    }
+
+    u0(m,IM1,k,j,i) += dmomx1;
+    u0(m,IM2,k,j,i) += dmomx2;
+    u0(m,IM3,k,j,i) += dmomx3;
+    u0(m,IEN,k,j,i) += denergy;
+  });
   return;
 }
 
@@ -1507,7 +1622,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
   Real temp_unit = pmbp->punit->temperature_cgs();
-  Real n_h_unit = pmbp->punit->density_cgs()/bondi.mu_h/pmbp->punit->atomic_mass_unit_cgs;
+  Real n_h_unit = pmbp->punit->density_cgs()/acc.mu_h/pmbp->punit->atomic_mass_unit_cgs;
   Real cooling_unit = pmbp->punit->pressure_cgs()/pmbp->punit->time_cgs()/SQR(n_h_unit);
   // Real gamma_heating = 2.0e-26/heating_unit; // add a small heating
   bool is_gr = pmbp->pcoord->is_general_relativistic;
@@ -1645,7 +1760,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   MPI_Allreduce(MPI_IN_PLACE, pnsubcycle_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 #endif
   if (global_variable::my_rank == 0) {
-    if (bondi.ndiag>0 && pm->ncycle % bondi.ndiag == 0) {
+    if (acc.ndiag>0 && pm->ncycle % acc.ndiag == 0) {
       if (nsubcycle>0 || nsubcycle_count >0) {
         std::cout << " nsubcycle_cell=" << nsubcycle << std::endl
                   << " nsubcycle_count=" << nsubcycle_count << std::endl;
@@ -1653,6 +1768,10 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     }
   }
   return;
+}
+
+void AccFinalWork(ParameterInput *pin, Mesh *pm) {
+  delete accarr;
 }
 
 } // namespace
