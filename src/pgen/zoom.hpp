@@ -92,6 +92,7 @@ class Zoom
   Real emf_f0, emf_f1;     // electric field factor, e = f0 * e0 + f1 * e1
   Real emf_fmax;           // maximum electric field factor
   int  emf_zmax;           // maximum zone number for electric field
+  Real re_fac;             // factor for electric field
   Real r0_efld;            // modify e if r < r0_efld
 
   ZoomAMR zamr;            // zoom AMR parameters

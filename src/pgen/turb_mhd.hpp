@@ -536,26 +536,81 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
                                                               //     >> ionized density
 
   auto &eos = pmy_pack->pmhd->peos->eos_data;
-  auto &mbsize = pmy_pack->pmb->mb_size;
+  auto &size = pmy_pack->pmb->mb_size;
   Real &amin = turb_amin;
+
+  const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+  // shift force_new so that it is centered around zero, this for mhd
+  Real m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0;
+  Kokkos::parallel_reduce("a-sum", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &sum_m0, Real &sum_m1, Real &sum_m2, Real &sum_m3) {
+    // compute n,k,j,i indices of thread
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+    Real dx1 = size.d_view(m).dx1;
+    Real dx2 = size.d_view(m).dx2;
+    Real dx3 = size.d_view(m).dx3;
+    Real dvol = dx1*dx2*dx3;
+    Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+    if (rad < amin*eos.r_in) {
+      sum_m0 += dvol;
+      sum_m1 += dvol*force_new_(m,0,k,j,i);
+      sum_m2 += dvol*force_new_(m,1,k,j,i);
+      sum_m3 += dvol*force_new_(m,2,k,j,i);
+    }
+  }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2), Kokkos::Sum<Real>(m3));
+#if MPI_PARALLEL_ENABLED
+  Real m_sum2[4] = {m0,m1,m2,m3};
+  Real gm_sum2[4];
+  MPI_Allreduce(m_sum2, gm_sum2, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  m0 = gm_sum2[0];
+  m1 = gm_sum2[1];
+  m2 = gm_sum2[2];
+  m3 = gm_sum2[3];
+#endif
+  if (m0 > 0.0) {
+    m1 /= m0;
+    m2 /= m0;
+    m3 /= m0;
+  } else {
+    m1 = 0.0;
+    m2 = 0.0;
+    m3 = 0.0;
+  }
+
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real a_turb = sqrt(w(m,IEN,k,j,i));
+    force_new_(m,0,k,j,i) -= m1;
+    force_new_(m,1,k,j,i) -= m2;
+    force_new_(m,2,k,j,i) -= m3;
     force_new_(m,0,k,j,i) *= a_turb;
     force_new_(m,1,k,j,i) *= a_turb;
     force_new_(m,2,k,j,i) *= a_turb;
 
-    Real x1v = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
-    Real x2v = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
-    Real x3v = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+    Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-    if (rad < eos.r_in) {
+    // if (rad < eos.r_in) {
+    if (rad < amin*eos.r_in) {
       force_new_(m,0,k,j,i) = 0.0;
       force_new_(m,1,k,j,i) = 0.0;
       force_new_(m,2,k,j,i) = 0.0;
-    } else if (rad < amin*eos.r_in) {
-      Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in/(amin-1.0)*M_PI/2.0));
+    // } else if (rad < amin*eos.r_in) {
+    } else if (rad < 2.0*amin*eos.r_in) {
+      // Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in/(amin-1.0)*M_PI/2.0));
+      Real fac_smooth = SQR(sin((rad-amin*eos.r_in)/(amin*eos.r_in)*M_PI/2.0));
       force_new_(m,0,k,j,i) *= fac_smooth;
       force_new_(m,1,k,j,i) *= fac_smooth;
       force_new_(m,2,k,j,i) *= fac_smooth;
@@ -618,7 +673,9 @@ TaskStatus TurbulenceMhd::AddForcing(int stage) {
 
     auto force_ = force;
     auto f_n_ = force_new;
-    std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    if (global_variable::my_rank == 0) {
+      std::cout<<"turbulence: fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    }
 
     auto b0 = pmy_pack->pmhd->b0;
     auto &size = pmy_pack->pmb->mb_size;
