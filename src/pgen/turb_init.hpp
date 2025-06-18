@@ -589,12 +589,15 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
     Real x3v = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
 
-    if (rad < eos.r_in) {
+    // if (rad < eos.r_in) {
+    if (rad < amin*eos.r_in) {
       force_new_(m,0,k,j,i) = 0.0;
       force_new_(m,1,k,j,i) = 0.0;
       force_new_(m,2,k,j,i) = 0.0;
-    } else if (rad < amin*eos.r_in) {
-      Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in/(amin-1.0)*M_PI/2.0));
+    // } else if (rad < amin*eos.r_in) {
+    } else if (rad < 2.0*amin*eos.r_in) {
+      // Real fac_smooth = SQR(sin((rad-eos.r_in)/eos.r_in/(amin-1.0)*M_PI/2.0));
+      Real fac_smooth = SQR(sin((rad-amin*eos.r_in)/(amin*eos.r_in)*M_PI/2.0));
       force_new_(m,0,k,j,i) *= fac_smooth;
       force_new_(m,1,k,j,i) *= fac_smooth;
       force_new_(m,2,k,j,i) *= fac_smooth;
@@ -793,7 +796,9 @@ TaskStatus TurbulenceInit::AddForcing(int stage) {
 
     auto force_ = force;
     auto force_new_ = force_new;
-    std::cout<<"fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    if (global_variable::my_rank == 0) {
+      std::cout<<"turbulence: fcorr="<<fcorr<<"  gcorr="<<gcorr<<std::endl;
+    }
     par_for("push", DevExeSpace(),0,(pmy_pack->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real den = u(m,IDN,k,j,i);

@@ -93,12 +93,14 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   emf_f0 = 1.0;
   emf_f1 = 0.0;
   emf_fmax = 1.0;
+  re_fac = 0.8; // TODO(@mhguo): probably change to 1.0?
   r0_efld = 0.0;
   if (fix_efield) {
     emf_flag = pin->GetInteger("zoom","emf_flag");
     emf_f1 = pin->GetReal("zoom","emf_f1");
     emf_fmax = pin->GetReal("zoom","emf_fmax");
     emf_zmax = pin->GetOrAddInteger("zoom","emf_zmax",zamr.nlevels);
+    re_fac = pin->GetOrAddReal("zoom","re_fac",re_fac);
     r0_efld = pin->GetOrAddReal("zoom","r0_efld",0.0); // default value
   }
 
@@ -264,7 +266,7 @@ void Zoom::PrintInfo()
     // print electric field parameters
     std::cout << "Efield: emf_f0 = " << emf_f0 << " emf_f1 = " << emf_f1
               << " emf_fmax = " << emf_fmax << " emf_zmax = " << emf_zmax
-              << " r0_efld = " << r0_efld << std::endl;
+              << " re_fac = " << re_fac << " r0_efld = " << r0_efld << std::endl;
     // print interval parameters
     std::cout << "Interval: t_run_fac = " << zint.t_run_fac
               << " t_run_pow = " << zint.t_run_pow
@@ -723,7 +725,7 @@ void Zoom::UpdateVariables() {
   int nvar = nvars;
   Real rin = r_in;
   // TODO(@mhguo): it looks 0.8*rzoom works, but ideally should use edge center
-  Real rzfac = 0.8; // r < rzfac*rzoom
+  Real refac = re_fac; // r < refac*rzoom
   Real r0ef = r0_efld; // r < r0_efld
 
   for (int m=0; m<nmb; ++m) {
@@ -804,13 +806,13 @@ void Zoom::UpdateVariables() {
               int prei = finei - cnx1 * x1l;
               int prej = finej - cnx2 * x2l;
               int prek = finek - cnx3 * x3l;
-              if (rade1 < rzfac*rzoom) {
+              if (rade1 < refac*rzoom) {
                 e1(zm,k,j,i) = 0.5*(e1(zmp,prek,prej,prei) + e1(zmp,prek,prej,prei+1));
               }
-              if (rade2 < rzfac*rzoom) {
+              if (rade2 < refac*rzoom) {
                 e2(zm,k,j,i) = 0.5*(e2(zmp,prek,prej,prei) + e2(zmp,prek,prej+1,prei));
               }
-              if (rade3 < rzfac*rzoom) {
+              if (rade3 < refac*rzoom) {
                 e3(zm,k,j,i) = 0.5*(e3(zmp,prek,prej,prei) + e3(zmp,prek+1,prej,prei));
               }
             }
