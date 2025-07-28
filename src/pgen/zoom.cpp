@@ -78,6 +78,7 @@ Zoom::Zoom(MeshBlockPack *ppack, ParameterInput *pin) :
   zrun.id = 0;
   zrun.next_time = 0.0;
   SetInterval();
+  zrun.id = 0; // reset id
   
   nleaf = 2;
   if (pmesh->two_d) nleaf = 4;
@@ -567,7 +568,9 @@ void Zoom::AMR() {
     SetInterval();
     if (global_variable::my_rank == 0) {
       std::cout << "Zoom AMR: new level = " << zamr.level
-                << " zone = " << zamr.zone << std::endl;
+                << " zone = " << zamr.zone 
+                << " zrun.id = " << zrun.id
+                << std::endl;
       std::cout << "Zoom AMR: runtime = " << zamr.runtime 
                 << " next time = " << zrun.next_time << std::endl;
     }

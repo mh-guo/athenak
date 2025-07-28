@@ -78,6 +78,7 @@ struct bondi_pgen {
   Real temp_inf, c_s_inf;   // asymptotic temperature and sound speed
   Real rho_inf, pgas_inf;   // asymptotic density and pressure
   Real r_bondi;             // Bondi radius 2GM/c_s^2
+  Real r_circ = 0.0;        // Circularization radius
   bool reset_ic = false;    // reset initial conditions after run
   int  bc_type = 0;         // boundary condition type
   Real rb_out;              // outer boundary radius
@@ -172,6 +173,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     bondi.r_bondi = 2.0/SQR(bondi.c_s_inf);
     bondi.rho_inf = pow(bondi.temp_inf/bondi.k_adi, bondi.n_adi);
     bondi.rho_inf = pin->GetOrAddReal("problem", "dens_inf", bondi.rho_inf);
+    bondi.r_circ = pin->GetOrAddReal("problem", "r_circ", bondi.r_circ);
     if (bondi.cooling) {
       Real t_char = bondi.r_bondi / bondi.c_s_inf;
       auto punit = pmbp->punit;
@@ -208,6 +210,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << " Critical radius = " << bondi.r_crit << std::endl;
     std::cout << " c1 = " << bondi.c1 << std::endl;
     std::cout << " rho_inf = " << bondi.rho_inf << std::endl;
+    std::cout << " Circularization radius = " << bondi.r_circ << std::endl;
     if (bondi.cooling) {
       std::cout << " t_cool / t_bondi = " << bondi.tau_cool << std::endl;
     }
@@ -517,7 +520,7 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
                                    struct bondi_pgen pgen,
                                    Real& rho, Real& pgas,
                                    Real& uu1, Real& uu2, Real& uu3) {
-  if (pgen.ic_type>0) {
+  if (pgen.ic_type == 1) {
     rho = pgen.rho_inf;
     pgas = pgen.pgas_inf;
     uu1 = 0.0;
@@ -534,6 +537,13 @@ static void ComputePrimitiveSingle(Real x1v, Real x2v, Real x3v, CoordData coord
   CalculatePrimitives(pgen, r, &my_rho, &my_pgas, &my_ur);
   Real u0(0.0), u1(0.0), u2(0.0), u3(0.0);
   TransformVector(pgen, my_ur, 0.0, 0.0, x1v, x2v, x3v, &u1, &u2, &u3);
+  if (pgen.ic_type == 2) {
+    my_rho = pgen.rho_inf;
+    my_pgas = pgen.pgas_inf;
+    Real l_z = (r > pgen.r_circ) ? sqrt(pgen.r_circ) : sqrt(r);
+    Real my_uphi = l_z / SQR(r) * sin(theta); // angular velocity
+    TransformVector(pgen, 0.0, 0.0, my_uphi, x1v, x2v, x3v, &u1, &u2, &u3);
+  }
 
   Real glower[4][4], gupper[4][4];
   ComputeMetricAndInverse(x1v,x2v,x3v, coord.is_minkowski, coord.bh_spin, glower, gupper);
