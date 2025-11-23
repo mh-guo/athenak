@@ -126,6 +126,7 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
   }
   // TODO(@mhguo): maybe not necessary since it's complex
   // TODO(@mhguo): perhaps better to restart only when resoving all the scales
+  // TODO(@mhguo): we need the feature to restart at anytime
   // if (pzoom != nullptr && pzoom->write_rst) {
   //   int mzoom = pzoom->mzoom;
   //   Kokkos::realloc(outarray_zoom, mzoom, nzoom, nout3, nout2, nout1);
@@ -274,7 +275,8 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
                              single_file_per_rank);
     }
     if (pzoom != nullptr && pzoom->write_rst) {
-      resfile.Write_any_type(&(pzoom->zrun), sizeof(zoom::ZoomRun), "byte");
+      // resfile.Write_any_type(&(pzoom->zrun), sizeof(zoom::ZoomRun), "byte");
+      pzoom->WriteRestartFile(resfile);
       // TODO(@mhguo): not working for MPI!
       // every rank has a MB to write, so write collectively
       // get ptr to cell-centered MeshBlock data
@@ -329,7 +331,8 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   if (pz4c != nullptr) step3size += sizeof(Real);
   if (pturb != nullptr) step3size += sizeof(RNG_State);
   if (pzoom != nullptr && pzoom->write_rst) {
-    step3size += sizeof(zoom::ZoomRun);
+    // step3size += sizeof(zoom::ZoomRun);
+    step3size += pzoom->RestartFileSize();
     // offset_myrank += sizeof(zoom::ZoomRun) + pzoom->mzoom*nzoom*nout1*nout2*nout3*sizeof(Real);
   }
 

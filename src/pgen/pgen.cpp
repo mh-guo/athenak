@@ -238,16 +238,17 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   // TODO(@mhguo): not working for MPI!
   // TODO(@mhguo): working for MPI only if restarting from time including all information
   if (pzoom != nullptr && pzoom->read_rst) {
+    pzoom->ReadRestartFile(resfile);
     // root process reads zoom data
-    char *zrdata = new char[sizeof(zoom::ZoomRun)];
+    // char *zrdata = new char[sizeof(zoom::ZoomRun)];
 
-    if (global_variable::my_rank == 0) { // the master process reads the variables data
-      if (resfile.Read_bytes(zrdata, 1, sizeof(zoom::ZoomRun)) != sizeof(zoom::ZoomRun)) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << "ZoomRun data read from restart file is incorrect, "
-                  << "restart file is broken." << std::endl;
-        exit(EXIT_FAILURE);
-      }
+    // if (global_variable::my_rank == 0) { // the master process reads the variables data
+    //   if (resfile.Read_bytes(zrdata, 1, sizeof(zoom::ZoomRun)) != sizeof(zoom::ZoomRun)) {
+    //     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+    //               << std::endl << "ZoomRun data read from restart file is incorrect, "
+    //               << "restart file is broken." << std::endl;
+    //     exit(EXIT_FAILURE);
+    //   }
       // Read pzoom w0 data
       // HostArray5D<Real> zwin("rst-zw-in", 1, 1, 1, 1, 1);
       // Kokkos::realloc(zwin, pzoom->mzoom, nzoom, nout3, nout2, nout1);
@@ -259,13 +260,13 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
       //   exit(EXIT_FAILURE);
       // }
       // Kokkos::deep_copy(pzoom->w0, zwin);
-    }
+    // }
 
-#if MPI_PARALLEL_ENABLED
-    // then broadcast the ZoomRun information
-    MPI_Bcast(zrdata, sizeof(zoom::ZoomRun), MPI_CHAR, 0, MPI_COMM_WORLD);
-#endif
-    std::memcpy(&(pzoom->zrun), &(zrdata[0]), sizeof(zoom::ZoomRun));
+// #if MPI_PARALLEL_ENABLED
+//     // then broadcast the ZoomRun information
+//     MPI_Bcast(zrdata, sizeof(zoom::ZoomRun), MPI_CHAR, 0, MPI_COMM_WORLD);
+// #endif
+//     std::memcpy(&(pzoom->zrun), &(zrdata[0]), sizeof(zoom::ZoomRun));
   }
 
 

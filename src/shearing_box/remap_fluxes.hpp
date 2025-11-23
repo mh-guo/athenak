@@ -21,12 +21,12 @@ void DCRemapFlx(TeamMember_t const &tmember, const int jl, const int ju, const R
     par_for_inner(tmember, jl, ju, [&](const int j) {
       ust(j) = eps*u(j-1);
     });
-    tmember.team_barrier();
+    // tmember.team_barrier();
   } else {
     par_for_inner(tmember, jl, ju, [&](const int j) {
       ust(j) = eps*u(j);
     });
-    tmember.team_barrier();
+    // tmember.team_barrier();
   }
   return;
 }
@@ -46,18 +46,18 @@ void PLMRemapFlx(TeamMember_t const &tmember, const int jl, const int ju, const 
     q1(j) = 0.0;
     if (dq2 > 0.0) q1(j) = dq2/(dql + dqr);
   });
-  tmember.team_barrier();
+  // tmember.team_barrier();
   // compute upwind state (U_star)
   if (eps > 0.0) {
     par_for_inner(tmember, jl, ju, [&](const int j) {
       ust(j) = eps*(u(j-1) + 0.5*(1.0 - eps)*q1(j-1));
     });
-    tmember.team_barrier();
+    // tmember.team_barrier();
   } else {
     par_for_inner(tmember, jl, ju, [&](const int j) {
       ust(j) = eps*(u(j) - 0.5*(1.0 + eps)*q1(j));
     });
-    tmember.team_barrier();
+    // tmember.team_barrier();
   }
   return;
 }

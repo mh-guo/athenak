@@ -21,10 +21,7 @@ typedef struct ZoomAMR {
   int nlevels;                  // number of levels
   int max_level;                // maximum level number
   int min_level;                // minimum level number
-  int level;                    // level number
-  int zone;                     // zone number = level_max - level
-  int last_zone;                // last zone number
-  int direction;                // direction of zoom
+  int level;                    // level number = max_level - zone
   Real radius;                  // radius of inner boundary
   Real runtime;                 // interval for zoom
   bool just_zoomed;             // flag for just zoomed
@@ -52,8 +49,12 @@ typedef struct ZoomChange {
   Real dengy;                    // energy change
 } ZoomChange;
 
+// runtime parameters, updated each zoom
 typedef struct ZoomRun {
   int id;                       // run number
+  int zone;                     // zone number = level_max - level
+  int last_zone;                // last zone number
+  int direction;                // direction of zoom
   Real next_time;               // time of next zoom
 } ZoomRun;
 
@@ -127,6 +128,7 @@ class Zoom
 
   // functions
   void Initialize();
+  void Update(const bool restart);
   void PrintInfo();
   void BoundaryConditions();
   void AMR();
@@ -149,6 +151,9 @@ class Zoom
   Real NewTimeStep(Mesh* pm);
   Real GRTimeStep(Mesh* pm);
   Real EMFTimeStep(Mesh* pm);
+  IOWrapperSizeT RestartFileSize();
+  void WriteRestartFile(IOWrapper &resfile);
+  void ReadRestartFile(IOWrapper &resfile);
 
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD

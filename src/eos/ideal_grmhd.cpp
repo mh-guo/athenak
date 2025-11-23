@@ -158,7 +158,7 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
 
       // call c2p function
       // (inline function in ideal_c2p_mhd.hpp file)
-      SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
+      SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, x1v, x2v, x3v, w,
                            dfloor_used, efloor_used, c2p_failure, iter_used);
 
       // apply velocity ceiling if necessary
@@ -171,6 +171,22 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       if (lor > eos.gamma_max) {
         vceiling_used = true;
         Real factor = sqrt((SQR(eos.gamma_max)-1.0)/(SQR(lor)-1.0));
+        w.vx *= factor;
+        w.vy *= factor;
+        w.vz *= factor;
+      }
+    }
+
+    // apply magnetization floor if necessary
+    if (use_zoom && rzoom > 1.0) {
+      Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+      // TODO: this should be done in SingleC2P function
+      // TODO: also note that density cannot recover if b2 drops, should fix
+      Real b2 = SQR(u.bx) + SQR(u.by) + SQR(u.bz);
+      Real sigma_ceil = eos.mceil/rad+eos.mceil/1.0e6;
+      if ((rad < 1.2*rzoom) && (b2/w.d > sigma_ceil)) {
+        Real factor = sigma_ceil/b2*w.d;
+        w.d = b2/sigma_ceil;
         w.vx *= factor;
         w.vy *= factor;
         w.vz *= factor;

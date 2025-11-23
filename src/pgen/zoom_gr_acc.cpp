@@ -135,6 +135,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_srcs_func = AddUserSrcs;
   user_hist_func = BondiFluxes;
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
+    pmbp->pzoom->Update(restart);
     pmbp->pzoom->PrintInfo();
     user_ref_func = ZoomAMR;
     if (pmbp->pzoom->zoom_dt) user_dt_func = ZoomNewTimeStep;
@@ -1239,7 +1240,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   if (pmbp->pzoom != nullptr && pmbp->pzoom->is_set) {
     pdata->nhist += 1;
     pdata->label[0] = "zone";
-    pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zamr.zone : 0.0;
+    pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zrun.zone : 0.0;
     if (pmbp->pzoom->calc_cons_change) {
       pdata->nhist += 2;
       pdata->label[1] = "dm";
@@ -1305,7 +1306,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
   for (int n=0; n<NREDUCTION_VARIABLES; ++n) {
     sum_this_mb0.the_array[n] = 0.0;
   }
-  Real rout = acc.rb_out;
+  Real rglb = std::min(acc.rb_out, acc.r_entropy);
   Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum0) {
     // compute n,k,j,i indices of thread
@@ -1338,7 +1339,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
     Real temp = (gamma-1.0) * w0_(m,IEN,k,j,i)/w0_(m,IDN,k,j,i);
     
     // flags
-    Real on = (rad <= rout)? 1.0 : 0.0; // check if angle is on this rank
+    Real on = (rad <= rglb)? 1.0 : 0.0; // check if inside the radius of interest
     Real dv_cold = (temp<0.1/rad)? vol : 0.0;
 
     // TODO: consider relativistic correction
@@ -1349,9 +1350,13 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
     Real cooling = vol * cooling_rate;
     Real dm_cold = dv_cold * w0_(m,IDN,k,j,i);
     // TODO: consider add these terms, either in Newtonian or relativistic
-    Real etot = vol * 0.0;
-    Real ekin = vol * 0.0;
-    Real emag = vol * 0.0;
+    Real ekin = mass * 0.5 * (SQR(w0_(m,IVX,k,j,i)) +
+                              SQR(w0_(m,IVY,k,j,i)) +
+                              SQR(w0_(m,IVZ,k,j,i)));
+    Real emag = vol * 0.5 * (SQR(bcc0_(m,IBX,k,j,i)) +
+                             SQR(bcc0_(m,IBY,k,j,i)) +
+                             SQR(bcc0_(m,IBZ,k,j,i)));
+    Real etot = eint + ekin + emag;
 
     Real vars[nsum] = {
       vol,     mass,    etot,    cooling, eint,    ekin,    emag,
@@ -1707,7 +1712,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         TransformToSRMHD(u_m,glower,gupper,s2,b2,rpar,u_sr);
         // call c2p function
         // (inline function in ideal_c2p_mhd.hpp file)
-        SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
+        SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, x1v, x2v, x3v, w,
                             dfloor_used, efloor_used, c2p_failure, iter_used);
         // add cooling/heating term using subcycling if necessary
         // TODO: w.d is updated, not equal to dens, should think which one to use

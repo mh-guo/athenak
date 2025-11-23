@@ -33,6 +33,10 @@ struct EOS_Data {
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
   Real mceil;        // ceiling on magnetization
   Real r_in;         // inner radius
+  Real rdfloor;      // radius-dependent density floor
+  Real rdfloor_r0;   // reference radius for density floor
+  Real rdfloor_pow;  // power law index for radius-dependent density floor
+
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
   // or temperature e/d) into pressure.

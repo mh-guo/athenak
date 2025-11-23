@@ -131,6 +131,7 @@ Real Equation44(const Real mu, const Real b2, const Real rpar, const Real r, con
 
 KOKKOS_INLINE_FUNCTION
 void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, Real rpar,
+                          Real x1v, Real x2v, Real x3v,
                           HydPrim1D &w, bool &dfloor_used, bool &efloor_used,
                           bool &c2p_failure, int &max_iter) {
   // Parameters
@@ -138,9 +139,13 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   const Real tol = 1.0e-12;
   const Real gm1 = eos.gamma - 1.0;
 
+  // apply radius-dependent floor
+  Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+  Real rdfr = eos.rdfloor*pow(rad/eos.rdfloor_r0, eos.rdfloor_pow);
+  Real dflr = (rdfr>eos.dfloor) ? rdfr : eos.dfloor;
   // apply density floor, without changing momentum or energy
-  if (u.d < eos.dfloor) {
-    u.d = eos.dfloor;
+  if (u.d < dflr) {
+    u.d = dflr;
     dfloor_used = true;
   }
   // apply magnetization ceiling
@@ -148,6 +153,23 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
     u.d = b2/eos.mceil;
     dfloor_used = true; // not exactly by definition, but it is a floor effectively
   }
+
+  // // apply magnetization floor if necessary
+  // // if (use_zoom && rzoom > 1.0) {
+  // if (rzoom > 1.0) {
+  //   // Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
+  //   // TODO: this should be done in SingleC2P function
+  //   // TODO: also note that density cannot recover if b2 drops, should fix
+  //   // Real b2 = SQR(u.bx) + SQR(u.by) + SQR(u.bz);
+  //   Real sigma_ceil = eos.mceil/rad+eos.mceil/1.0e6;
+  //   if ((rad < 1.1*rzoom) && (b2/u.d > sigma_ceil)) {
+  //     Real factor = sigma_ceil/b2*w.d;
+  //     w.d = b2/sigma_ceil;
+  //     w.vx *= factor;
+  //     w.vy *= factor;
+  //     w.vz *= factor;
+  //   }
+  // }
 
   // apply energy floor
   if (u.e < (eos.pfloor/gm1 + 0.5*b2)) {
@@ -248,8 +270,8 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   // development may trigger averaging of (successfully inverted) neighbors in the event
   // of a C2P failure.
   if (max_iter==max_iterations) {
-    w.d = eos.dfloor;
-    w.e = eos.pfloor/gm1;
+    w.d = dflr;
+    w.e = fmax(eos.pfloor/gm1, dflr*eos.tfloor/gm1);
     w.vx = 0.0;
     w.vy = 0.0;
     w.vz = 0.0;
@@ -267,8 +289,8 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
 
   // compute density then apply floor
   Real dens = u.d/lor;
-  if (dens < eos.dfloor) {
-    dens = eos.dfloor;
+  if (dens < dflr) {
+    dens = dflr;
     dfloor_used = true;
   }
 

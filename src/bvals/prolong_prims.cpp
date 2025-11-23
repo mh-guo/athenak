@@ -175,7 +175,7 @@ void MeshBoundaryValuesCC::ConsToPrimCoarseBndry(const DvceArray5D<Real> &cons,
           prim(m,n,k,j,i) = cons(m,n,k,j,i)/u.d;
         }
       });
-      tmember.team_barrier();
+      // tmember.team_barrier();
     }
   });
   return;
@@ -287,7 +287,7 @@ void MeshBoundaryValuesCC::PrimToConsFineBndry(const DvceArray5D<Real> &prim,
           cons(m,n,k,j,i) = u.d*prim(m,n,k,j,i);
         }
       });
-      tmember.team_barrier();
+      // tmember.team_barrier();
     }
   });
   return;
@@ -395,7 +395,7 @@ void MeshBoundaryValuesCC::ConsToPrimCoarseBndry(const DvceArray5D<Real> &cons,
           TransformToSRMHD(u,glower,gupper,s2,b2,rpar,u_sr);
           bool c2p_failure=false;
           int iter_used=0;
-          SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
+          SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, x1v, x2v, x3v, w,
                                dfloor_used, efloor_used, c2p_failure, iter_used);
 
           // apply velocity ceiling if necessary
@@ -418,7 +418,7 @@ void MeshBoundaryValuesCC::ConsToPrimCoarseBndry(const DvceArray5D<Real> &cons,
           Real rpar = (u.bx*u.mx +  u.by*u.my +  u.bz*u.mz)/u.d;
           bool c2p_failure=false;
           int iter_used=0;
-          SingleC2P_IdealSRMHD(u, eos, s2, b2, rpar, w,
+          SingleC2P_IdealSRMHD(u, eos, s2, b2, rpar, 1.0, 1.0, 1.0, w,
                                dfloor_used, efloor_used, c2p_failure, iter_used);
           // apply velocity ceiling if necessary
           Real lor = sqrt(1.0+SQR(w.vx)+SQR(w.vy)+SQR(w.vz));
@@ -450,7 +450,7 @@ void MeshBoundaryValuesCC::ConsToPrimCoarseBndry(const DvceArray5D<Real> &cons,
           prim(m,n,k,j,i) = cons(m,n,k,j,i)/u.d;
         }
       });
-      tmember.team_barrier();
+      // tmember.team_barrier();
     }
   });
   return;
@@ -566,7 +566,7 @@ void MeshBoundaryValuesCC::PrimToConsFineBndry(const DvceArray5D<Real> &prim,
           cons(m,n,k,j,i) = u.d*prim(m,n,k,j,i);
         }
       });
-      tmember.team_barrier();
+      // tmember.team_barrier();
     }
   });
   return;

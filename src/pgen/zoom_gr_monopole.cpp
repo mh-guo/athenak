@@ -944,7 +944,7 @@ void MonopoleFluxes(HistoryData *pdata, Mesh *pm) {
     gi0 = 1;
     pdata->nhist += 1;
     pdata->label[0] = "zone";
-    pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zamr.zone : 0.0;
+    pdata->hdata[0] = (global_variable::my_rank == 0)? pmbp->pzoom->zrun.zone : 0.0;
   }
   for (int g=0; g<nradii; ++g) {
     std::string gstr = std::to_string(g);

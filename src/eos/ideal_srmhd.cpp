@@ -108,7 +108,7 @@ void IdealSRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
     bool dfloor_used=false, efloor_used=false;
     bool vceiling_used=false, c2p_failure=false;
     int iter_used=0;
-    SingleC2P_IdealSRMHD(u, eos, s2, b2, rpar, w,
+    SingleC2P_IdealSRMHD(u, eos, s2, b2, rpar, 1.0, 1.0, 1.0, w,
                          dfloor_used, efloor_used, c2p_failure, iter_used);
     // apply velocity ceiling if necessary
     Real lor = sqrt(1.0+SQR(w.vx)+SQR(w.vy)+SQR(w.vz));
