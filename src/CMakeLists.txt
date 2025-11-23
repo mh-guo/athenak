@@ -10,6 +10,7 @@ add_executable(
         main.cpp
         globals.cpp
         parameter_input.cpp
+        time_scale.cpp
 
         bvals/bvals.cpp
         bvals/buffs_cc.cpp

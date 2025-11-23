@@ -16,6 +16,7 @@
 #include "cell_locations.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "time_scale.hpp"
 
 //----------------------------------------------------------------------------------------
 // constructor, initializes coordinates data
@@ -107,6 +108,9 @@ void Coordinates::CoordSrcTerms(const DvceArray5D<Real> &prim, const EOS_Data &e
   auto &size = pmy_pack->pmb->mb_size;
   auto &flat = coord_data.is_minkowski;
   auto &spin = coord_data.bh_spin;
+  // auto pscale = pmy_pack->pscale;
+  auto &scaledata = pmy_pack->pscale->scale_data;  // copy the data
+  Real time = pmy_pack->pmesh->time;
 
   Real gamma_prime = eos.gamma / (eos.gamma - 1.0);
 
@@ -201,10 +205,13 @@ void Coordinates::CoordSrcTerms(const DvceArray5D<Real> &prim, const EOS_Data &e
     s_3 +=     dg_dx3[2][3] * tt[2][3];
     s_3 += 0.5*dg_dx3[3][3] * tt[3][3];
 
+    // Add scale factor
+    Real scale = scaledata.ScaleFactor(x1v, x2v, x3v, time);
+
     // Add source terms to conserved quantities
-    cons(m,IM1,k,j,i) += dt * s_1;
-    cons(m,IM2,k,j,i) += dt * s_2;
-    cons(m,IM3,k,j,i) += dt * s_3;
+    cons(m,IM1,k,j,i) += scale * dt * s_1;
+    cons(m,IM2,k,j,i) += scale * dt * s_2;
+    cons(m,IM3,k,j,i) += scale * dt * s_3;
   });
 
   return;
@@ -230,6 +237,9 @@ void Coordinates::CoordSrcTerms(const DvceArray5D<Real> &prim,
   auto &size = pmy_pack->pmb->mb_size;
   auto &flat = coord_data.is_minkowski;
   auto &spin = coord_data.bh_spin;
+  // auto pscale = pmy_pack->pscale;
+  auto &scaledata = pmy_pack->pscale->scale_data;  // copy the data
+  Real time = pmy_pack->pmesh->time;
 
   Real gamma_prime = eos.gamma / (eos.gamma - 1.0);
 
@@ -345,10 +355,13 @@ void Coordinates::CoordSrcTerms(const DvceArray5D<Real> &prim,
     s_3 +=     dg_dx3[2][3] * tt[2][3];
     s_3 += 0.5*dg_dx3[3][3] * tt[3][3];
 
+    // Add scale factor
+    Real scale = scaledata.ScaleFactor(x1v, x2v, x3v, time);
+
     // Add source terms to conserved quantities
-    cons(m,IM1,k,j,i) += dt * s_1;
-    cons(m,IM2,k,j,i) += dt * s_2;
-    cons(m,IM3,k,j,i) += dt * s_3;
+    cons(m,IM1,k,j,i) += scale * dt * s_1;
+    cons(m,IM2,k,j,i) += scale * dt * s_2;
+    cons(m,IM3,k,j,i) += scale * dt * s_3;
   });
 
   return;

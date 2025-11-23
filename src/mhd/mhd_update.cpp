@@ -15,6 +15,8 @@
 #include "eos/eos.hpp"
 #include "mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "coordinates/coordinates.hpp"
+#include "time_scale.hpp"
 
 namespace mhd {
 //----------------------------------------------------------------------------------------
@@ -29,6 +31,9 @@ TaskStatus MHD::RKUpdate(Driver *pdriver, int stage) {
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   bool &multi_d = pmy_pack->pmesh->multi_d;
   bool &three_d = pmy_pack->pmesh->three_d;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &scaledata = pmy_pack->pscale->scale_data;
+  Real time = pmy_pack->pmesh->time;
 
   Real &gam0 = pdriver->gam0[stage-1];
   Real &gam1 = pdriver->gam1[stage-1];
@@ -77,6 +82,11 @@ TaskStatus MHD::RKUpdate(Driver *pdriver, int stage) {
     }
 
     par_for_inner(member, is, ie, [&](const int i) {
+      Real x1v = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      Real scale = scaledata.ScaleFactor(x1v, x2v, x3v, time);
+      u0_(m,n,k,j,i) = gam0*u0_(m,n,k,j,i) + gam1*u1_(m,n,k,j,i) - scale * beta_dt*divf(i);
       u0_(m,n,k,j,i) = gam0*u0_(m,n,k,j,i) + gam1*u1_(m,n,k,j,i) - beta_dt*divf(i);
     });
   });

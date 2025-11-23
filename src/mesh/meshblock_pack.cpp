@@ -31,6 +31,7 @@
 #include "particles/particles.hpp"
 #include "units/units.hpp"
 #include "meshblock_pack.hpp"
+#include "time_scale.hpp"
 
 //----------------------------------------------------------------------------------------
 // MeshBlockPack constructor:
@@ -61,6 +62,7 @@ MeshBlockPack::~MeshBlockPack() {
   if (pdyngr != nullptr) {delete pdyngr;}
   if (pnr    != nullptr) {delete pnr;}
   if (pturb  != nullptr) {delete pturb;}
+  if (pscale != nullptr) {delete pscale;}
   if (punit  != nullptr) {delete punit;}
   if (pz4c   != nullptr) {
     delete pz4c;
@@ -238,6 +240,15 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     nphysics++;
   } else {
     ppart = nullptr;
+  }
+
+  // (9) TIME SCALING
+  // Create time scaling module.
+  if (pin->DoesBlockExist("time_scale")) {
+    pscale = new TimeScale(this, pin);
+    nphysics++;
+  } else {
+    pscale = nullptr;
   }
 
   // Check that at least ONE is requested and initialized.

@@ -12,6 +12,7 @@
 #include "srcterms/srcterms.hpp"
 #include "driver/driver.hpp"
 #include "mhd.hpp"
+#include "time_scale.hpp"
 
 namespace mhd {
 //----------------------------------------------------------------------------------------
@@ -37,6 +38,10 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
   auto &mbsize = pmy_pack->pmb->mb_size;
+
+  // if (pmy_pack->pscale != nullptr) {
+  //   pmy_pack->pscale->ScaleEField(efld);
+  // }
 
   //---- update B1 (only for 2D/3D problems)
   if (multi_d) {
