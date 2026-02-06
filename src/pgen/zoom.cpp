@@ -627,24 +627,41 @@ void Zoom::DumpData() {
     }
     int datasize = sizeof(Real);
     // xyz? bcc?
+    // Create host mirrors and copy data from device
+    auto h_coarse_w0 = Kokkos::create_mirror_view(coarse_w0);
+    Kokkos::deep_copy(h_coarse_w0, coarse_w0);
+
+    auto h_efld_x1e = Kokkos::create_mirror_view(efld.x1e);
+    Kokkos::deep_copy(h_efld_x1e, efld.x1e);
+    auto h_efld_x2e = Kokkos::create_mirror_view(efld.x2e);
+    Kokkos::deep_copy(h_efld_x2e, efld.x2e);
+    auto h_efld_x3e = Kokkos::create_mirror_view(efld.x3e);
+    Kokkos::deep_copy(h_efld_x3e, efld.x3e);
+    auto h_emf0_x1e = Kokkos::create_mirror_view(emf0.x1e);
+    Kokkos::deep_copy(h_emf0_x1e, emf0.x1e);
+    auto h_emf0_x2e = Kokkos::create_mirror_view(emf0.x2e);
+    Kokkos::deep_copy(h_emf0_x2e, emf0.x2e);
+    auto h_emf0_x3e = Kokkos::create_mirror_view(emf0.x3e); 
+    Kokkos::deep_copy(h_emf0_x3e, emf0.x3e);
+
     IOWrapperSizeT cnt = mzoom*nvars*(n_ccells3)*(n_ccells2)*(n_ccells1);
-    std::fwrite(coarse_w0.data(),datasize,cnt,pfile);
-    auto mbptr = efld.x1e;
+    std::fwrite(h_coarse_w0.data(),datasize,cnt,pfile);
+    auto mbptr = h_efld_x1e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = efld.x2e;
+    mbptr = h_efld_x2e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = efld.x3e;
+    mbptr = h_efld_x3e;
     cnt = mzoom*(n_ccells3)*(n_ccells2+1)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = emf0.x1e;
+    mbptr = h_emf0_x1e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2+1)*(n_ccells1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = emf0.x2e;
+    mbptr = h_emf0_x2e;
     cnt = mzoom*(n_ccells3+1)*(n_ccells2)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
-    mbptr = emf0.x3e;
+    mbptr = h_emf0_x3e;
     cnt = mzoom*(n_ccells3)*(n_ccells2+1)*(n_ccells1+1);
     std::fwrite(mbptr.data(),datasize,cnt,pfile);
     std::fclose(pfile);
