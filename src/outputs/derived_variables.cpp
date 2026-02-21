@@ -1000,6 +1000,91 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     i_dv += 1; // increment derived variable index
   }
 
+  // cell-centered electric fields from CornerE (e1_cc, e2_cc, e3_cc in MHD class)
+  // These are the cell-centered EMFs computed during the CT algorithm
+  if (name.compare("mhd_ecc") == 0 ||
+      name.compare("mhd_ecc1") == 0 ||
+      name.compare("mhd_ecc2") == 0 ||
+      name.compare("mhd_ecc3") == 0) {
+    if (derived_var.extent(4) <= 1)
+      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+    auto dv = derived_var;
+    auto e1cc_ = pm->pmb_pack->pmhd->e1_cc;
+    auto e2cc_ = pm->pmb_pack->pmhd->e2_cc;
+    auto e3cc_ = pm->pmb_pack->pmhd->e3_cc;
+
+    // Determine indices for each component
+    int idx_e1 = -1, idx_e2 = -1, idx_e3 = -1;
+    if (name.compare("mhd_ecc1") == 0 || name.compare("mhd_ecc") == 0) {
+      idx_e1 = i_dv; i_dv++;
+    }
+    if (name.compare("mhd_ecc2") == 0 || name.compare("mhd_ecc") == 0) {
+      idx_e2 = i_dv; i_dv++;
+    }
+    if (name.compare("mhd_ecc3") == 0 || name.compare("mhd_ecc") == 0) {
+      idx_e3 = i_dv; i_dv++;
+    }
+
+    par_for("ecc", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (idx_e1 >= 0) {
+        dv(m,idx_e1,k,j,i) = e1cc_(m,k,j,i);
+      }
+      if (idx_e2 >= 0) {
+        dv(m,idx_e2,k,j,i) = e2cc_(m,k,j,i);
+      }
+      if (idx_e3 >= 0) {
+        dv(m,idx_e3,k,j,i) = e3cc_(m,k,j,i);
+      }
+    });
+  }
+
+  // cell-centered EMF averaged from edge-centered efld (3D only)
+  // E1 on x1-edges at (i, j-1/2, k-1/2), E2 on x2-edges at (i-1/2, j, k-1/2),
+  // E3 on x3-edges at (i-1/2, j-1/2, k).  Average 4 surrounding edges to cell center.
+  if (name.compare("mhd_efcc") == 0 ||
+      name.compare("mhd_efcc1") == 0 ||
+      name.compare("mhd_efcc2") == 0 ||
+      name.compare("mhd_efcc3") == 0) {
+    if (derived_var.extent(4) <= 1)
+      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+    auto dv = derived_var;
+    auto e1e = pm->pmb_pack->pmhd->efld.x1e;
+    auto e2e = pm->pmb_pack->pmhd->efld.x2e;
+    auto e3e = pm->pmb_pack->pmhd->efld.x3e;
+
+    // Determine indices for each component
+    int idx_e1 = -1, idx_e2 = -1, idx_e3 = -1;
+    if (name.compare("mhd_efcc1") == 0 || name.compare("mhd_efcc") == 0) {
+      idx_e1 = i_dv; i_dv++;
+    }
+    if (name.compare("mhd_efcc2") == 0 || name.compare("mhd_efcc") == 0) {
+      idx_e2 = i_dv; i_dv++;
+    }
+    if (name.compare("mhd_efcc3") == 0 || name.compare("mhd_efcc") == 0) {
+      idx_e3 = i_dv; i_dv++;
+    }
+
+    par_for("efcc", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      // E1: average 4 x1-edges surrounding cell center
+      if (idx_e1 >= 0) {
+        dv(m,idx_e1,k,j,i) = 0.25*(e1e(m,k,j,i)   + e1e(m,k,j+1,i) +
+                                    e1e(m,k+1,j,i) + e1e(m,k+1,j+1,i));
+      }
+      // E2: average 4 x2-edges surrounding cell center
+      if (idx_e2 >= 0) {
+        dv(m,idx_e2,k,j,i) = 0.25*(e2e(m,k,j,i)   + e2e(m,k,j,i+1) +
+                                    e2e(m,k+1,j,i) + e2e(m,k+1,j,i+1));
+      }
+      // E3: average 4 x3-edges surrounding cell center
+      if (idx_e3 >= 0) {
+        dv(m,idx_e3,k,j,i) = 0.25*(e3e(m,k,j,i)   + e3e(m,k,j,i+1) +
+                                    e3e(m,k,j+1,i) + e3e(m,k,j+1,i+1));
+      }
+    });
+  }
+
   // radiation moments
   if (name.compare(0, 3, "rad") == 0) {
     // Determine if coordinate and/or fluid frame moments required
