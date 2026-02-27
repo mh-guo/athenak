@@ -159,6 +159,13 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << std::endl << "Input file is likely missing corresponding block" << std::endl;
     exit(EXIT_FAILURE);
   }
+  if ((ivar>=152) && (ivar<160) && (pm->pmb_pack->pmhd == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of MHD cell-centered E-field requested in <output> block '"
+       << out_params.block_name << "' but no MHD object has been constructed."
+       << std::endl << "Input file is likely missing a <mhd> block" << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
   // Now load STL vector of output variables
   outvars.clear();
@@ -535,6 +542,52 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars.emplace_back("jcon1",1,&(derived_var));
       outvars.emplace_back("jcon2",2,&(derived_var));
       outvars.emplace_back("jcon3",3,&(derived_var));
+    }
+
+    // mhd cell-centered electric fields from CornerE (e1_cc, e2_cc, e3_cc)
+    if (variable.compare("mhd_ecc1") == 0 ||
+        variable.compare("mhd_ecc") == 0) {
+      out_params.contains_derived = true;
+      out_params.n_derived += 1;
+      int i_derived = out_params.n_derived - 1;
+      outvars.emplace_back("ecc1",i_derived,&(derived_var));
+    }
+    if (variable.compare("mhd_ecc2") == 0 ||
+        variable.compare("mhd_ecc") == 0) {
+      out_params.contains_derived = true;
+      out_params.n_derived += 1;
+      int i_derived = out_params.n_derived - 1;
+      outvars.emplace_back("ecc2",i_derived,&(derived_var));
+    }
+    if (variable.compare("mhd_ecc3") == 0 ||
+        variable.compare("mhd_ecc") == 0) {
+      out_params.contains_derived = true;
+      out_params.n_derived += 1;
+      int i_derived = out_params.n_derived - 1;
+      outvars.emplace_back("ecc3",i_derived,&(derived_var));
+    }
+
+    // mhd cell-centered EMF from edge-centered efld (3D only)
+    if (variable.compare("mhd_efcc1") == 0 ||
+        variable.compare("mhd_efcc") == 0) {
+      out_params.contains_derived = true;
+      out_params.n_derived += 1;
+      int i_derived = out_params.n_derived - 1;
+      outvars.emplace_back("efcc1",i_derived,&(derived_var));
+    }
+    if (variable.compare("mhd_efcc2") == 0 ||
+        variable.compare("mhd_efcc") == 0) {
+      out_params.contains_derived = true;
+      out_params.n_derived += 1;
+      int i_derived = out_params.n_derived - 1;
+      outvars.emplace_back("efcc2",i_derived,&(derived_var));
+    }
+    if (variable.compare("mhd_efcc3") == 0 ||
+        variable.compare("mhd_efcc") == 0) {
+      out_params.contains_derived = true;
+      out_params.n_derived += 1;
+      int i_derived = out_params.n_derived - 1;
+      outvars.emplace_back("efcc3",i_derived,&(derived_var));
     }
 
     // Hydro SGS tensor
