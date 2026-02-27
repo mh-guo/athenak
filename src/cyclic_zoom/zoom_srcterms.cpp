@@ -17,22 +17,19 @@
 //! \fn void CyclicZoom::SourceTermsFC()
 //! \brief Add delta E field from small scale
 
-// TODO(@mhguo): check the corner case in ghost zones
 void CyclicZoom::SourceTermsFC(DvceEdgeFld4D<Real> efld) {
   // only apply when add_emf is true
   if (!zemf.add_emf) return;
   // apply only when zone > 0
   if (zstate.zone == 0) return;
+  if (zstate.zone > zemf.emf_zmax) return;
   if (zamr.zooming_out || zamr.zooming_in) return;
   int zmbs = pzmesh->gzms_eachdvce[global_variable::my_rank];
   for (int zm = 0; zm < pzmesh->nzmb_thisdvce; ++zm) {
-    int m = pzmesh->lid_eachmb[zm+zmbs];
+    int m = pzmesh->mblid_eachzmb[zm+zmbs];
     // pzdata->UpdateElectricFieldsInZoomRegion(m, zm);
     // pzdata->StoreEFields(zm, m);
     pzdata->AddSrcTermsFC(m, zm, efld);
-  }
-  if (verbose && global_variable::my_rank == 0) {
-    std::cout << "CyclicZoom: Added source terms to electric fields in zoom region" << std::endl;
   }
   return;
 }
@@ -41,7 +38,6 @@ void CyclicZoom::SourceTermsFC(DvceEdgeFld4D<Real> efld) {
 //! \fn void ZoomData::AddSrcTermsFC()
 //! \brief Add delta E field from small scale for one meshblock
 
-// TODO(@mhguo): check the corner case in ghost zones
 void ZoomData::AddSrcTermsFC(int m, int zm, DvceEdgeFld4D<Real> efld) {
   auto &indcs = pzoom->pmesh->mb_indcs;
   auto &size = pzoom->pmesh->pmb_pack->pmb->mb_size;
@@ -98,10 +94,7 @@ void ZoomData::AddSrcTermsFC(int m, int zm, DvceEdgeFld4D<Real> efld) {
     Real x3f = LeftEdgeX  (k-ks, nx3, x3min, x3max);
 
     // apply to zoom region
-    if (zregion.IsInZoomRegion(x1v, x2f, x3f)) {
-        // ef1(m,k,j,i) = f0*ef1(m,k,j,i) + f1*de1(zm,ck,cj,ci);
-        // limit de1 to be between -emax1 and emax1
-        // ef1(m,k,j,i) = f0*ef1(m,k,j,i) + f1*fmax(-emax1, fmin(emax1, de1(zm,ck,cj,ci)));
+    if (zregion.IsInRegion(x1v, x2f, x3f)) {
         ef1(m,k,j,i) += de1(zm,ck,cj,ci);
     }
   });
@@ -124,10 +117,7 @@ void ZoomData::AddSrcTermsFC(int m, int zm, DvceEdgeFld4D<Real> efld) {
     Real x3f = LeftEdgeX  (k-ks, nx3, x3min, x3max);
 
     // apply to zoom region
-    if (zregion.IsInZoomRegion(x1f, x2v, x3f)) {
-        // ef2(m,k,j,i) = f0*ef2(m,k,j,i) + f1*de2(zm,ck,cj,ci);
-        // limit de2 to be between -emax2 and emax2
-        // ef2(m,k,j,i) = f0*ef2(m,k,j,i) + f1*fmax(-emax2, fmin(emax2, de2(zm,ck,cj,ci)));
+    if (zregion.IsInRegion(x1f, x2v, x3f)) {
         ef2(m,k,j,i) += de2(zm,ck,cj,ci);
     }
   });
@@ -150,10 +140,7 @@ void ZoomData::AddSrcTermsFC(int m, int zm, DvceEdgeFld4D<Real> efld) {
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
     // apply to zoom region
-    if (zregion.IsInZoomRegion(x1f, x2f, x3v)) {
-        // ef3(m,k,j,i) = f0*ef3(m,k,j,i) + f1*de3(zm,ck,cj,ci);
-        // limit de3 to be between -emax3 and emax3
-        // ef3(m,k,j,i) = f0*ef3(m,k,j,i) + f1*fmax(-emax3, fmin(emax3, de3(zm,ck,cj,ci)));
+    if (zregion.IsInRegion(x1f, x2f, x3v)) {
         ef3(m,k,j,i) += de3(zm,ck,cj,ci);
     }
   });

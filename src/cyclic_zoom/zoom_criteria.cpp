@@ -3,8 +3,11 @@
 // Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
-//! \file zoom_refinement.cpp
-//! \brief Functions to handle cyclic zoom mesh refinement
+//! \file zoom_criteria.cpp
+//! \brief Functions to handle cyclic zoom mesh refinement criteria
+
+#include <algorithm>
+#include <iostream>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -14,7 +17,7 @@
 
 //----------------------------------------------------------------------------------------
 //! \fn void CyclicZoom::CheckRefinement()
-//! \brief Main function for CyclicZoom Adaptive Mesh Refinement
+//! \brief Main function for CyclicZoom adaptive mesh refinement criteria
 
 void CyclicZoom::CheckRefinement() {
   if (pmesh->time >= zstate.next_time) {
@@ -31,8 +34,7 @@ void CyclicZoom::CheckRefinement() {
 //! \brief Update zoom state before/after refinement/coarsening
 
 void CyclicZoom::UpdateState() {
-  // TODO(@mhguo): may clean the logic here a bit, perhaps using zone directly?
-  // Update flags
+  // update flags
   if (zstate.direction > 0) {zamr.zooming_out = true;}
   if (zstate.direction < 0) {zamr.zooming_in = true;}
   if (zamr.zooming_out && zamr.zooming_in) {
@@ -40,24 +42,31 @@ void CyclicZoom::UpdateState() {
               << "CyclicZoom AMR: zooming_in and zooming_out both true!" << std::endl;
     std::exit(EXIT_FAILURE);
   }
-  // Update zoom state
+  // update zoom state
   zstate.last_zone = zstate.zone;
   zstate.zone += zstate.direction;
   if (zstate.zone == 0) {zstate.direction = 1;}
   if (zstate.zone == zamr.nlevels - 1 ) {zstate.direction = -1;}
+  zstate.id++;
+  // update zoom AMR parameters
   zamr.level = zamr.max_level - zstate.zone;
   zamr.refine_flag = -zstate.direction;
+  // update zoom interval
   SetRegionAndInterval();
-  zstate.id++;
   zstate.next_time = pmesh->time + zint.runtime;
+  // print verbose output
   if (verbose && global_variable::my_rank == 0) {
     std::cout << "CyclicZoom AMR:"
               << " new id = " << zstate.id
-              << " zone = " << zstate.zone 
+              << " zone = " << zstate.zone
               << " level = " << zamr.level
               << std::endl;
-    std::cout << "CyclicZoom AMR: old region radius = " << old_zregion.radius << std::endl;
-    std::cout << "CyclicZoom AMR: region radius = " << zregion.radius << std::endl;
+    std::cout << "CyclicZoom AMR: old region radius = " << old_zregion.radius
+              << std::endl;
+    std::cout << "CyclicZoom AMR: new region radius = " << zregion.radius
+              << " r_in = " << zregion.r_in
+              << " r_in_flux = " << zregion.r_in_flux
+              << std::endl;
     std::cout << "CyclicZoom AMR: time = " << pmesh->time << " runtime = " << zint.runtime
               << " next time = " << zstate.next_time << std::endl;
   }
@@ -68,13 +77,13 @@ void CyclicZoom::UpdateState() {
 //! \brief Set the time interval for the next zoom
 
 void CyclicZoom::SetRegionAndInterval() {
-  // TODO(@mhguo): may add more complex and robust region settings later
+  // TODO(@mhguo): may add more flexible and robust region settings later
   old_zregion.radius = zregion.r_0 * std::pow(2.0,static_cast<Real>(zstate.last_zone));
   zregion.radius = zregion.r_0 * std::pow(2.0,static_cast<Real>(zstate.zone));
-  Real timescale = pow(zregion.radius,zint.t_run_pow);
-  // zint.runtime = zint.t_run_fac*timescale;
-  zint.runtime = zint.t_run_fac_zones[zstate.zone]*timescale;
-  if (zint.runtime > zint.t_run_max) {zint.runtime = zint.t_run_max;}
+  zregion.r_in = std::min(zregion.f_in * zregion.radius, zregion.r_in_max);
+  Real timescale = pow(zregion.radius,zint.trun_pow);
+  zint.runtime = zint.trun_facs[zstate.zone]*timescale;
+  if (zint.runtime > zint.trun_max) {zint.runtime = zint.trun_max;}
 }
 
 //----------------------------------------------------------------------------------------
@@ -95,7 +104,8 @@ void CyclicZoom::SetRefinementFlags() {
   Real r_zoom = zregion.radius;
   Real x1c = zregion.x1c, x2c = zregion.x2c, x3c = zregion.x3c;
   if(verbose && global_variable::my_rank == 0) {
-    std::cout << "CyclicZoom AMR: Refine/derefine to level " << old_level + ref_flag
+    std::cout << "ZoomCriteria: " << (ref_flag > 0 ? "Refines" : "Derefines")
+              << " to level " << old_level + ref_flag
               << " (refine_flag=" << ref_flag << ")" << std::endl;
   }
   // Check whether the MeshBlock is overlapping with the zoom region
@@ -136,12 +146,6 @@ void CyclicZoom::SetRefinementFlags() {
       // Calculate the distance from sphere center to this closest point
       Real r_sq = SQR(x1c - closest_x1) + SQR(x2c - closest_x2) + SQR(x3c - closest_x3);
       if (r_sq < SQR(r_zoom)) {
-        // std::cerr << "CyclicZoom Error: MeshBlock " << m+mbs 
-        //           << " at level " << pmesh->lloc_eachmb[m+mbs].level
-        //           << " cannot be refined/coarsened to level " << old_level + ref_flag
-        //           << "!" << std::endl;
-        // Kokkos::abort("CyclicZoom AMR level mismatch");
-        // printf("MB %d: dist^2 = %e, r_zoom^2 = %e\n", m+mbs, r_sq, SQR(r_zoom));
         refine_flag.h_view(m+mbs) = ref_flag;
       }
     }

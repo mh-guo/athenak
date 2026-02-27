@@ -4,7 +4,10 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file cyclic_zoom.cpp
-//  \brief implementation of constructor and functions in CyclicZoom class
+//! \brief Implementation of constructor and functions in CyclicZoom class
+
+#include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -29,12 +32,13 @@ CyclicZoom::CyclicZoom(Mesh *pm, ParameterInput *pin) :
       }
     }
   }
-  verbose = pin->GetOrAddBoolean(block_name,"verbose",false);
-  read_rst = pin->GetOrAddBoolean(block_name,"read_rst",true);
-  write_rst = pin->GetOrAddBoolean(block_name,"write_rst",true);
 
-  // TODO(@mhguo): may set the parameters so that the initial level equals the max level
-  // TODO(@mhguo): currently we need to check whether zamr.level is correct by hand
+  // Set basic parameters
+  verbose = pin->GetOrAddBoolean("cyclic_zoom","verbose",false);
+  read_rst = pin->GetOrAddBoolean("cyclic_zoom","read_rst",true);
+  write_rst = pin->GetOrAddBoolean("cyclic_zoom","write_rst",true);
+
+  // Set zoom runtime state parameters
   zstate.id = 0;
   zstate.zone = pin->GetOrAddInteger(block_name,"zone",0);
   zstate.last_zone = zstate.zone;
@@ -49,47 +53,48 @@ CyclicZoom::CyclicZoom(Mesh *pm, ParameterInput *pin) :
   zamr.zooming_in = false;
   zamr.zooming_out = false;
 
+  // Set zoom region parameters
   zregion.x1c = pin->GetOrAddReal(block_name,"x1c",0.0);
   zregion.x2c = pin->GetOrAddReal(block_name,"x2c",0.0);
   zregion.x3c = pin->GetOrAddReal(block_name,"x3c",0.0);
   zregion.r_0 = pin->GetOrAddReal(block_name,"r_0",1.0);
-  zint.t_run_fac = pin->GetOrAddReal(block_name,"t_run_fac",1.0);
-  zint.t_run_pow = pin->GetOrAddReal(block_name,"t_run_pow",0.0);
-  zint.t_run_max = pin->GetOrAddReal(block_name,"t_run_max",FLT_MAX);
+  // default 0.4 based on monopole test
+  zregion.f_in = pin->GetOrAddReal(block_name,"f_in",0.4);
+  zregion.r_in_flux = pin->GetOrAddReal(block_name,"r_in_flux",0.0);
+  zregion.r_in_max = pin->GetOrAddReal(block_name,"r_in_max",8.0);
+
+  // Set zoom interval parameters
+  zint.trun_fac = pin->GetOrAddReal(block_name,"trun_fac",1.0);
+  zint.trun_pow = pin->GetOrAddReal(block_name,"trun_pow",0.0);
+  zint.trun_max = pin->GetOrAddReal(block_name,"trun_max",FLT_MAX);
   // Read number of zones from input parameters
   int num_zones = zamr.nlevels;
   // Initialize the dynamic interval structure
   zint.initialize(num_zones);
   // Read the runtime factors from input file
   for (int i = 0; i < num_zones; ++i) {
-    std::string param_name = "t_run_fac_zone_" + std::to_string(i);
-    Real zone_factor = pin->GetOrAddReal(block_name, param_name.c_str(), zint.t_run_fac);
-    zint.t_run_fac_zones[i] = zone_factor;
+    std::string param_name = "trun_fac_" + std::to_string(i);
+    zint.trun_facs[i] = pin->GetOrAddReal(block_name, param_name.c_str(), zint.trun_fac);
   }
 
+  // Update zoom state
   zstate.next_time = pmesh->time;
   old_zregion = zregion; // initialize old zoom region
   SetRegionAndInterval();
   zstate.next_time += zint.runtime;
-  zemf.emf_flag = 0;
-  zemf.emf_f0 = 1.0;
-  zemf.emf_f1 = 0.0;
+
+  // Set zoom emf parameters if needed
   zemf.emf_fmax = 1.0;
-  zemf.re_fac = 0.8; // TODO(@mhguo): probably change to 1.0?
-  zemf.r0_efld = 0.0;
-  // Think whether to read emf parameters from input file
+  zemf.emf_zmax = zamr.nlevels;
   zemf.add_emf = pin->GetOrAddBoolean(block_name,"add_emf",true); // default true
   if (zemf.add_emf) {
-    zemf.emf_flag = pin->GetOrAddInteger(block_name,"emf_flag",zemf.emf_flag);
-    zemf.emf_f0 = pin->GetOrAddReal(block_name,"emf_f0",zemf.emf_f0);
-    zemf.emf_f1 = pin->GetOrAddReal(block_name,"emf_f1",zemf.emf_f1);
     zemf.emf_fmax = pin->GetOrAddReal(block_name,"emf_fmax",zemf.emf_fmax);
-    zemf.emf_zmax = pin->GetOrAddInteger(block_name,"emf_zmax",zamr.nlevels);
-    zemf.re_fac = pin->GetOrAddReal(block_name,"re_fac",zemf.re_fac);
-    zemf.r0_efld = pin->GetOrAddReal(block_name,"r0_efld",0.0); // default value
+    zemf.emf_zmax = pin->GetOrAddInteger(block_name,"emf_zmax",zemf.emf_zmax);
   }
 
+  // Initialize zoom data structures
   Initialize(pin);
+  // Print diagnostic information
   PrintCyclicZoomDiagnostics();
 
   return;
@@ -113,6 +118,7 @@ void CyclicZoom::UpdateAMRFromRestart() {
   zamr.level = pmesh->max_level - zstate.zone;
   zamr.refine_flag = -zstate.direction;
   SetRegionAndInterval();
+  AdjustExcisionForZoom();
   return;
 }
 
@@ -126,8 +132,6 @@ void CyclicZoom::PrintCyclicZoomDiagnostics() {
     // print basic parameters
     std::cout << "Basic: read_rst = " << read_rst
               << " write_rst = " << write_rst << std::endl;
-    std::cout << "Funcs: add_emf = " << zemf.add_emf
-              << " emf_flag = " << zemf.emf_flag << std::endl;
     // print mesh parameters
     std::cout << "Mesh: nzmb_max_perdvce = " << pzmesh->nzmb_max_perdvce
               << " nzmb_max_perhost = " << pzmesh->nzmb_max_perhost << std::endl;
@@ -140,26 +144,32 @@ void CyclicZoom::PrintCyclicZoomDiagnostics() {
               << " p_zoom = " << pzdata->p_zoom
               << std::endl;
     // print electric field parameters
-    std::cout << "Efield: emf_f0 = " << zemf.emf_f0 << " emf_f1 = " << zemf.emf_f1
-              << " emf_fmax = " << zemf.emf_fmax << " emf_zmax = " << zemf.emf_zmax
-              << " re_fac = " << zemf.re_fac << " r0_efld = " << zemf.r0_efld << std::endl;
+    std::cout << "Funcs: add_emf = " << zemf.add_emf << std::endl;
+    std::cout << "Efield: emf_fmax = " << zemf.emf_fmax << " emf_zmax = " << zemf.emf_zmax
+              << std::endl;
+    // print region parameters
+    std::cout << "Region: x1c = " << zregion.x1c << " x2c = " << zregion.x2c
+              << " x3c = " << zregion.x3c << " r_0 = " << zregion.r_0
+              << " radius = " << zregion.radius << std::endl
+              << " f_in = " << zregion.f_in
+              << " r_in = " << zregion.r_in
+              << " r_in_flux = " << zregion.r_in_flux
+              << " r_in_max = " << zregion.r_in_max
+              << std::endl;
     // print interval parameters
-    std::cout << "Interval: t_run_fac = " << zint.t_run_fac
-              << " t_run_pow = " << zint.t_run_pow
-              << " t_run_max = " << zint.t_run_max
+    std::cout << "Interval: trun_fac = " << zint.trun_fac
+              << " trun_pow = " << zint.trun_pow
+              << " trun_max = " << zint.trun_max
               << std::endl;
     // output zone-specific time factors
-    for (int i = 0; i < zint.t_run_fac_zones.size(); ++i) {
-      std::cout << " t_run_fac_zone_" << i << " = " << zint.t_run_fac_zones[i] << std::endl;
+    for (int i = 0; i < zint.trun_facs.size(); ++i) {
+      std::cout << " trun_fac_" << i << " = " << zint.trun_facs[i]
+                << std::endl;
     }
     // print level structure
     std::cout << "Level: zone = " << zstate.zone << " direction = " << zstate.direction
               << " level = " << zamr.level << " max_level = " << zamr.max_level
               << " min_level = " << zamr.min_level << std::endl;
-    // print region parameters
-    std::cout << "Region: x1c = " << zregion.x1c << " x2c = " << zregion.x2c
-              << " x3c = " << zregion.x3c << " r_0 = " << zregion.r_0
-              << " radius = " << zregion.radius << std::endl;
     // print runtime information
     std::cout << "Time: runtime = " << zint.runtime << " next time = "
               << zstate.next_time << std::endl;

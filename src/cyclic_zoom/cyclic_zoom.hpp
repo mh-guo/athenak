@@ -6,7 +6,10 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file cyclic_zoom.hpp
-//! \brief definitions for CyclicZoom class
+//! \brief Definitions for CyclicZoom class and related structures
+
+#include <string>
+#include <vector>
 
 //----------------------------------------------------------------------------------------
 //! \struct ZoomState
@@ -45,11 +48,19 @@ typedef struct ZoomRegion {
   Real x1c, x2c, x3c;           // center of zoom region
   Real r_0;                     // radius of zoom region at zone 0
   Real radius;                  // radius of zoom region
+  Real f_in;                    // factor for inner radius
+  Real r_in;                    // inner radius of zoom region
+  Real r_in_flux;               // inner radius zoom region for flux
+  Real r_in_max;                // maximum inner radius of zoom region
 
   // Kokkos inline function to check if a location is within the zoom region
   KOKKOS_INLINE_FUNCTION
-  bool IsInZoomRegion(Real x1, Real x2, Real x3) const {
-    return (SQR(x1 - x1c) + SQR(x2 - x2c) + SQR(x3 - x3c) <= SQR(radius));
+  bool IsInRegion(Real x1, Real x2, Real x3) const {
+    return IsInRegion(x1, x2, x3, radius);
+  }
+  KOKKOS_INLINE_FUNCTION
+  bool IsInRegion(Real x1, Real x2, Real x3, Real r) const {
+    return (SQR(x1 - x1c) + SQR(x2 - x2c) + SQR(x3 - x3c) <= SQR(r));
   }
 } ZoomRegion;
 
@@ -58,15 +69,15 @@ typedef struct ZoomRegion {
 //! \brief parameters of zoom interval
 
 typedef struct ZoomInterval {
-  Real t_run_fac;               // interval factor
-  Real t_run_pow;               // interval power law
-  Real t_run_max;               // maximum interval
-  std::vector<Real> t_run_fac_zones;        // runtime factors for zones (dynamic)
+  Real trun_fac;                // interval factor
+  Real trun_pow;                // interval power law
+  Real trun_max;                // maximum interval
+  std::vector<Real> trun_facs;  // interval factors for each zone (dynamic)
   // Constructor for initialization
   ZoomInterval() = default;
   // Initialize with given number of zones
   void initialize(int num_zones) {
-    t_run_fac_zones.resize(num_zones);
+    trun_facs.resize(num_zones);
   }
   Real runtime;                 // interval for zoom
 } ZoomInterval;
@@ -77,12 +88,8 @@ typedef struct ZoomInterval {
 
 typedef struct ZoomEMF {
   bool add_emf;            // flag for fixing electric field
-  int emf_flag;            // flag for modifying electric field
-  Real emf_f0, emf_f1;     // electric field factor, e = f0 * e0 + f1 * e1
   Real emf_fmax;           // maximum electric field factor
   int  emf_zmax;           // maximum zone number for electric field
-  Real re_fac;             // factor for electric field
-  Real r0_efld;            // modify e if r < r0_efld
 } ZoomEMF;
 
 // Forward declaration
@@ -93,8 +100,7 @@ class ZoomData;
 //! \class CyclicZoom
 //! \brief Cyclic Zoom AMR module
 
-class CyclicZoom
-{
+class CyclicZoom {
   friend class ZoomMesh;
   friend class ZoomData;
  public:
@@ -102,6 +108,7 @@ class CyclicZoom
   ~CyclicZoom() = default;
 
   // data
+  // TODO(@mhguo): may extend to accept multiple zoom criteria later
   std::string block_name;  // block name for reading parameters
   bool verbose;            // flag for verbose output
   bool read_rst;           // flag for reading zoom data restart file
@@ -114,7 +121,6 @@ class CyclicZoom
   ZoomRegion old_zregion;  // previous zoom region parameters
   ZoomEMF zemf;            // zoom electric field parameters
 
-  // array_sum::GlobalSum nc1, nc2, nc3, em1, em2, em3;
   ZoomMesh *pzmesh;        // zoom mesh
   ZoomData *pzdata;        // zoom data
 
@@ -131,11 +137,14 @@ class CyclicZoom
   // functions to handle zoom region
   void StoreZoomRegion();
   void ApplyZoomRegion(Driver *pdriver);
+  void LoadZoomData(int zone);
   void StoreVariables();
   bool CheckStoreFlag(int m);
   void CorrectVariables();
   void ReinitVariables();
   void MaskVariables();
+  void ApplyMask();
+  void AdjustExcisionForZoom();
   void UpdateFluxes(Driver *pdriver);
   void StoreFluxes();
   void SourceTermsFC(DvceEdgeFld4D<Real> emf);
@@ -154,8 +163,7 @@ class CyclicZoom
 //----------------------------------------------------------------------------------------
 //! \class ZoomMesh
 //! \brief Handles Zoom Mesh structures
-class ZoomMesh
-{
+class ZoomMesh {
  public:
   ZoomMesh(CyclicZoom *pz, ParameterInput *pin);
   ~ZoomMesh();
@@ -173,16 +181,19 @@ class ZoomMesh
   int *nzmb_eachlevel;     // number of Zoom MeshBlocks on each level
   int *gzms_eachdvce;      // starting global ID of MeshBlocks in each device
   int *nzmb_eachdvce;      // number of MeshBlocks on each device
-  std::vector<int> rank_eachmb;    // rank of each MeshBlock that covers this zoom MB
-  std::vector<int> lid_eachmb;     // local ID of each MeshBlock that covers this zoom MB
+  int *zm_eachmb;          // local index of zoom MeshBlock for each MeshBlock
   std::vector<int> rank_eachzmb;   // rank of each Zoom MeshBlock
   std::vector<int> lid_eachzmb;    // local ID of each Zoom MeshBlock
+  std::vector<int> mbrank_eachzmb; // MeshBlock rank of each zoom MeshBlock
+  std::vector<int> mblid_eachzmb;  // MeshBlock local ID of each zoom MeshBlock
   std::vector<LogicalLocation> lloc_eachzmb;  // LogicalLocations for each zoom MeshBlock
 
   // functions
-  void GatherZMB(int zm_count, int zone);
+  void GatherNZMB(int zm_count, int zone);
   void UpdateMeshStructure();
   void RebuildMeshStructure();
+  int  CountMBsToStore(int zone);
+  void AssignMBLists();
   void SyncMBLists();
   void SyncLogicalLocations();
   int  FindMB(int gzm);
@@ -195,8 +206,7 @@ class ZoomMesh
 //----------------------------------------------------------------------------------------
 //! \class ZoomData
 //! \brief Handles storage of data during cyclic zoom AMR
-class ZoomData
-{
+class ZoomData {
   friend class CyclicZoom;
  public:
   ZoomData(CyclicZoom *pz, ParameterInput *pin);
@@ -216,24 +226,23 @@ class ZoomData
 
   DvceEdgeFld4D<Real> efld_pre;   // coarse edge-centered electric fields before zoom
   DvceEdgeFld4D<Real> efld_aft;   // coarse edge-centered electric fields after zoom
-  DvceEdgeFld4D<Real> delta_efld; // change in electric fields
+  DvceEdgeFld4D<Real> delta_efld; // change in electric fields, used for source terms
   DvceEdgeFld4D<Real> efld_buf;   // buffer for electric fields during zoom
 
   // Radiation intensity arrays
   DvceArray5D<Real> i0;         // intensities
   DvceArray5D<Real> coarse_i0;  // intensities on 2x coarser grid (for SMR/AMR)
 
-  // DualView for device ↔ host mirrored packing buffer
+  // DualView for device <-> host mirrored packing buffer
   // Syncs only used portion via subviews for bandwidth efficiency
   DualArray1D<Real> zbuf;
-  
+
   // Host array for storage with load balancing
   // Contains different ZMBs after redistribution due to load balancing
   HostArray1D<Real> zdata;
 
 #if MPI_PARALLEL_ENABLED
   MPI_Comm zoom_comm;                       // unique communicator for zoom refinement
-  // DualArray1D<AMRBuffer> sendbuf, recvbuf; // send/recv buffers
   MPI_Request *send_req, *recv_req;
 #endif
 
@@ -241,7 +250,6 @@ class ZoomData
   void Initialize();
   void MeshBlockDataSize();
   void ResetDataEC(DvceEdgeFld4D<Real> ec);
-  void DumpData();
   // functions for storing/applying data during zoom
   void StoreData(int zm, int m);
   void StoreCCData(int zm, DvceArray5D<Real> a0, DvceArray5D<Real> ca,
@@ -258,7 +266,7 @@ class ZoomData
   void ApplyPrimFromFiner(int m, int zm, const ZoomRegion &zregion);
   // functions for storing/applying electric fields during zoom
   void StoreEFieldsBeforeAMR(int zm, int m, DvceEdgeFld4D<Real> efld);
-  void StoreEFieldsFromFiner(int zmc, int zm, DvceEdgeFld4D<Real> efld);
+  void CorrectEFieldsFromFiner(int zmc, int m, int zmf, DvceEdgeFld4D<Real> efld);
   void StoreEFieldsAfterAMR(int zm, int m, DvceEdgeFld4D<Real> efld);
   void LimitEFields();
   // load balancing functions

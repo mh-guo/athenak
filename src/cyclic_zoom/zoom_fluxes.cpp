@@ -4,7 +4,9 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file zoom_fluxes.cpp
-//  \brief Functions for updating and storing fluxes during zooming
+//! \brief Functions for updating and storing fluxes during zooming
+
+#include <iostream>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -20,12 +22,11 @@
 void CyclicZoom::UpdateFluxes(Driver *pdriver) {
   // call MHD functions to update electric fields in all MeshBlocks
   mhd::MHD *pmhd = pmesh->pmb_pack->pmhd;
-  (void) pmhd->InitRecv(pdriver, 1);  // stage = 1 
+  (void) pmhd->InitRecv(pdriver, 1);  // stage = 1
   (void) pmhd->CopyCons(pdriver, 1);  // stage = 1: copy u0 to u1
   (void) pmhd->Fluxes(pdriver, 1);
   // (void) pmhd->RestrictU(this, 0);
-  // TODO(@mhguo): think about the order
-  // TODO(@mhguo): this is redundant, should only send/recv electric fields
+  // TODO(@mhguo): may only send/recv electric fields if possible
   (void) pmhd->SendFlux(pdriver, 1);  // stage = 1
   (void) pmhd->RecvFlux(pdriver, 1);  // stage = 1
   (void) pmhd->SendU(pdriver, 1);
@@ -38,9 +39,8 @@ void CyclicZoom::UpdateFluxes(Driver *pdriver) {
   (void) pmhd->RecvB(pdriver, 1);
   (void) pmhd->ClearSend(pdriver, 1); // stage = 1
   (void) pmhd->ClearRecv(pdriver, 1); // stage = 1
-  if (verbose) {
-    std::cout << " Rank " << global_variable::my_rank 
-            << " Calculated electric fields after AMR" << std::endl;
+  if (verbose && global_variable::my_rank == 0) {
+    std::cout << "CyclicZoom: Calculated electric fields after AMR" << std::endl;
   }
   return;
 }
@@ -51,10 +51,9 @@ void CyclicZoom::UpdateFluxes(Driver *pdriver) {
 
 void CyclicZoom::StoreFluxes() {
   // update electric fields in zoom region
-  // TODO(@mhguo): only stored the emf, may need to limit de to emin/max
   int zmbs = pzmesh->gzms_eachdvce[global_variable::my_rank];
   for (int zm = 0; zm < pzmesh->nzmb_thisdvce; ++zm) {
-    int m = pzmesh->lid_eachmb[zm+zmbs];
+    int m = pzmesh->mblid_eachzmb[zm+zmbs];
     // pzdata->UpdateElectricFieldsInZoomRegion(m, zm);
     auto efld = pmesh->pmb_pack->pmhd->efld;
     pzdata->StoreEFieldsAfterAMR(zm, m, efld);
@@ -92,16 +91,17 @@ void ZoomData::StoreEFieldsBeforeAMR(int zm, int m, DvceEdgeFld4D<Real> efld) {
     e2(zm,ck,cj,ci) = 0.5*(ef2(m,fk,fj,fi) + ef2(m,fk,fj+1,fi));
     e3(zm,ck,cj,ci) = 0.5*(ef3(m,fk,fj,fi) + ef3(m,fk+1,fj,fi));
   });
-  // TODO(@mhguo): add even finer electric fields
   return;
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void ZoomData::StoreEFieldsFromFiner()
-//! \brief Store coarse electric fields in zoom data zmc from finer zoom data zm on previous level
+//! \fn void ZoomData::CorrectEFieldsFromFiner()
+//! \brief Correct coarse electric fields in zoom data zm in MeshBlock m from finer zoom
+//! data zmf on previous level
 
-void ZoomData::StoreEFieldsFromFiner(int zmc, int zm, DvceEdgeFld4D<Real> efld) {
+void ZoomData::CorrectEFieldsFromFiner(int zm, int m, int zmf, DvceEdgeFld4D<Real> efld) {
   auto &indcs = pzoom->pmesh->mb_indcs;
+  auto &size = pzoom->pmesh->pmb_pack->pmb->mb_size;
   int &cis = indcs.cis;
   int &cjs = indcs.cjs;
   int &cks = indcs.cks;
@@ -113,7 +113,7 @@ void ZoomData::StoreEFieldsFromFiner(int zmc, int zm, DvceEdgeFld4D<Real> efld) 
   auto e2 = efld_pre.x2e;
   auto e3 = efld_pre.x3e;
   int zmbs = pzmesh->gzms_eachdvce[global_variable::my_rank]; // global id start of dvce
-  auto &zlloc = pzmesh->lloc_eachzmb[zm+zmbs];
+  auto &zlloc = pzmesh->lloc_eachzmb[zmf+zmbs];
   int ox1 = ((zlloc.lx1 & 1) == 1);
   int ox2 = ((zlloc.lx2 & 1) == 1);
   int ox3 = ((zlloc.lx3 & 1) == 1);
@@ -124,27 +124,52 @@ void ZoomData::StoreEFieldsFromFiner(int zmc, int zm, DvceEdgeFld4D<Real> efld) 
   int ccie = ccis + hcnx1 - 1;
   int ccje = ccjs + hcnx2 - 1;
   int ccke = ccks + hcnx3 - 1;
+  auto zregion = pzoom->old_zregion; // previous zoom region
   // update coarse electric fields
   par_for("zoom-finer-efld1",DevExeSpace(), ccks, ccke+1, ccjs, ccje+1, ccis, ccie,
   KOKKOS_LAMBDA(const int ck, const int cj, const int ci) {
-    int fi = 2*(ci - ccis) + cis;
-    int fj = 2*(cj - ccjs) + cjs;
-    int fk = 2*(ck - ccks) + cks;
-    e1(zmc,ck,cj,ci) = 0.5*(ef1(zm,fk,fj,fi) + ef1(zm,fk,fj,fi+1));
+    Real x1v = CellCenterX(ci-cis, cnx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2f = LeftEdgeX  (cj-cjs, cnx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real x3f = LeftEdgeX  (ck-cks, cnx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if (zregion.IsInRegion(x1v, x2f, x3f)) {
+      int fi = 2*(ci - ccis) + cis;
+      int fj = 2*(cj - ccjs) + cjs;
+      int fk = 2*(ck - ccks) + cks;
+      e1(zm,ck,cj,ci) = 0.5*(ef1(zmf,fk,fj,fi) + ef1(zmf,fk,fj,fi+1));
+    }
+    if (zregion.IsInRegion(x1v, x2f, x3f, zregion.r_in_flux)) {
+      e1(zm,ck,cj,ci) = 0.0;
+    }
   });
   par_for("zoom-finer-efld2",DevExeSpace(), ccks, ccke+1, ccjs, ccje, ccis, ccie+1,
   KOKKOS_LAMBDA(const int ck, const int cj, const int ci) {
-    int fi = 2*(ci - ccis) + cis;
-    int fj = 2*(cj - ccjs) + cjs;
-    int fk = 2*(ck - ccks) + cks;
-    e2(zmc,ck,cj,ci) = 0.5*(ef2(zm,fk,fj,fi) + ef2(zm,fk,fj+1,fi));
+    Real x1f = LeftEdgeX  (ci-cis, cnx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2v = CellCenterX(cj-cjs, cnx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real x3f = LeftEdgeX  (ck-cks, cnx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if (zregion.IsInRegion(x1f, x2v, x3f)) {
+      int fi = 2*(ci - ccis) + cis;
+      int fj = 2*(cj - ccjs) + cjs;
+      int fk = 2*(ck - ccks) + cks;
+      e2(zm,ck,cj,ci) = 0.5*(ef2(zmf,fk,fj,fi) + ef2(zmf,fk,fj+1,fi));
+    }
+    if (zregion.IsInRegion(x1f, x2v, x3f, zregion.r_in_flux)) {
+      e2(zm,ck,cj,ci) = 0.0;
+    }
   });
   par_for("zoom-finer-efld3",DevExeSpace(), ccks, ccke, ccjs, ccje+1, ccis, ccie+1,
   KOKKOS_LAMBDA(const int ck, const int cj, const int ci) {
-    int fi = 2*(ci - ccis) + cis;
-    int fj = 2*(cj - ccjs) + cjs;
-    int fk = 2*(ck - ccks) + cks;
-    e3(zmc,ck,cj,ci) = 0.5*(ef3(zm,fk,fj,fi) + ef3(zm,fk+1,fj,fi));
+    Real x1f = LeftEdgeX  (ci-cis, cnx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2f = LeftEdgeX  (cj-cjs, cnx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real x3v = CellCenterX(ck-cks, cnx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if (zregion.IsInRegion(x1f, x2f, x3v)) {
+      int fi = 2*(ci - ccis) + cis;
+      int fj = 2*(cj - ccjs) + cjs;
+      int fk = 2*(ck - ccks) + cks;
+      e3(zm,ck,cj,ci) = 0.5*(ef3(zmf,fk,fj,fi) + ef3(zmf,fk+1,fj,fi));
+    }
+    if (zregion.IsInRegion(x1f, x2f, x3v, zregion.r_in_flux)) {
+      e3(zm,ck,cj,ci) = 0.0;
+    }
   });
   return;
 }
@@ -229,11 +254,6 @@ void ZoomData::LimitEFields() {
     max_e2 = fmax(max_e2, fabs(e02(zm,ck,cj,ci)));
     max_e3 = fmax(max_e3, fabs(e03(zm,ck,cj,ci)));
   }, Kokkos::Max<Real>(emax1), Kokkos::Max<Real>(emax2),Kokkos::Max<Real>(emax3));
-  if (pzoom->verbose && global_variable::my_rank == 0) {
-    std::cout << "ZoomData::LimitEFields: local emax1=" << emax1
-              << ", emax2=" << emax2
-              << ", emax3=" << emax3 << std::endl;
-  }
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, &emax1, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE, &emax2, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
@@ -253,37 +273,6 @@ void ZoomData::LimitEFields() {
   auto de2 = delta_efld.x2e;
   auto de3 = delta_efld.x3e;
   int nzmbm1 = pzmesh->nzmb_thisdvce - 1;
-  // debug info
-  emax1 = 0.0;
-  emax2 = 0.0;
-  emax3 = 0.0;
-  Kokkos::parallel_reduce("zoom-max-delta-emf",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &max_de1, Real &max_de2, Real &max_de3) {
-    int zm = (idx)/nkji;
-    int ck = (idx - zm*nkji)/nji;
-    int cj = (idx - zm*nkji - ck*nji)/ni;
-    int ci = (idx - zm*nkji - ck*nji - cj*ni) + cis;
-    ck += cks;
-    cj += cjs;
-    max_de1 = fmax(max_de1, fabs(de1(zm,ck,cj,ci)));
-    max_de2 = fmax(max_de2, fabs(de2(zm,ck,cj,ci)));
-    max_de3 = fmax(max_de3, fabs(de3(zm,ck,cj,ci)));
-  }, Kokkos::Max<Real>(emax1), Kokkos::Max<Real>(emax2),Kokkos::Max<Real>(emax3));
-  if (pzoom->verbose && global_variable::my_rank == 0) {
-    std::cout << "ZoomData::LimitEFields: pre-limit local de1max=" << emax1
-              << ", de2max=" << emax2
-              << ", de3max=" << emax3 << std::endl;
-  }
-#if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, &emax1, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &emax2, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &emax3, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-#endif
-  if (pzoom->verbose && global_variable::my_rank == 0) {
-    std::cout << "ZoomData::LimitEFields: pre-limit de1max=" << emax1
-              << ", de2max=" << emax2
-              << ", de3max=" << emax3 << std::endl;
-  }
 
   par_for("zoom-limit-efld",DevExeSpace(), 0, nzmbm1, cks,cke+1, cjs,cje+1, cis,cie+1,
   KOKKOS_LAMBDA(const int zm, const int ck, const int cj, const int ci) {
@@ -298,38 +287,6 @@ void ZoomData::LimitEFields() {
       de3(zm,ck,cj,ci) = copysign(emax, de3(zm,ck,cj,ci));
     }
   });
-
-  // debug info
-  emax1 = 0.0;
-  emax2 = 0.0;
-  emax3 = 0.0;
-  Kokkos::parallel_reduce("zoom-max-delta-emf",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &max_de1, Real &max_de2, Real &max_de3) {
-    int zm = (idx)/nkji;
-    int ck = (idx - zm*nkji)/nji;
-    int cj = (idx - zm*nkji - ck*nji)/ni;
-    int ci = (idx - zm*nkji - ck*nji - cj*ni) + cis;
-    ck += cks;
-    cj += cjs;
-    max_de1 = fmax(max_de1, fabs(de1(zm,ck,cj,ci)));
-    max_de2 = fmax(max_de2, fabs(de2(zm,ck,cj,ci)));
-    max_de3 = fmax(max_de3, fabs(de3(zm,ck,cj,ci)));
-  }, Kokkos::Max<Real>(emax1), Kokkos::Max<Real>(emax2),Kokkos::Max<Real>(emax3));
-  if (pzoom->verbose && global_variable::my_rank == 0) {
-    std::cout << "ZoomData::LimitEFields: post-limit local de1max=" << emax1
-              << ", de2max=" << emax2
-              << ", de3max=" << emax3 << std::endl;
-  }
-#if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, &emax1, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &emax2, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &emax3, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-#endif
-  if (pzoom->verbose && global_variable::my_rank == 0) {
-    std::cout << "ZoomData::LimitEFields: post-limit de1max=" << emax1
-              << ", de2max=" << emax2
-              << ", de3max=" << emax3 << std::endl;
-  }
 
   return;
 }
