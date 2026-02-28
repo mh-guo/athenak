@@ -71,7 +71,6 @@ void AddSNR(Mesh *pm);
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_srcs_func = AddUserSrcs;
   user_hist_func = UserHistOutput;
-  user_work_in_cycle_func = UserWorkInCycle;
   bool add_snr = pin->GetOrAddBoolean("problem", "add_snr", true);
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   Real rout = psnr.rout = pin->GetReal("problem", "radius");
@@ -335,6 +334,7 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
 //! \fn void UserWorkInCycle()
 //! \brief User work in cycle.
 
+// TODO(@mhguo): remove or add this function to some place
 void UserWorkInCycle(Driver *pdriver, Mesh *pm) {
   if (psnr.snr_dt>0.0 && pm->time > psnr.snr_next && pm->time < psnr.snr_tend) {
     psnr.snr_next += psnr.snr_dt;

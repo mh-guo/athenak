@@ -20,7 +20,6 @@ using UserBoundaryFnPtr = void (*)(Mesh* pm);
 using UserSrctermFnPtr = void (*)(Mesh* pm, const Real bdt);
 using UserRefinementFnPtr = void (*)(MeshBlockPack* pmbp);
 using UserHistoryFnPtr = void (*)(HistoryData *pdata, Mesh *pm);
-using UserWorkInCycleFnPtr = void (*)(Driver *pdriver, Mesh *pm);
 
 //----------------------------------------------------------------------------------------
 //! \class ProblemGenerator
@@ -43,9 +42,6 @@ class ProblemGenerator {
   // true if user history outputs are specified
   bool user_hist;
 
-  // true if user work in cycle are specified
-  bool user_work_in_cycle;
-
   // vector of SphericalGrid objects for analysis
   std::vector<std::unique_ptr<SphericalGrid>> spherical_grids;
 
@@ -57,7 +53,6 @@ class ProblemGenerator {
   UserSrctermFnPtr user_srcs_func=nullptr;
   UserRefinementFnPtr user_ref_func=nullptr;
   UserHistoryFnPtr user_hist_func=nullptr;
-  UserWorkInCycleFnPtr user_work_in_cycle_func=nullptr;
 
   // predefined problem generator functions (default test suite)
   void CallProblemGenerator(ParameterInput *pin, bool is_restart);
