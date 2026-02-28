@@ -8,6 +8,10 @@
 //! \file mhd.hpp
 //  \brief definitions for MHD class
 
+#include <map>
+#include <memory>
+#include <string>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
@@ -20,6 +24,10 @@ class Viscosity;
 class Resistivity;
 class Conduction;
 class SourceTerms;
+class OrbitalAdvectionCC;
+class OrbitalAdvectionFC;
+class ShearingBoxCC;
+class ShearingBoxFC;
 class Driver;
 
 // function ptr for user-defined MHD boundary functions enrolled in problem generator
@@ -37,23 +45,35 @@ enum class MHD_RSolver {advect, llf, hlle, hlld, roe,   // non-relativistic
 //  \brief container to hold TaskIDs of all mhd tasks
 
 struct MHDTaskIDs {
+  TaskID savest;
   TaskID irecv;
   TaskID copyu;
   TaskID flux;
   TaskID sendf;
   TaskID recvf;
-  TaskID expl;
+  TaskID rkupdt;
+  TaskID srctrms;
+  TaskID sendu_oa;
+  TaskID recvu_oa;
   TaskID restu;
   TaskID sendu;
   TaskID recvu;
+  TaskID sendu_shr;
+  TaskID recvu_shr;
   TaskID efld;
+  TaskID efldsrc;
   TaskID sende;
   TaskID recve;
   TaskID ct;
+  TaskID sendb_oa;
+  TaskID recvb_oa;
   TaskID restb;
   TaskID sendb;
   TaskID recvb;
+  TaskID sendb_shr;
+  TaskID recvb_shr;
   TaskID bcs;
+  TaskID prol;
   TaskID c2p;
   TaskID newdt;
   TaskID csend;
@@ -83,12 +103,19 @@ class MHD {
   DvceArray5D<Real> bcc0;  // cell-centered magnetic fields
 
   DvceArray5D<Real> coarse_u0;    // conserved variables on 2x coarser grid (for SMR/AMR)
+  DvceArray5D<Real> coarse_w0;    // primitive variables on 2x coarser grid (for SMR/AMR)
   DvceFaceFld4D<Real> coarse_b0;  // face-centered B-field on 2x coarser grid
 
   // Objects containing boundary communication buffers and routines for u and b
-  BoundaryValuesCC *pbval_u;
-  BoundaryValuesFC *pbval_b;
+  MeshBoundaryValuesCC *pbval_u;
+  MeshBoundaryValuesFC *pbval_b;
   MHDBoundaryFnPtr MHDBoundaryFunc[6];
+
+  // Orbital advection and shearing box BCs
+  OrbitalAdvectionCC *porb_u = nullptr;
+  OrbitalAdvectionFC *porb_b = nullptr;
+  ShearingBoxCC *psbox_u = nullptr;
+  ShearingBoxFC *psbox_b = nullptr;
 
   // Object(s) for extra physics (viscosity, resistivity, thermal conduction, srcterms)
   Viscosity *pvisc = nullptr;
@@ -101,7 +128,16 @@ class MHD {
   DvceFaceFld4D<Real> b1;     // face-centered magnetic fields, second register
   DvceFaceFld5D<Real> uflx;   // fluxes of conserved quantities on cell faces
   DvceEdgeFld4D<Real> efld;   // edge-centered electric fields (fluxes of B)
+  // temporary variables used to store face-centered electric fields returned by RS
+  DvceArray4D<Real> e3x1, e2x1;
+  DvceArray4D<Real> e1x2, e3x2;
+  DvceArray4D<Real> e2x3, e1x3;
   Real dtnew;
+
+  // following used for time derivatives in computation of jcon
+  bool wbcc_saved = false;
+  DvceArray5D<Real> wsaved;
+  DvceArray5D<Real> bccsaved;
 
   // following used for FOFC algorithm
   DvceArray4D<bool> fofc;  // flag for each cell to indicate if FOFC is needed
@@ -111,29 +147,43 @@ class MHD {
   MHDTaskIDs id;
 
   // functions...
-  void AssembleMHDTasks(TaskList &start, TaskList &run, TaskList &end);
-  // ...in start task list
+  void SetSaveWBcc();
+  void AssembleMHDTasks(std::map<std::string, std::shared_ptr<TaskList>> tl);
+  // ...in "before_timeintegrator" task list
+  TaskStatus SaveMHDState(Driver *d, int stage);
+  // ...in "before_stagen_tl" task list
   TaskStatus InitRecv(Driver *d, int stage);
-  // ...in run task list
+  // ...in "stagen_tl" task list
   TaskStatus CopyCons(Driver *d, int stage);
   TaskStatus Fluxes(Driver *d, int stage);
   TaskStatus SendFlux(Driver *d, int stage);
   TaskStatus RecvFlux(Driver *d, int stage);
-  TaskStatus ExpRKUpdate(Driver *d, int stage);
+  TaskStatus RKUpdate(Driver *d, int stage);
+  TaskStatus MHDSrcTerms(Driver *d, int stage);
+  TaskStatus SendU_OA(Driver *d, int stage);
+  TaskStatus RecvU_OA(Driver *d, int stage);
   TaskStatus RestrictU(Driver *d, int stage);
   TaskStatus SendU(Driver *d, int stage);
   TaskStatus RecvU(Driver *d, int stage);
+  TaskStatus SendU_Shr(Driver *d, int stage);
+  TaskStatus RecvU_Shr(Driver *d, int stage);
   TaskStatus CornerE(Driver *d, int stage);
+  TaskStatus EFieldSrc(Driver *d, int stage);
   TaskStatus SendE(Driver *d, int stage);
   TaskStatus RecvE(Driver *d, int stage);
   TaskStatus CT(Driver *d, int stage);
+  TaskStatus SendB_OA(Driver *d, int stage);
+  TaskStatus RecvB_OA(Driver *d, int stage);
   TaskStatus RestrictB(Driver *d, int stage);
   TaskStatus SendB(Driver *d, int stage);
   TaskStatus RecvB(Driver *d, int stage);
-  TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage); // file in mhd/bvals dir
+  TaskStatus SendB_Shr(Driver *d, int stage);
+  TaskStatus RecvB_Shr(Driver *d, int stage);
+  TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage);
+  TaskStatus Prolongate(Driver* pdrive, int stage);
   TaskStatus ConToPrim(Driver *d, int stage);
   TaskStatus NewTimeStep(Driver *d, int stage);
-  // ...in end task list
+  // ...in "after_stagen_tl" task list
   TaskStatus ClearSend(Driver *d, int stage);
   TaskStatus ClearRecv(Driver *d, int stage);  // also in Driver::Initialize
 
@@ -144,14 +194,12 @@ class MHD {
   // first-order flux correction
   void FOFC(Driver *d, int stage);
 
+  DvceArray5D<Real> utest, bcctest;  // scratch arrays for FOFC
+
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD
   // temporary variables used to store face-centered electric fields returned by RS
-  DvceArray4D<Real> e3x1, e2x1;
-  DvceArray4D<Real> e1x2, e3x2;
-  DvceArray4D<Real> e2x3, e1x3;
   DvceArray4D<Real> e1_cc, e2_cc, e3_cc;
-  DvceArray5D<Real> utest, bcctest;  // scratch arrays for FOFC
 };
 
 } // namespace mhd

@@ -10,6 +10,7 @@
 
 #include <limits>
 #include <iostream>
+#include <algorithm> // min
 
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
@@ -45,6 +46,7 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
   auto &mbsize = pmy_pack->pmb->mb_size;
   auto &is_special_relativistic_ = pmy_pack->pcoord->is_special_relativistic;
   auto &is_general_relativistic_ = pmy_pack->pcoord->is_general_relativistic;
+  auto &is_dynamical_relativistic_ = pmy_pack->pcoord->is_dynamical_relativistic;
   const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
@@ -81,7 +83,7 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
       Real max_dv1 = 0.0, max_dv2 = 0.0, max_dv3 = 0.0;
 
       // timestep in GR MHD
-      if (is_general_relativistic_) {
+      if (is_general_relativistic_ || is_dynamical_relativistic_) {
         max_dv1 = 1.0;
         max_dv2 = 1.0;
         max_dv3 = 1.0;
@@ -122,27 +124,22 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
         Real &w_by = bcc0_(m,IBY,k,j,i);
         Real &w_bz = bcc0_(m,IBZ,k,j,i);
         Real cf;
-        Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
         if (eos.is_ideal) {
+          Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
           cf = eos.IdealMHDFastSpeed(w_d, p, w_bx, w_by, w_bz);
+          max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cf;
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_by, w_bz, w_bx);
+          max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cf;
+          cf = eos.IdealMHDFastSpeed(w_d, p, w_bz, w_bx, w_by);
+          max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
         } else {
           cf = eos.IdealMHDFastSpeed(w_d, w_bx, w_by, w_bz);
-        }
-        max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cf;
-
-        if (eos.is_ideal) {
-          cf = eos.IdealMHDFastSpeed(w_d, p, w_by, w_bz, w_bx);
-        } else {
+          max_dv1 = fabs(w0_(m,IVX,k,j,i)) + cf;
           cf = eos.IdealMHDFastSpeed(w_d, w_by, w_bz, w_bx);
-        }
-        max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cf;
-
-        if (eos.is_ideal) {
-          cf = eos.IdealMHDFastSpeed(w_d, p, w_bz, w_bx, w_by);
-        } else {
+          max_dv2 = fabs(w0_(m,IVY,k,j,i)) + cf;
           cf = eos.IdealMHDFastSpeed(w_d, w_bz, w_bx, w_by);
+          max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
         }
-        max_dv3 = fabs(w0_(m,IVZ,k,j,i)) + cf;
       }
 
       min_dt1 = fmin((mbsize.d_view(m).dx1/max_dv1), min_dt1);
@@ -161,7 +158,7 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
     pcond->NewTimeStep(w0, peos->eos_data);
   }
   // compute source terms timestep
-  if (psrc->source_terms_enabled) {
+  if (psrc != nullptr) {
     psrc->NewTimeStep(w0, peos->eos_data);
   }
 

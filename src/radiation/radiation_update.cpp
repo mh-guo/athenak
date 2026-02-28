@@ -25,7 +25,7 @@ namespace radiation {
 //! \fn  void Hydro::Update
 //  \brief Explicit RK update of flux divergence and physical source terms
 
-TaskStatus Radiation::ExpRKUpdate(Driver *pdriver, int stage) {
+TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is, &ie = indcs.ie;
   int &js = indcs.js, &je = indcs.je;
@@ -88,13 +88,6 @@ TaskStatus Radiation::ExpRKUpdate(Driver *pdriver, int stage) {
       if (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_) { i0_(m,n,k,j,i) = 0.0; }
     }
   });
-
-  // add beam source term, if any
-  if (psrc->source_terms_enabled) {
-    if (psrc->beam)  psrc->AddBeamSource(i0_, beta_dt);
-  }
-
   return TaskStatus::complete;
 }
-
 } // namespace radiation

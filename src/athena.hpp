@@ -1,9 +1,9 @@
 #ifndef ATHENA_HPP_
 #define ATHENA_HPP_
 //========================================================================================
-// AthenaXXX astrophysical plasma code
-// Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
-// Licensed under the 3-clause BSD License (the "LICENSE")
+// AthenaK astrophysical fluid dynamics & numerical relativity code
+// Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the AthenaK collaboration
+// Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
 //! \file athena.hpp
 //  \brief contains Athena++ general purpose types, structures, enums, etc.
@@ -12,6 +12,7 @@
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_DualView.hpp>
+#include <Kokkos_Macros.hpp>
 #include "config.hpp"
 
 //----------------------------------------------------------------------------------------
@@ -36,20 +37,33 @@ using Real = double;
 //----------------------------------------------------------------------------------------
 // general purpose macros (never modified)
 
-// number of bits needed to store MeshBlock local ID in each rank in an integer.  Thus
-// maximum number of MBs per rank is 2^(NUM_BITS_LID).  Limit is set by MPI tag limit
+// number of bits used to store MeshBlock local ID in MPI message tags.  Thus maximum
+// number of MBs per rank is 2^(NUM_BITS_LID). This limit is required because the MPI
+// standard requires signed int tag, with MPI_TAG_UB>=2^15-1 = 32,767 (inclusive). In fact
+// virtually every library allows this limit to be exceeded. As of 2025, the Intel MPI
+// library provided the most stringent limit of 20 bits per tag. Six bits are needed to
+// store the buffer ID, leaving NUM_BITS_LID=14
 #define NUM_BITS_LID 14
 
 #define SQR(x) ( (x)*(x) )
 #define SIGN(x) ( ((x) < 0.0) ? -1.0 : 1.0 )
+#define ONE_3RD  0.3333333333333333
+#define TWO_3RDS 0.6666666666666667
+#define FOUR_3RDS 1.333333333333333
 
 // data types only used in physics modules (defined here to avoid recursive dependencies)
 
 // constants that determine array index of Hydro/MHD variables
 // array indices for conserved: density, momemtum, total energy
-enum VariableIndex {IDN=0, IM1=1, IVX=1, IM2=2, IVY=2, IM3=3, IVZ=3, IEN=4, ITM=4};
+enum VariableIndex {IDN=0, IM1=1, IVX=1, IM2=2, IVY=2, IM3=3, IVZ=3, IEN=4,
+                    ITM=4, IPR=4, IYF=5};
 // array indices for components of magnetic field
-enum BFieldIndex {IBX=0, IBY=1, IBZ=2};
+enum BFieldIndex {IBX=0, IBY=1, IBZ=2, NMAG=3};
+// array indices for metric matrices in GR
+enum MetricIndex {I00=0, I01=1, I02=2, I03=3, I11=4, I12=5, I13=6, I22=7, I23=8, I33=9,
+                  NMETRIC=10};
+// array indices for particle arrays
+enum ParticlesIndex {PGID=0, PTAG=1, IPX=0, IPVX=1, IPY=2, IPVY=3, IPZ=4, IPVZ=5};
 
 // integer constants to specify spatial reconstruction methods
 enum ReconstructionMethod {dc, plm, ppm4, ppmx, wenoz};
@@ -123,6 +137,10 @@ template <typename T>
 using DualArray2D = Kokkos::DualView<T **, LayoutWrapper, DevMemSpace>;
 template <typename T>
 using DualArray3D = Kokkos::DualView<T ***, LayoutWrapper, DevMemSpace>;
+template <typename T>
+using DualArray4D = Kokkos::DualView<T ****, LayoutWrapper, DevMemSpace>;
+template <typename T>
+using DualArray5D = Kokkos::DualView<T *****, LayoutWrapper, DevMemSpace>;
 
 // template declarations for construction of Kokkos::View in scratch memory
 template <typename T>
@@ -203,6 +221,20 @@ struct DvceEdgeFld4D {
 // 1D-range, and thread teams for use with inner vector threads. Experiments in K-Athena
 // and Parthenon indicate that 1D-range policy is generally faster than multidimensional
 // MD-range policy, so the latter is not used.
+//------------------------------
+// 1D loop using Kokkos 1D Range
+template <typename Function>
+inline void par_for(const std::string &name, DevExeSpace exec_space,
+                    const int &il, const int &iu, const Function &function) {
+  // compute total number of elements and call Kokkos::parallel_for()
+  const int ni = iu - il + 1;
+  Kokkos::parallel_for(name, Kokkos::RangePolicy<>(exec_space, 0, ni),
+  KOKKOS_LAMBDA(const int &idx) {
+    // compute i indices of thread and call function
+    int i = (idx) + il;
+    function(i);
+  });
+}
 
 //------------------------------
 // 2D loop using Kokkos 1D Range

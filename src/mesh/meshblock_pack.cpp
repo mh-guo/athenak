@@ -8,6 +8,8 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <utility>
+#include <memory>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -15,13 +17,18 @@
 #include "driver/driver.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
-#include "adm/adm.hpp"
+#include "ion-neutral/ion-neutral.hpp"
+#include "coordinates/adm.hpp"
+#include "z4c/tmunu.hpp"
+#include "tasklist/numerical_relativity.hpp"
 #include "z4c/z4c.hpp"
-#include "ion-neutral/ion_neutral.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
+#include "z4c/cce/cce.hpp"
 #include "diffusion/viscosity.hpp"
 #include "diffusion/resistivity.hpp"
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "particles/particles.hpp"
 #include "units/units.hpp"
 #include "meshblock_pack.hpp"
 
@@ -33,21 +40,37 @@ MeshBlockPack::MeshBlockPack(Mesh *pm, int igids, int igide) :
   gids(igids),
   gide(igide),
   nmb_thispack(igide - igids + 1) {
+  // create map for task lists
+  tl_map.insert(std::make_pair("before_timeintegrator",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("after_timeintegrator",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("before_stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("after_stagen",std::make_shared<TaskList>()));
 }
 
 //----------------------------------------------------------------------------------------
 // MeshBlock destructor
 
 MeshBlockPack::~MeshBlockPack() {
-  delete pcoord;
-  if (phydro != nullptr) {delete phydro;}
-  if (pmhd   != nullptr) {delete pmhd;}
+  if (ppart  != nullptr) {delete ppart;}
+  if (pnr    != nullptr) {delete pnr;}
+  if (pdyngr != nullptr) {delete pdyngr;}
+  if (ptmunu != nullptr) {delete ptmunu;}
   if (padm   != nullptr) {delete padm;}
-  if (pz4c   != nullptr) {delete pz4c;}
-  if (prad   != nullptr) {delete prad;}
+  if (pz4c   != nullptr) {
+    delete pz4c;
+    // cce dump
+    for (auto cce : pz4c_cce) {
+      delete cce;
+    }
+    pz4c_cce.resize(0);
+  }
   if (pturb  != nullptr) {delete pturb;}
+  if (prad   != nullptr) {delete prad;}
+  if (pmhd   != nullptr) {delete pmhd;}
+  if (phydro != nullptr) {delete phydro;}
   if (punit  != nullptr) {delete punit;}
-  // must be last, since it calls ~BoundaryValues() which (MPI) uses pmy_pack->pmb->nnghbr
+  delete pcoord;
   delete pmb;
 }
 
@@ -79,7 +102,7 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   int nphysics = 0;
   TaskID none(0);
 
-  // (1) Units
+  // (1) Units.  Create first so that they can be used in other physics constructors
   // Default units are simply code units
   if (pin->DoesBlockExist("units")) {
     punit = new units::Units(pin);
@@ -93,8 +116,9 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   if (pin->DoesBlockExist("hydro")) {
     phydro = new hydro::Hydro(this, pin);
     nphysics++;
-    if (!(pin->DoesBlockExist("mhd")) && !(pin->DoesBlockExist("radiation"))) {
-      phydro->AssembleHydroTasks(start_tl, run_tl, end_tl);
+    if (!(pin->DoesBlockExist("mhd")) && !(pin->DoesBlockExist("radiation")) &&
+        !(pin->DoesBlockExist("adm")) && !(pin->DoesBlockExist("z4c")) ) {
+      phydro->AssembleHydroTasks(tl_map);
     }
   } else {
     phydro = nullptr;
@@ -105,8 +129,9 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   if (pin->DoesBlockExist("mhd")) {
     pmhd = new mhd::MHD(this, pin);
     nphysics++;
-    if (!(pin->DoesBlockExist("hydro")) && !(pin->DoesBlockExist("radiation"))) {
-      pmhd->AssembleMHDTasks(start_tl, run_tl, end_tl);
+    if (!(pin->DoesBlockExist("hydro")) && !(pin->DoesBlockExist("radiation")) &&
+        !(pin->DoesBlockExist("adm")) && !(pin->DoesBlockExist("z4c")) ) {
+      pmhd->AssembleMHDTasks(tl_map);
     }
   } else {
     pmhd = nullptr;
@@ -117,8 +142,9 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   // both defined as well.
   if (pin->DoesBlockExist("ion-neutral")) {
     pionn = new ion_neutral::IonNeutral(this, pin);   // construct new MHD object
-    if (pin->DoesBlockExist("hydro") && pin->DoesBlockExist("mhd")) {
-      pionn->AssembleIonNeutralTasks(start_tl, run_tl, end_tl);
+    if (pin->DoesBlockExist("hydro") && pin->DoesBlockExist("mhd") &&
+        !(pin->DoesBlockExist("adm")) && !(pin->DoesBlockExist("z4c")) ) {
+      pionn->AssembleIonNeutralTasks(tl_map);
       nphysics++;
     } else {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -142,7 +168,7 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   if (pin->DoesBlockExist("radiation")) {
     prad = new radiation::Radiation(this, pin);
     nphysics++;
-    prad->AssembleRadiationTasks(start_tl, run_tl, end_tl);
+    prad->AssembleRadTasks(tl_map);
   } else {
     prad = nullptr;
   }
@@ -155,8 +181,8 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   // task lists respectively.
   if (pin->DoesBlockExist("turb_driving")) {
     pturb = new TurbulenceDriver(this, pin);
-    pturb->IncludeInitializeModesTask(operator_split_tl, none);
-    pturb->IncludeAddForcingTask(run_tl, none);
+    pturb->IncludeInitializeModesTask(tl_map["before_timeintegrator"], none);
+    pturb->IncludeAddForcingTask(tl_map["stagen"], none);
   } else {
     pturb = nullptr;
   }
@@ -165,8 +191,16 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   // Create Z4c and ADM physics module.
   if (pin->DoesBlockExist("z4c")) {
     pz4c = new z4c::Z4c(this, pin);
-    pz4c->AssembleZ4cTasks(start_tl, run_tl, end_tl);
     padm = new adm::ADM(this, pin);
+    ptmunu = nullptr;
+    // init cce dump
+    pz4c_cce.reserve(0);
+    int ncce = pin->GetOrAddInteger("cce", "num_radii", 0);
+    pz4c_cce.reserve(ncce);// 10 different components for each radius
+    for(int n = 0; n < ncce; ++n) {
+      // NOTE: these names are used for pittnull code, so DON'T change the convention
+      pz4c_cce.push_back(new z4c::CCE(pmesh, pin,n));
+    }
     nphysics++;
   } else {
     pz4c = nullptr;
@@ -177,12 +211,32 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     }
   }
 
-  // Units
-  // Default units are cgs units
-  if (pin->DoesBlockExist("units")) {
-    punit = new units::Units(pin);
+  // (8) Dynamical Spacetime and Matter (MHD TODO)
+  if ((pin->DoesBlockExist("z4c") || pin->DoesBlockExist("adm")) &&
+      (pin->DoesBlockExist("hydro")) ) {
+    std::cout << "Dynamical metric and hydro not compatible; use MHD instead  "
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if ((pin->DoesBlockExist("z4c") || pin->DoesBlockExist("adm")) &&
+      (pin->DoesBlockExist("mhd")) ) {
+    pdyngr = dyngr::BuildDynGRMHD(this, pin);
+    ptmunu = new Tmunu(this, pin);
+  }
+
+  if (pz4c != nullptr || padm != nullptr) {
+    pnr = new numrel::NumericalRelativity(this, pin);
+    pnr->AssembleNumericalRelativityTasks(tl_map);
+  }
+
+  // (9) PARTICLES
+  // Create particles module.  Create tasklist.
+  if (pin->DoesBlockExist("particles")) {
+    ppart = new particles::Particles(this, pin);
+    ppart->AssembleTasks(tl_map);
+    nphysics++;
   } else {
-    punit = nullptr;
+    ppart = nullptr;
   }
 
   // Check that at least ONE is requested and initialized.

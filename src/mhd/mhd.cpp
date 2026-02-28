@@ -18,6 +18,8 @@
 #include "diffusion/resistivity.hpp"
 #include "diffusion/conduction.hpp"
 #include "srcterms/srcterms.hpp"
+#include "shearing_box/shearing_box.hpp"
+#include "shearing_box/orbital_advection.hpp"
 #include "bvals/bvals.hpp"
 #include "mhd/mhd.hpp"
 
@@ -32,11 +34,14 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     b0("B_fc",1,1,1,1),
     bcc0("B_cc",1,1,1,1,1),
     coarse_u0("ccons",1,1,1,1,1),
+    coarse_w0("cprim",1,1,1,1,1),
     coarse_b0("cB_fc",1,1,1,1),
     u1("cons1",1,1,1,1,1),
     b1("B_fc1",1,1,1,1),
     uflx("uflx",1,1,1,1,1),
     efld("efld",1,1,1,1),
+    wsaved("wsaved",1,1,1,1,1),
+    bccsaved("bccsaved",1,1,1,1,1),
     e3x1("e3x1",1,1,1,1),
     e2x1("e2x1",1,1,1,1),
     e1x2("e1x2",1,1,1,1),
@@ -49,12 +54,18 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     utest("utest",1,1,1,1,1),
     bcctest("bcctest",1,1,1,1,1),
     fofc("fofc",1,1,1,1) {
+  // Total number of MeshBlocks on this rank to be used in array dimensioning
+  int nmb = std::max((ppack->nmb_thispack), (ppack->pmesh->nmb_maxperrank));
+
   // (1) construct EOS object (no default)
-  {std::string eqn_of_state = pin->GetString("mhd","eos");
+  std::string eqn_of_state = pin->GetString("mhd","eos");
   // ideal gas EOS
   if (eqn_of_state.compare("ideal") == 0) {
     if (pmy_pack->pcoord->is_special_relativistic) {
       peos = new IdealSRMHD(ppack, pin);
+    } else if (pmy_pack->pcoord->is_dynamical_relativistic) {
+      // DynGRMHD uses PrimitiveSolver instead, so use a no-op here.
+      peos = new NoOpDynGRMHD(ppack, pin);
     } else if (pmy_pack->pcoord->is_general_relativistic) {
       peos = new IdealGRMHD(ppack, pin);
     } else {
@@ -66,8 +77,8 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
   } else if (eqn_of_state.compare("isothermal") == 0) {
     if (pmy_pack->pcoord->is_special_relativistic ||
         pmy_pack->pcoord->is_general_relativistic) {
-      std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
-                << "<mhd> eos = isothermal cannot be used with SR/GR" << std::endl;
+      std::cout <<"### FATAL ERROR in "<< __FILE__ <<" at line "<< __LINE__ << std::endl
+                <<"<mhd> eos = isothermal cannot be used with SR/GR"<< std::endl;
       std::exit(EXIT_FAILURE);
     } else {
       peos = new IsothermalMHD(ppack, pin);
@@ -76,10 +87,9 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
 
   // EOS string not recognized
   } else {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<mhd> eos = '" << eqn_of_state << "' not implemented" << std::endl;
+    std::cout <<"### FATAL ERROR in "<< __FILE__ <<" at line "<< __LINE__ << std::endl
+              <<"<mhd> eos = '"<< eqn_of_state <<"' not implemented"<< std::endl;
     std::exit(EXIT_FAILURE);
-  }
   }
 
   // (2) Initialize scalars, diffusion, source terms
@@ -107,8 +117,10 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     pcond = nullptr;
   }
 
-  // Source terms (constructor parses input file to initialize only srcterms needed)
-  psrc = new SourceTerms("mhd", ppack, pin);
+  // Source terms (if needed)
+  if (pin->DoesBlockExist("mhd_srcterms")) {
+    psrc = new SourceTerms("mhd_srcterms", ppack, pin);
+  }
 
   // (3) read time-evolution option [already error checked in driver constructor]
   // Then initialize memory and algorithms for reconstruction and Riemann solvers
@@ -117,41 +129,52 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
   // allocate memory for conserved and primitive variables
   // With AMR, maximum size of Views are limited by total device memory through an input
   // parameter, which in turn limits max number of MBs that can be created.
-  int nmb = std::max((ppack->nmb_thispack), (ppack->pmesh->nmb_maxperrank));
-  auto &indcs = pmy_pack->pmesh->mb_indcs;
   {
-  int ncells1 = indcs.nx1 + 2*(indcs.ng);
-  int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
-  int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-  Kokkos::realloc(u0,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
-  Kokkos::realloc(w0,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(u0,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
+    Kokkos::realloc(w0,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
 
-  // allocate memory for face-centered and cell-centered magnetic fields
-  Kokkos::realloc(bcc0,   nmb, 3, ncells3, ncells2, ncells1);
-  Kokkos::realloc(b0.x1f, nmb, ncells3, ncells2, ncells1+1);
-  Kokkos::realloc(b0.x2f, nmb, ncells3, ncells2+1, ncells1);
-  Kokkos::realloc(b0.x3f, nmb, ncells3+1, ncells2, ncells1);
+    // allocate memory for face-centered and cell-centered magnetic fields
+    Kokkos::realloc(bcc0,   nmb, 3, ncells3, ncells2, ncells1);
+    Kokkos::realloc(b0.x1f, nmb, ncells3, ncells2, ncells1+1);
+    Kokkos::realloc(b0.x2f, nmb, ncells3, ncells2+1, ncells1);
+    Kokkos::realloc(b0.x3f, nmb, ncells3+1, ncells2, ncells1);
   }
 
   // allocate memory for conserved variables on coarse mesh
   if (ppack->pmesh->multilevel) {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
-    int nccells1 = indcs.cnx1 + 2*(indcs.ng);
-    int nccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
-    int nccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(coarse_u0, nmb, (nmhd+nscalars), nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_b0.x1f, nmb, nccells3, nccells2, nccells1+1);
-    Kokkos::realloc(coarse_b0.x2f, nmb, nccells3, nccells2+1, nccells1);
-    Kokkos::realloc(coarse_b0.x3f, nmb, nccells3+1, nccells2, nccells1);
+    int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
+    int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
+    int n_ccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(coarse_u0, nmb, (nmhd+nscalars), n_ccells3, n_ccells2, n_ccells1);
+    Kokkos::realloc(coarse_w0, nmb, (nmhd+nscalars), n_ccells3, n_ccells2, n_ccells1);
+    Kokkos::realloc(coarse_b0.x1f, nmb, n_ccells3, n_ccells2, n_ccells1+1);
+    Kokkos::realloc(coarse_b0.x2f, nmb, n_ccells3, n_ccells2+1, n_ccells1);
+    Kokkos::realloc(coarse_b0.x3f, nmb, n_ccells3+1, n_ccells2, n_ccells1);
   }
 
-  // allocate boundary buffers for conserved (cell-centered) variables
-  pbval_u = new BoundaryValuesCC(ppack, pin);
+  // allocate boundary buffers for conserved (cell-centered) and face-centered variables
+  pbval_u = new MeshBoundaryValuesCC(ppack, pin, false);
   pbval_u->InitializeBuffers((nmhd+nscalars));
-
-  // allocate boundary buffers for face-centered magnetic field
-  pbval_b = new BoundaryValuesFC(ppack, pin);
+  pbval_b = new MeshBoundaryValuesFC(ppack, pin);
   pbval_b->InitializeBuffers(3);
+
+  // Orbital advection and shearing box BCs (if requested in input file)
+  if (pin->DoesBlockExist("shearing_box")) {
+    porb_u = new OrbitalAdvectionCC(ppack, pin, (nmhd+nscalars));
+    porb_b = new OrbitalAdvectionFC(ppack, pin);
+    psbox_u = new ShearingBoxCC(ppack, pin, (nmhd+nscalars));
+    psbox_b = new ShearingBoxFC(ppack, pin);
+  } else {
+    porb_u = nullptr;
+    porb_b = nullptr;
+    psbox_u = nullptr;
+    psbox_b = nullptr;
+  }
 
   // for time-evolving problems, continue to construct methods, allocate arrays
   if (evolution_t.compare("stationary") != 0) {
@@ -159,12 +182,13 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     use_fofc = pin->GetOrAddBoolean("mhd","fofc",false);
 
     // select reconstruction method (default PLM)
-    {std::string xorder = pin->GetOrAddString("mhd","reconstruct","plm");
+    std::string xorder = pin->GetOrAddString("mhd","reconstruct","plm");
     if (xorder.compare("dc") == 0) {
       recon_method = ReconstructionMethod::dc;
     } else if (xorder.compare("plm") == 0) {
       recon_method = ReconstructionMethod::plm;
       // check that nghost > 2 with PLM+FOFC
+      auto &indcs = pmy_pack->pmesh->mb_indcs;
       if (use_fofc && indcs.ng < 3) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
           << std::endl << "FOFC and " << xorder << " reconstruction requires at "
@@ -175,6 +199,7 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
                xorder.compare("ppmx") == 0 ||
                xorder.compare("wenoz") == 0) {
       // check that nghost > 2
+      auto &indcs = pmy_pack->pmesh->mb_indcs;
       if (indcs.ng < 3) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
           << std::endl << xorder << " reconstruction requires at least 3 ghost zones, "
@@ -201,10 +226,9 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
                 << std::endl;
       std::exit(EXIT_FAILURE);
     }
-    }
 
     // select Riemann solver (no default).  Test for compatibility of options
-    {std::string rsolver = pin->GetString("mhd","rsolver");
+    std::string rsolver = pin->GetString("mhd","rsolver");
     // Special relativistic solvers
     if (pmy_pack->pcoord->is_special_relativistic) {
       if (evolution_t.compare("dynamic") == 0) {
@@ -278,42 +302,46 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
         std::exit(EXIT_FAILURE);
       }
     }
-    }
 
-    // allocate second registers
-    int ncells1 = indcs.nx1 + 2*(indcs.ng);
-    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
-    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(u1,     nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
-    Kokkos::realloc(b1.x1f, nmb, ncells3, ncells2, ncells1+1);
-    Kokkos::realloc(b1.x2f, nmb, ncells3, ncells2+1, ncells1);
-    Kokkos::realloc(b1.x3f, nmb, ncells3+1, ncells2, ncells1);
+    // Final memory allocations
+    {
+      // allocate second registers
+      auto &indcs = pmy_pack->pmesh->mb_indcs;
+      int ncells1 = indcs.nx1 + 2*(indcs.ng);
+      int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+      int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+      Kokkos::realloc(u1,     nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
+      Kokkos::realloc(b1.x1f, nmb, ncells3, ncells2, ncells1+1);
+      Kokkos::realloc(b1.x2f, nmb, ncells3, ncells2+1, ncells1);
+      Kokkos::realloc(b1.x3f, nmb, ncells3+1, ncells2, ncells1);
 
-    // allocate fluxes, electric fields
-    Kokkos::realloc(uflx.x1f, nmb, (nmhd+nscalars), ncells3, ncells2, ncells1+1);
-    Kokkos::realloc(uflx.x2f, nmb, (nmhd+nscalars), ncells3, ncells2+1, ncells1);
-    Kokkos::realloc(uflx.x3f, nmb, (nmhd+nscalars), ncells3+1, ncells2, ncells1);
-    Kokkos::realloc(efld.x1e, nmb, ncells3+1, ncells2+1, ncells1);
-    Kokkos::realloc(efld.x2e, nmb, ncells3+1, ncells2, ncells1+1);
-    Kokkos::realloc(efld.x3e, nmb, ncells3, ncells2+1, ncells1+1);
+      // allocate fluxes, electric fields
+      Kokkos::realloc(uflx.x1f, nmb, (nmhd+nscalars), ncells3, ncells2, ncells1+1);
+      Kokkos::realloc(uflx.x2f, nmb, (nmhd+nscalars), ncells3, ncells2+1, ncells1);
+      Kokkos::realloc(uflx.x3f, nmb, (nmhd+nscalars), ncells3+1, ncells2, ncells1);
+      Kokkos::realloc(efld.x1e, nmb, ncells3+1, ncells2+1, ncells1);
+      Kokkos::realloc(efld.x2e, nmb, ncells3+1, ncells2, ncells1+1);
+      Kokkos::realloc(efld.x3e, nmb, ncells3, ncells2+1, ncells1+1);
 
-    // allocate scratch arrays for face- and cell-centered E used in CornerE
-    Kokkos::realloc(e3x1, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e2x1, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e1x2, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e3x2, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e2x3, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e1x3, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e1_cc, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e2_cc, nmb, ncells3, ncells2, ncells1);
-    Kokkos::realloc(e3_cc, nmb, ncells3, ncells2, ncells1);
+      // allocate scratch arrays for face- and cell-centered E used in CornerE
+      Kokkos::realloc(e3x1, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e2x1, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e1x2, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e3x2, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e2x3, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e1x3, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e1_cc, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e2_cc, nmb, ncells3, ncells2, ncells1);
+      Kokkos::realloc(e3_cc, nmb, ncells3, ncells2, ncells1);
 
-    // allocate array of flags used with FOFC
-    if (use_fofc) {
-      Kokkos::realloc(fofc,    nmb, ncells3, ncells2, ncells1);
-      Kokkos::realloc(utest,   nmb, nmhd, ncells3, ncells2, ncells1);
-      Kokkos::realloc(bcctest, nmb, 3,    ncells3, ncells2, ncells1);
-      Kokkos::deep_copy(fofc, false);
+      // allocate array of flags used with FOFC
+      if (use_fofc) {
+        int nvars = (pmy_pack->pcoord->is_dynamical_relativistic) ? nmhd+nscalars : nmhd;
+        Kokkos::realloc(fofc,    nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(utest,   nmb, nvars, ncells3, ncells2, ncells1);
+        Kokkos::realloc(bcctest, nmb, 3,    ncells3, ncells2, ncells1);
+        Kokkos::deep_copy(fofc, false);
+      }
     }
   }
 }
@@ -322,13 +350,34 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
 // destructor
 
 MHD::~MHD() {
-  delete peos;
-  delete pbval_u;
+  if (psbox_b != nullptr) {delete psbox_b;}
+  if (psbox_u != nullptr) {delete psbox_u;}
+  if (porb_b != nullptr) {delete porb_b;}
+  if (porb_u != nullptr) {delete porb_u;}
   delete pbval_b;
-  if (pvisc != nullptr) {delete pvisc;}
-  if (presist!= nullptr) {delete presist;}
-  if (pcond != nullptr) {delete pcond;}
+  delete pbval_u;
   if (psrc!= nullptr) {delete psrc;}
+  if (pcond != nullptr) {delete pcond;}
+  if (presist!= nullptr) {delete presist;}
+  if (pvisc != nullptr) {delete pvisc;}
+  delete peos;
+}
+
+//----------------------------------------------------------------------------------------
+// SetSaveWBcc:  set flag to save primitives and cell-centered B field, e.g., for jcon
+
+void MHD::SetSaveWBcc() {
+  int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int ncells1 = indcs.nx1 + 2*(indcs.ng);
+  int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+  int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+
+  // allocated saved arrays for time derivatives
+  Kokkos::realloc(wsaved,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
+  Kokkos::realloc(bccsaved, nmb, 3,               ncells3, ncells2, ncells1);
+
+  wbcc_saved = true;
 }
 
 } // namespace mhd

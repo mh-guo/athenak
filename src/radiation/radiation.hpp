@@ -8,6 +8,10 @@
 //! \file radiation.hpp
 //  \brief definitions for Radiation class
 
+#include <map>
+#include <memory>
+#include <string>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
@@ -28,7 +32,7 @@ struct RadiationTaskIDs {
   TaskID rad_irecv;
   TaskID mhd_irecv;
   TaskID hyd_irecv;
-  TaskID copycons;
+  TaskID copyu;
   TaskID rad_flux;
   TaskID mhd_flux;
   TaskID hyd_flux;
@@ -38,10 +42,13 @@ struct RadiationTaskIDs {
   TaskID rad_recvf;
   TaskID mhd_recvf;
   TaskID hyd_recvf;
-  TaskID rad_expl;
-  TaskID mhd_expl;
-  TaskID hyd_expl;
+  TaskID rad_rkupdt;
+  TaskID mhd_rkupdt;
+  TaskID hyd_rkupdt;
   TaskID rad_src;
+  TaskID mhd_src;
+  TaskID hyd_src;
+  TaskID rad_coupl;
   TaskID rad_resti;
   TaskID hyd_restu;
   TaskID mhd_restu;
@@ -59,6 +66,9 @@ struct RadiationTaskIDs {
   TaskID mhd_sendb;
   TaskID mhd_recvb;
   TaskID bcs;
+  TaskID rad_prol;
+  TaskID mhd_prol;
+  TaskID hyd_prol;
   TaskID mhd_c2p;
   TaskID hyd_c2p;
   TaskID rad_csend;
@@ -84,17 +94,18 @@ class Radiation {
   bool is_mhd_enabled;
   bool are_units_enabled;
 
-  // Radiation source term parameters
-  bool rad_source;     // flag to enable/disable radiation source term
-  bool fixed_fluid;    // flag to enable/disable fluid integration
-  bool affect_fluid;   // flag to enable/disable feedback of rad field on fluid
-  Real arad;           // radiation constant
-  Real kappa_a;        // constant Rosseland mean absoprtion coefficient
-  Real kappa_s;        // constant scattering coefficient
-  bool power_opacity;  // flag to enable Kramer's law opacity for kappa_a
+  // Radiation coupling term parameters
+  bool rad_source;          // flag to enable/disable radiation source term
+  bool fixed_fluid;         // flag to enable/disable fluid integration
+  bool affect_fluid;        // flag to enable/disable feedback of rad field on fluid
+  Real arad;                // radiation constant
+  Real kappa_a;             // constant Rosseland mean absoprtion coefficient
+  Real kappa_s;             // constant scattering coefficient
+  Real kappa_p;             // Planck - Rosseland mean coefficient
+  bool power_opacity;       // flag to enable Kramer's law opacity for kappa_a
+  bool is_compton_enabled;  // flag to enable/disable compton
 
-  // Extra physics (i.e., other srcterms)
-  bool beam_source;
+  // radiation source term (i.e., beam)
   SourceTerms *psrc = nullptr;
 
   // Angular mesh
@@ -120,13 +131,12 @@ class Radiation {
   DvceArray5D<Real> coarse_i0;  // intensities on 2x coarser grid (for SMR/AMR)
 
   // Boundary communication buffers and functions for i
-  BoundaryValuesCC *pbval_i;
+  MeshBoundaryValuesCC *pbval_i;
 
   // following only used for time-evolving flow
   DvceArray5D<Real> i1;         // intensity at intermediate step
   DvceFaceFld5D<Real> iflx;     // spatial fluxes on zone faces
   DvceArray5D<Real> divfa;      // angular flux divergence
-  DvceArray5D<bool> beam_mask;  // boolean mask used for beam source term
   Real dtnew;
 
   // reconstruction method
@@ -136,22 +146,24 @@ class Radiation {
   RadiationTaskIDs id;
 
   // functions...
-  void AssembleRadiationTasks(TaskList &start, TaskList &run, TaskList &end);
-  // ...in start task list
+  void AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>> tl);
+  // ...in "before_stagen_tl" task list
   TaskStatus InitRecv(Driver *d, int stage);
-  // ...in run task list
+  // ...in "stagen_tl" task list
   TaskStatus CopyCons(Driver *d, int stage);
   TaskStatus CalculateFluxes(Driver *d, int stage);
   TaskStatus SendFlux(Driver *d, int stage);
   TaskStatus RecvFlux(Driver *d, int stage);
-  TaskStatus ExpRKUpdate(Driver *d, int stage);
-  TaskStatus AddRadiationSourceTerm(Driver *d, int stage);
+  TaskStatus RKUpdate(Driver *d, int stage);
+  TaskStatus RadSrcTerms(Driver *d, int stage);
+  TaskStatus RadFluidCoupling(Driver *d, int stage);
   TaskStatus RestrictI(Driver *d, int stage);
   TaskStatus SendI(Driver *d, int stage);
   TaskStatus RecvI(Driver *d, int stage);
   TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage);
+  TaskStatus Prolongate(Driver* pdrive, int stage);
   TaskStatus NewTimeStep(Driver *d, int stage);
-  // ...in end task list
+  // ...in "after_stagen_tl" task list
   TaskStatus ClearSend(Driver *d, int stage);
   TaskStatus ClearRecv(Driver *d, int stage);
 

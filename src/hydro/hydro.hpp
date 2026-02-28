@@ -8,6 +8,10 @@
 //! \file hydro.hpp
 //  \brief definitions for Hydro class
 
+#include <map>
+#include <memory>
+#include <string>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
@@ -19,6 +23,8 @@ class Coordinates;
 class Viscosity;
 class Conduction;
 class SourceTerms;
+class OrbitalAdvectionCC;
+class ShearingBoxCC;
 class Driver;
 
 // constants that enumerate Hydro Riemann Solver options
@@ -36,11 +42,17 @@ struct HydroTaskIDs {
   TaskID flux;
   TaskID sendf;
   TaskID recvf;
-  TaskID expl;
+  TaskID rkupdt;
+  TaskID srctrms;
+  TaskID sendu_oa;
+  TaskID recvu_oa;
   TaskID restu;
   TaskID sendu;
   TaskID recvu;
+  TaskID sendu_shr;
+  TaskID recvu_shr;
   TaskID bcs;
+  TaskID prol;
   TaskID c2p;
   TaskID newdt;
   TaskID csend;
@@ -68,9 +80,14 @@ class Hydro {
   DvceArray5D<Real> w0;   // primitive variables
 
   DvceArray5D<Real> coarse_u0;  // conserved variables on 2x coarser grid (for SMR/AMR)
+  DvceArray5D<Real> coarse_w0;  // primitive variables on 2x coarser grid (for SMR/AMR)
 
   // Boundary communication buffers and functions for u
-  BoundaryValuesCC *pbval_u;
+  MeshBoundaryValuesCC *pbval_u;
+
+  // Orbital advection and shearing box BCs
+  OrbitalAdvectionCC *porb_u = nullptr;
+  ShearingBoxCC *psbox_u = nullptr;
 
   // Object(s) for extra physics (viscosity, thermal conduction, srcterms)
   Viscosity *pvisc = nullptr;
@@ -85,27 +102,34 @@ class Hydro {
   // following used for FOFC
   DvceArray4D<bool> fofc;  // flag for each cell to indicate if FOFC is needed
   bool use_fofc = false;   // flag to enable FOFC
+  DvceArray5D<Real> utest;  // scratch array for FOFC
 
   // container to hold names of TaskIDs
   HydroTaskIDs id;
 
   // functions...
-  void AssembleHydroTasks(TaskList &start, TaskList &run, TaskList &end);
-  // ...in start task list
+  void AssembleHydroTasks(std::map<std::string, std::shared_ptr<TaskList>> tl);
+  // ...in "before_stagen_tl" list
   TaskStatus InitRecv(Driver *d, int stage);
-  // ...in run task list
+  // ...in "stagen_tl" list
   TaskStatus CopyCons(Driver *d, int stage);
   TaskStatus Fluxes(Driver *d, int stage);
   TaskStatus SendFlux(Driver *d, int stage);
   TaskStatus RecvFlux(Driver *d, int stage);
-  TaskStatus ExpRKUpdate(Driver *d, int stage);
+  TaskStatus RKUpdate(Driver *d, int stage);
+  TaskStatus HydroSrcTerms(Driver *d, int stage);
+  TaskStatus SendU_OA(Driver *d, int stage);
+  TaskStatus RecvU_OA(Driver *d, int stage);
   TaskStatus RestrictU(Driver *d, int stage);
   TaskStatus SendU(Driver *d, int stage);
   TaskStatus RecvU(Driver *d, int stage);
-  TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage);  // file in hydro/bvals dir
+  TaskStatus SendU_Shr(Driver *d, int stage);
+  TaskStatus RecvU_Shr(Driver *d, int stage);
+  TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage);
+  TaskStatus Prolongate(Driver* pdrive, int stage);
   TaskStatus ConToPrim(Driver *d, int stage);
   TaskStatus NewTimeStep(Driver *d, int stage);
-  // ...in end task list
+  // ...in "after_stagen_tl" list
   TaskStatus ClearSend(Driver *d, int stage);
   TaskStatus ClearRecv(Driver *d, int stage);  // also in Driver::Initialize
 
@@ -118,7 +142,6 @@ class Hydro {
 
  private:
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Hydro
-  DvceArray5D<Real> utest;  // scratch array for FOFC
 };
 
 } // namespace hydro

@@ -19,10 +19,6 @@
 #include "mesh/mesh.hpp"
 #include "parameter_input.hpp"
 
-// forward declarations
-class TurbulenceDriver;
-class Driver;
-
 //----------------------------------------------------------------------------------------
 //! \class SourceTerms
 //! \brief data and functions for physical source terms
@@ -34,45 +30,43 @@ class SourceTerms {
 
   // data
   // flags for various source terms
-  bool source_terms_enabled;  // true if any srcterm included
   bool const_accel;
-  bool shearing_box;
   bool ism_cooling;
   bool rel_cooling;
-  bool beam;
+  bool rad_beam;
 
   // new timestep
   Real dtnew;
 
-  // magnitude and direction of constant accel
-  Real const_accel_val;
-  int const_accel_dir;
+  // data for constant accel
+  Real const_accel_val;   // magnitude of accn
+  int const_accel_dir;    // direction of accn
 
-  // Orbital frequency and shear rate for shearing box
-  Real omega0, qshear;
-
-  // heating rate used with ISM cooling
+  // data for ISM cooling
   Real hrate;
   Real mu_h;
 
-  // cooling rate used with relativistic cooling
+  // data for relativistic cooling
   Real crate_rel;
   Real cpower_rel;
 
-  // beam source
-  Real dii_dt;
+  // data for radiation beam source
+  Real dii_dt;            // injection rate
+  Real pos1, pos2, pos3;  // position of source
+  Real dir1, dir2, dir3;  // direction of source
+  Real width, spread;     // spatial width of source region, spread in angles
 
   // functions
-  void AddConstantAccel(DvceArray5D<Real> &u0,const DvceArray5D<Real> &w0,const Real dt);
-  void AddShearingBox(DvceArray5D<Real> &u0,const DvceArray5D<Real> &w0,const Real dt);
-  void AddShearingBox(DvceArray5D<Real> &u0, const DvceArray5D<Real> &w0,
-                      const DvceArray5D<Real> &bcc, const Real dt);
-  void AddSBoxEField(const DvceFaceFld4D<Real> &b0, DvceEdgeFld4D<Real> &efld);
-  void AddISMCooling(DvceArray5D<Real> &u0, const DvceArray5D<Real> &w0,
-                     const EOS_Data &eos, const Real dt);
-  void AddRelCooling(DvceArray5D<Real> &u0, const DvceArray5D<Real> &w0,
-                     const EOS_Data &eos, const Real dt);
-  void AddBeamSource(DvceArray5D<Real> &i0, const Real dt);
+  void ApplySrcTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos,
+                     const Real bdt, DvceArray5D<Real> &u0);
+  void ApplySrcTerms(DvceArray5D<Real> &i0, const Real bdt);
+  void ConstantAccel(const DvceArray5D<Real> &w0, const EOS_Data &eos,
+                     const Real bdt, DvceArray5D<Real> &u0);
+  void ISMCooling(const DvceArray5D<Real> &w0, const EOS_Data &eos,
+                  const Real bdt, DvceArray5D<Real> &u0);
+  void RelCooling(const DvceArray5D<Real> &w0, const EOS_Data &eos,
+                  const Real bdt, DvceArray5D<Real> &u0);
+  void BeamSource(DvceArray5D<Real> &i0, const Real bdt);
   void NewTimeStep(const DvceArray5D<Real> &w0, const EOS_Data &eos);
 
  private:

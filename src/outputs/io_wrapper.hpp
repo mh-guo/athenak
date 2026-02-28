@@ -8,6 +8,7 @@
 //! \file io_wrapper.hpp
 //  \brief defines a set of small wrapper functions for MPI versus serial outputs.
 
+#include <string>
 #include <cstdio>
 #include "athena.hpp"
 
@@ -30,29 +31,32 @@ class IOWrapper {
 #endif
   ~IOWrapper() {}
   // nested type definition of strongly typed/scoped enum in class definition
-  enum class FileMode {read, write};
+  enum class FileMode {read, write, append};
 
   // wrapper functions for basic I/O tasks
-  int Open(const char* fname, FileMode rw);
-  std::size_t Read_bytes(void *buf, IOWrapperSizeT size, IOWrapperSizeT count);
+  int Open(const char* fname, FileMode rw, bool single_file_per_rank = false);
+  std::size_t Read_bytes(void *buf, IOWrapperSizeT size, IOWrapperSizeT count,
+                         bool single_file_per_rank = false);
   std::size_t Read_bytes_at(void *buf, IOWrapperSizeT size, IOWrapperSizeT count,
-                            IOWrapperSizeT offset);
+                            IOWrapperSizeT offset, bool single_file_per_rank = false);
   std::size_t Read_bytes_at_all(void *buf, IOWrapperSizeT size, IOWrapperSizeT count,
-                                IOWrapperSizeT offset);
-  std::size_t Write_bytes(const void *buf, IOWrapperSizeT size, IOWrapperSizeT count);
-  std::size_t Write_bytes_at(const void *buf, IOWrapperSizeT size, IOWrapperSizeT count,
-                             IOWrapperSizeT offset);
-  std::size_t Write_bytes_at_all(const void *buf,IOWrapperSizeT size,IOWrapperSizeT count,
-                                 IOWrapperSizeT offset);
-  std::size_t Read_Reals(void *buf, IOWrapperSizeT count);
-  std::size_t Read_Reals_at(void *buf, IOWrapperSizeT count, IOWrapperSizeT offset);
-  std::size_t Read_Reals_at_all(void *buf, IOWrapperSizeT count, IOWrapperSizeT offset);
-  std::size_t Write_Reals(const void *buf, IOWrapperSizeT count);
-  std::size_t Write_Reals_at(const void *buf, IOWrapperSizeT cnt, IOWrapperSizeT off);
-  std::size_t Write_Reals_at_all(const void *buf, IOWrapperSizeT cnt, IOWrapperSizeT off);
-  int Close();
-  int Seek(IOWrapperSizeT offset);
-  IOWrapperSizeT GetPosition();
+                                IOWrapperSizeT offset, bool single_file_per_rank = false);
+  std::size_t Write_any_type(const void *buf, IOWrapperSizeT count, std::string type,
+                             bool single_file_per_rank = false);
+  std::size_t Write_any_type_at(const void *buf, IOWrapperSizeT cnt,IOWrapperSizeT offset,
+                                std::string datatype, bool single_file_per_rank = false);
+  std::size_t Write_any_type_at_all(const void *buf, IOWrapperSizeT cnt,
+                                    IOWrapperSizeT offset, std::string datatype,
+                                    bool single_file_per_rank = false);
+  std::size_t Read_Reals(void *buf, IOWrapperSizeT count,
+                         bool single_file_per_rank = false);
+  std::size_t Read_Reals_at(void *buf, IOWrapperSizeT count, IOWrapperSizeT offset,
+                            bool single_file_per_rank = false);
+  std::size_t Read_Reals_at_all(void *buf, IOWrapperSizeT count, IOWrapperSizeT offset,
+                                bool single_file_per_rank = false);
+  int Close(bool single_file_per_rank = false);
+  int Seek(IOWrapperSizeT offset, bool single_file_per_rank = false);
+  IOWrapperSizeT GetPosition(bool single_file_per_rank = false);
 
  private:
   IOWrapperFile fh_;

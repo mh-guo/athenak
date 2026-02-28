@@ -10,12 +10,15 @@
 #include <cinttypes>
 #include <iostream>
 #include <limits>
+#include <cstdio> // fclose
+#include <string> // string
 
 #include "athena.hpp"
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "refinement_criteria.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
@@ -23,6 +26,7 @@
 #include "diffusion/resistivity.hpp"
 #include "diffusion/conduction.hpp"
 #include "radiation/radiation.hpp"
+#include "particles/particles.hpp"
 #include "srcterms/srcterms.hpp"
 #include "outputs/io_wrapper.hpp"
 
@@ -31,18 +35,24 @@
 #endif
 
 //----------------------------------------------------------------------------------------
-// Mesh constructor: initializes some mesh variables at start of calculation using
-// parameters in input file.  Most objects in Mesh are constructed in the BuildTree()
-// function, so that they can store a pointer to the Mesh which can be reliably referenced
-// only after the Mesh constructor has finished
+//! Mesh constructor:
+//! initializes some mesh variables using parameters in input file.
+//! The MeshBlockPack, MeshRefinement, and ShearingBox objects are constructed in
+//! BuildTreeFromScratch() or BuildTreeFromRestart()
+//! The MeshBlockTree and ProblemGenerator objects are constructed in main().
+//! This is so that they can store a pointer to the Mesh which can be reliably referenced
+//! only after the Mesh constructor has finished.
 
 Mesh::Mesh(ParameterInput *pin) :
   one_d(false),
   two_d(false),
   three_d(false),
   multi_d(false),
-  shearing_periodic(false),
-  strictly_periodic(true) {
+  strictly_periodic(true),
+  nmb_packs_thisrank(1),
+  nprtcl_thisrank(0),
+  nprtcl_total(0),
+  dtold(0.) {
   // Set physical size and number of cells in mesh (root level)
   mesh_size.x1min = pin->GetReal("mesh", "x1min");
   mesh_size.x1max = pin->GetReal("mesh", "x1max");
@@ -80,10 +90,29 @@ Mesh::Mesh(ParameterInput *pin) :
   if (mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
     strictly_periodic = false;
   }
-  // Check if x1 boundaries are shearing periodic. When flag set to true, shearing BCs
-  // will be called in ApplyPhysicalBCs() in Hydro and/or MHD.
-  if (mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::periodic) {
-    shearing_periodic = pin->GetOrAddBoolean("mesh","speriodic",false);
+
+  // Error checks if one of x1 boundaries set to shear_periodic.
+  if (mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::shear_periodic &&
+      mesh_bcs[BoundaryFace::outer_x1] == BoundaryFlag::shear_periodic) {
+    if (one_d) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Shear Periodic Boundaries require 2D or 3D" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (!(pin->DoesBlockExist("shearing_box"))) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Shear Periodic Boundaries set but no <shearing_box>"
+                << " block in input file" <<std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else if ((mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::shear_periodic &&
+              mesh_bcs[BoundaryFace::outer_x1] != BoundaryFlag::shear_periodic) ||
+             (mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::shear_periodic &&
+              mesh_bcs[BoundaryFace::outer_x1] == BoundaryFlag::shear_periodic)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "In shearing box, both x1 bcs must be shear_periodic"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
   }
 
   // Set BC flags for ix2/ox2 boundaries and error check
@@ -99,6 +128,13 @@ Mesh::Mesh(ParameterInput *pin) :
     }
     if (mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic) {
       strictly_periodic = false;
+    }
+    if (mesh_bcs[BoundaryFace::inner_x2] == BoundaryFlag::shear_periodic ||
+        mesh_bcs[BoundaryFace::outer_x2] == BoundaryFlag::shear_periodic) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Shear Periodic Boundaries cannot be applied in x2"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
     }
   } else {
     // ix2/ox2 BC flags set to undef for 1D problems
@@ -120,6 +156,13 @@ Mesh::Mesh(ParameterInput *pin) :
     if (mesh_bcs[BoundaryFace::inner_x3] != BoundaryFlag::periodic) {
       strictly_periodic = false;
     }
+    if (mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::shear_periodic ||
+        mesh_bcs[BoundaryFace::outer_x3] == BoundaryFlag::shear_periodic) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Shear Periodic Boundaries cannot be applied in x3"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
   } else {
     // ix3/ox3 BC flags set to undef for 1D or 2D problems
     mesh_bcs[BoundaryFace::inner_x3] = BoundaryFlag::undef;
@@ -132,6 +175,14 @@ Mesh::Mesh(ParameterInput *pin) :
     ?  true : false;
   multilevel = (adaptive || pin->GetString("mesh_refinement","refinement") == "static")
     ?  true : false;
+
+  // FIXME: The shearing box is not currently compatible with SMR/AMR
+  if (multilevel && pin->DoesBlockExist("shearing_box")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+        << "Shearing box is not currently compatible with mesh refinement"
+        << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // error check physical size of mesh (root level) from input file.
   if (mesh_size.x1max <= mesh_size.x1min) {
@@ -285,15 +336,16 @@ Mesh::Mesh(ParameterInput *pin) :
 // destructor
 
 Mesh::~Mesh() {
-  delete [] cost_eachmb;
-  delete [] rank_eachmb;
-  delete [] lloc_eachmb;
-  delete [] gids_eachrank;
-  delete [] nmb_eachrank;
-  delete pmb_pack;
+  if (pmb_pack->ppart != nullptr) {delete [] nprtcl_eachrank;}
   if (multilevel) {
     delete pmr;
   }
+  delete pmb_pack;
+  delete [] nmb_eachrank;
+  delete [] gids_eachrank;
+  delete [] lloc_eachmb;
+  delete [] rank_eachmb;
+  delete [] cost_eachmb;
 }
 
 //----------------------------------------------------------------------------------------
@@ -315,7 +367,7 @@ void Mesh::PrintMeshDiagnostics() {
   if ((max_level - root_level) > 1) {
     int nb_per_plevel[max_level];      // NOLINT(runtime/arrays)
     float cost_per_plevel[max_level];  // NOLINT(runtime/arrays)
-    for (int i=0; i<=max_level; ++i) {
+    for (int i=0; i<max_level; ++i) {
       nb_per_plevel[i] = 0;
       cost_per_plevel[i] = 0.0;
     }
@@ -462,6 +514,10 @@ BoundaryFlag Mesh::GetBoundaryFlag(const std::string& input_string) {
     return BoundaryFlag::user;
   } else if (input_string == "periodic") {
     return BoundaryFlag::periodic;
+  } else if (input_string == "vacuum") {
+    return BoundaryFlag::vacuum;
+  } else if (input_string == "shear_periodic") {
+    return BoundaryFlag::shear_periodic;
   } else if (input_string == "undef") {
     return BoundaryFlag::undef;
   } else {
@@ -494,6 +550,8 @@ std::string Mesh::GetBoundaryString(BoundaryFlag input_flag) {
       return "user";
     case BoundaryFlag::periodic:
       return "periodic";
+    case BoundaryFlag::shear_periodic:
+      return "shear_periodic";
     case BoundaryFlag::undef:
       return "undef";
     default:
@@ -509,6 +567,12 @@ std::string Mesh::GetBoundaryString(BoundaryFlag input_flag) {
 // \fn Mesh::NewTimeStep()
 
 void Mesh::NewTimeStep(const Real tlim) {
+  // save old timestep
+  dtold = dt;
+  if (dt == std::numeric_limits<float>::max()) {
+    dtold = 0.;
+  }
+
   // cycle over all MeshBlocks on this rank and find minimum dt
   // Requires at least ONE of the physics modules to be defined.
   // limit increase in timestep to 2x old value
@@ -526,7 +590,7 @@ void Mesh::NewTimeStep(const Real tlim) {
       dt = std::min(dt, (cfl_no)*(pmb_pack->phydro->pcond->dtnew) );
     }
     // source terms timestep
-    if (pmb_pack->phydro->psrc->source_terms_enabled) {
+    if (pmb_pack->phydro->psrc != nullptr) {
       dt = std::min(dt, (cfl_no)*(pmb_pack->phydro->psrc->dtnew) );
     }
   }
@@ -546,7 +610,7 @@ void Mesh::NewTimeStep(const Real tlim) {
       dt = std::min(dt, (cfl_no)*(pmb_pack->pmhd->pcond->dtnew) );
     }
     // source terms timestep
-    if (pmb_pack->pmhd->psrc->source_terms_enabled) {
+    if (pmb_pack->pmhd->psrc != nullptr) {
       dt = std::min(dt, (cfl_no)*(pmb_pack->pmhd->psrc->dtnew) );
     }
   }
@@ -558,6 +622,10 @@ void Mesh::NewTimeStep(const Real tlim) {
   if (pmb_pack->prad != nullptr) {
     dt = std::min(dt, (cfl_no)*(pmb_pack->prad->dtnew) );
   }
+  // Particles timestep
+  if (pmb_pack->ppart != nullptr) {
+    dt = std::min(dt, (pmb_pack->ppart->dtnew) );
+  }
 
 #if MPI_PARALLEL_ENABLED
   // get minimum dt over all MPI ranks
@@ -568,4 +636,43 @@ void Mesh::NewTimeStep(const Real tlim) {
   if ( (time < tlim) && ((time + dt) > tlim) ) {dt = tlim - time;}
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+// \fn Mesh::AddCoordinatesAndPhysics
+
+void Mesh::AddCoordinatesAndPhysics(ParameterInput *pinput) {
+  // cycle over MeshBlockPacks on this rank and add Coordinates and Physics
+  for (int n=0; n<nmb_packs_thisrank; ++n) {
+    pmb_pack->AddCoordinates(pinput);
+    pmb_pack->AddPhysics(pinput);
+  }
+
+  // Determine total number of particles across all ranks
+  particles::Particles *ppart = pmb_pack->ppart;
+  if (ppart != nullptr) {
+    nprtcl_thisrank = 0;
+    for (int n=0; n<nmb_packs_thisrank; ++n) {
+      nprtcl_thisrank += pmb_pack->ppart->nprtcl_thispack;
+    }
+    nprtcl_eachrank = new int[global_variable::nranks];
+    nprtcl_eachrank[global_variable::my_rank] = nprtcl_thisrank;
+#if MPI_PARALLEL_ENABLED
+    // Share number of particles on each rank with all ranks
+    MPI_Allgather(&nprtcl_thisrank,1,MPI_INT,nprtcl_eachrank,1,MPI_INT,MPI_COMM_WORLD);
+#endif
+    for (int n=0; n<global_variable::nranks; ++n) {
+      nprtcl_total += nprtcl_eachrank[n];
+    }
+    // Assign particle IDs
+    if (pmb_pack->ppart != nullptr) {
+      pmb_pack->ppart->CreateParticleTags(pinput);
+    }
+  }
+
+  // Call RefinementCriteria constructor to enroll various criteria
+  // can only be done after the physics modules have been constructed
+  if (adaptive) {
+    pmr->pmrc = new RefinementCriteria(this, pinput);
+  }
 }

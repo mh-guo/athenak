@@ -8,13 +8,14 @@
 
 #include <iostream>
 #include <cinttypes>
+#include <limits> // numeric_limits<>
+#include <memory> // make_unique<>
 
 #include "athena.hpp"
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh.hpp"
 #include "coordinates/cell_locations.hpp"
-//#include "outputs/io_wrapper.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 
@@ -60,8 +61,9 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
     max_level = 31;
   }
 
-  // For meshes with refinement, construct new nodes for <refinement> blocks in input file
-
+  // Read <refined_region> blocks and construct tree accordingly
+  // These regions can be used with both SMR (in which case they will remain fixed) and
+  // AMR (in which case they may be defined, unless the location refinement criteria used)
   if (multilevel) {
     // error check that number of cells in MeshBlock divisible by two
     if (mb_indcs.nx1 % 2 != 0 ||
@@ -73,10 +75,10 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
       std::exit(EXIT_FAILURE);
     }
 
-    // cycle through ParameterInput list and find "refinement" blocks (SMR), extract data
-    // Expand MeshBlockTree to include "refinement" regions specified in input file:
+    // cycle through ParameterInput list and find "refined_region" blocks, extract data
+    // and expand MeshBlockTree
     for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
-      if (it->block_name.compare(0, 10, "refinement") == 0) {
+      if (it->block_name.compare(0, 14, "refined_region") == 0) {
         RegionSize ref_size;
         ref_size.x1min = pin->GetReal(it->block_name, "x1min");
         ref_size.x1max = pin->GetReal(it->block_name, "x1max");
@@ -101,13 +103,13 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
         // error check parameters in "refinement" blocks
         if (phy_ref_lev < 1) {
           std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "Refinement level must be larger than 0 (root level = 0)"
+              << std::endl <<"<refined_region> level must be larger than 0 (root level=0)"
               << std::endl;
           std::exit(EXIT_FAILURE);
         }
         if (log_ref_lev > max_level) {
           std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "Refinement level exceeds maximum allowed ("
+              << std::endl << "<refined_region> level exceeds maximum allowed ("
               << max_level << ")" << std::endl << "Reduce/specify 'num_levels' in "
               << "<mesh_refinement> input block if using AMR" << std::endl;
           std::exit(EXIT_FAILURE);
@@ -116,7 +118,7 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
             || ref_size.x2min > ref_size.x2max
             || ref_size.x3min > ref_size.x3max)  {
           std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "Invalid refinement region (xmax < xmin in one direction)."
+              << std::endl << "Invalid <refined_region> (xmax < xmin in one direction)."
               << std::endl;
           std::exit(EXIT_FAILURE);
         }
@@ -124,7 +126,7 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
             || ref_size.x2min < mesh_size.x2min || ref_size.x2max > mesh_size.x2max
             || ref_size.x3min < mesh_size.x3min || ref_size.x3max > mesh_size.x3max) {
           std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "Refinement region must be fully contained within root mesh"
+              << std::endl << "<refined_region> must be fully contained within root mesh"
               << std::endl;
           std::exit(EXIT_FAILURE);
         }
@@ -261,6 +263,7 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
   nmb_thisrank = nmb_eachrank[global_variable::my_rank];
 
   pmb_pack = new MeshBlockPack(this, mbp_gids, mbp_gide);
+  nmb_packs_thisrank = 1;
   pmb_pack->AddMeshBlocks(pin);
   pmb_pack->pmb->SetNeighbors(ptree, rank_eachmb);
 
@@ -314,7 +317,8 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
 //! divides grid into MeshBlock(s) for restart runs, using parameters and data read from
 //! restart file.
 
-void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile) {
+void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
+                                                     bool single_file_per_rank) {
   // At this point, the restartfile is already open and the ParameterInput (input file)
   // data has already been read in main(). Thus the file pointer is set to after <par_end>
   IOWrapperSizeT headeroffset = resfile.GetPosition();
@@ -325,18 +329,30 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile) {
     + sizeof(RegionSize) + 2*sizeof(RegionIndcs);
   char *headerdata = new char[headersize];
 
-  if (global_variable::my_rank == 0) { // the master process reads the header data
-    if (resfile.Read_bytes(headerdata, 1, headersize) != headersize) {
+  // the master process reads the header data if single_file_per_rank is false
+  if (global_variable::my_rank == 0 || single_file_per_rank) {
+    IOWrapperSizeT read_size = resfile.Read_bytes(headerdata, 1, headersize,
+                                                  single_file_per_rank);
+    if (read_size != headersize) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "Header size read from restart file is incorrect, "
-                << "restart file is broken." << std::endl;
+                << "expected " << headersize << ", got " << read_size << std::endl;
       exit(EXIT_FAILURE);
     }
   }
 
 #if MPI_PARALLEL_ENABLED
   // then broadcast the header data
-  MPI_Bcast(headerdata, headersize, MPI_CHAR, 0, MPI_COMM_WORLD);
+  if (!single_file_per_rank) {
+    int mpi_err = MPI_Bcast(headerdata, headersize, MPI_CHAR, 0, MPI_COMM_WORLD);
+    if (mpi_err != MPI_SUCCESS) {
+      char error_string[1024];
+      int length_of_error_string;
+      MPI_Error_string(mpi_err, error_string, &length_of_error_string);
+      std::cout << "MPI_Bcast failed with error: " << error_string << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
 #endif
 
   // Now copy mesh data read from restart file into Mesh variables. Order of variables
@@ -389,8 +405,9 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile) {
   // allocate idlist buffer and read list of logical locations and cost
   IOWrapperSizeT listsize = sizeof(LogicalLocation) + sizeof(float);
   char *idlist = new char[listsize*nmb_total];
-  if (global_variable::my_rank == 0) { // only the master process reads the ID list
-    if (resfile.Read_bytes(idlist,listsize,nmb_total) !=
+  // only the master process reads the ID list
+  if (global_variable::my_rank == 0 || single_file_per_rank) {
+    if (resfile.Read_bytes(idlist,listsize,nmb_total,single_file_per_rank) !=
         static_cast<unsigned int>(nmb_total)) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "Incorrect number of MeshBlocks in restart file; "
@@ -400,7 +417,9 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile) {
   }
 #if MPI_PARALLEL_ENABLED
   // then broadcast the ID list
-  MPI_Bcast(idlist, listsize*nmb_total, MPI_CHAR, 0, MPI_COMM_WORLD);
+  if (!single_file_per_rank) {
+    MPI_Bcast(idlist, listsize*nmb_total, MPI_CHAR, 0, MPI_COMM_WORLD);
+  }
 #endif
 
   // everyone sets the logical location and cost lists based on bradcasted data
@@ -437,11 +456,14 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile) {
 
 #ifdef MPI_PARALLEL_ENABLED
   // check there is at least one MeshBlock per MPI rank
-  if (nmb_total < global_variable::nranks) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+  if (!single_file_per_rank) {
+    if (nmb_total < global_variable::nranks) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line "
+        << __LINE__ << std::endl
         << "Fewer MeshBlocks (nmb_total=" << nmb_total << ") than MPI ranks (nranks="
         << global_variable::nranks << ")" << std::endl;
-    std::exit(EXIT_FAILURE);
+      std::exit(EXIT_FAILURE);
+    }
   }
 #endif
 

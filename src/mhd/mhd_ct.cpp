@@ -9,6 +9,7 @@
 // Athena++ headers
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
+#include "srcterms/srcterms.hpp"
 #include "driver/driver.hpp"
 #include "mhd.hpp"
 

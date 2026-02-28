@@ -96,6 +96,8 @@ class Mesh {
   friend class MeshBlockPack;
   friend class MeshBlockTree;
   friend class MeshRefinement;
+  // needs to access tree to find target MB offset by shear
+  friend class ShearingBox;
 
  public:
   explicit Mesh(ParameterInput *pin);
@@ -110,7 +112,6 @@ class Mesh {
 
   bool one_d, two_d, three_d; // flags to indicate 1D or 2D or 3D calculations
   bool multi_d;               // flag to indicate 2D and 3D calculations
-  bool shearing_periodic;     // flag to indicate periodic x1/x2 boundaries are sheared
   bool multilevel;            // true for SMR and AMR
   bool adaptive;              // true only for AMR
 
@@ -122,6 +123,9 @@ class Mesh {
   int root_level; // logical level of root (physical) grid (e.g. Fig. 3 of method paper)
   int max_level;  // logical level of maximum refinement grid in Mesh
 
+  int nprtcl_thisrank;     // number of particles this rank
+  int nprtcl_total;        // total number of particles across all ranks
+
   // following 3x arrays allocated with length [nmb_total] in BuildTreeFromXXXX()
   float *cost_eachmb;            // cost of each MeshBlock
   int *rank_eachmb;              // rank of each MeshBlock
@@ -130,21 +134,26 @@ class Mesh {
   // following 2x arrays allocated with length [nranks] in BuildTreeFromXXXX()
   int *gids_eachrank;      // starting global ID of MeshBlocks in each rank
   int *nmb_eachrank;       // number of MeshBlocks on each rank
+  // following 1x arrays allocated with length [nranks] in AddCoordinatesAndPhysics()
+  int *nprtcl_eachrank;    // number of particles on each rank
 
-  Real time, dt, cfl_no;
+  Real time, dt, dtold, cfl_no;
   int ncycle;
   EventCounters ecounter;
 
+  int nmb_packs_thisrank;                  // number of MBPacks on this rank
   MeshBlockPack* pmb_pack;                 // container for MeshBlocks on this rank
   std::unique_ptr<ProblemGenerator> pgen;  // class containing functions to set ICs
   MeshRefinement *pmr=nullptr;             // mesh refinement data/functions (if needed)
 
   // functions
   void BuildTreeFromScratch(ParameterInput *pin);
-  void BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile);
+  void BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
+                            bool single_file_per_rank=false);
   void PrintMeshDiagnostics();
   void WriteMeshStructure();
   void NewTimeStep(const Real tlim);
+  void AddCoordinatesAndPhysics(ParameterInput *pinput);
   BoundaryFlag GetBoundaryFlag(const std::string& input_string);
   std::string GetBoundaryString(BoundaryFlag input_flag);
 

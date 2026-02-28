@@ -4,12 +4,19 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file gr_bondi.cpp
-//! \brief Problem generator for spherically symmetric black hole accretion.
+//! \brief Problem generator for spherically symmetric black hole accretion (Bondi)
+//! solution in GR hydrodynamics. Sets up the analytic solution initially, and then code
+//! is run to see if solution is preserved.  Automatically outputs errors (difference
+//! between initial and final times).
 
 #include <cmath>   // abs(), NAN, pow(), sqrt()
 #include <cstring> // strcmp()
 #include <iostream>
 #include <sstream>
+#include <string> // string
+#include <cstdio> // fclose
+
+#include <Kokkos_StdAlgorithms.hpp>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -20,6 +27,8 @@
 #include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
 #include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "pgen/pgen.hpp"
 
 namespace {
@@ -81,16 +90,20 @@ void BondiErrors(ParameterInput *pin, Mesh *pm);
 void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
-  if (!(pmbp->phydro->peos->eos_data.use_e)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "gr_bondi test requires hydro/use_e=true" << std::endl;
-    exit(EXIT_FAILURE);
-  }
-  if (!pmbp->pcoord->is_general_relativistic) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "GR bondi problem can only be run when GR defined in <coord> block"
-              << std::endl;
-    exit(EXIT_FAILURE);
+  if (pmbp->pdyngr == nullptr) {
+    if (!(pmbp->phydro->peos->eos_data.use_e)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "gr_bondi test requires hydro/use_e=true" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    if (!pmbp->pcoord->is_general_relativistic) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "GR bondi problem can only be run when GR defined in <coord> block"
+                << std::endl;
+      exit(EXIT_FAILURE);
+    }
   }
 
   // set user-defined BCs and error function pointers
@@ -104,8 +117,15 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   bondi.r_crit = pin->GetReal("problem", "r_crit");
 
   // Get ideal gas EOS data
-  bondi.gm = pmbp->phydro->peos->eos_data.gamma;
+  if (pmbp->pdyngr == nullptr) {
+    bondi.gm = pmbp->phydro->peos->eos_data.gamma;
+  } else {
+    bondi.gm = pmbp->pmhd->peos->eos_data.gamma;
+  }
   Real gm1 = bondi.gm - 1.0;
+  if (pmbp->pdyngr != nullptr) {
+    gm1 = 1.;
+  }
 
   // Parameters
   bondi.temp_min = 1.0e-2;  // lesser temperature root must be greater than this
@@ -143,7 +163,12 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   int js = indcs.js;
   int ks = indcs.ks;
   int nmb = pmbp->nmb_thispack;
-  auto w0_ = pmbp->phydro->w0;
+  DvceArray5D<Real> w0_;
+  if (pmbp->pdyngr != nullptr) {
+    w0_ = pmbp->pmhd->w0;
+  } else {
+    w0_ = pmbp->phydro->w0;
+  }
 
   // Initialize primitive values (HYDRO ONLY)
   par_for("pgen_bondi", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
@@ -169,158 +194,66 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
     w0_(m,IM3,k,j,i) = uu3;
   });
 
+  // Initialize ADM variables
+  if (pmbp->padm != nullptr) {
+    pmbp->padm->SetADMVariables(pmbp);
+
+    auto &b0 = pmbp->pmhd->b0;
+    auto &bcc_ = pmbp->pmhd->bcc0;
+    int ie = indcs.ie;
+    int je = indcs.je;
+    int ke = indcs.ke;
+    par_for("pgen_bvars", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      b0.x1f(m,k,j,i) = b0.x2f(m,k,j,i) = b0.x3f(m,k,j,i) = 0.0;
+      bcc_(m,IBX,k,j,i) = bcc_(m,IBY,k,j,i) = bcc_(m,IBZ,k,j,i) = 0.0;
+      if (i==ie) {
+        b0.x1f(m,k,j,i+1) = 0.0;
+      }
+      if (j==je) {
+        b0.x2f(m,k,j+1,i) = 0.0;
+      }
+      if (k==ke) {
+        b0.x3f(m,k+1,j,i) = 0.0;
+      }
+    });
+  }
+
   // Convert primitives to conserved
-  auto &u0_ = pmbp->phydro->u0;
-  auto &u1_ = pmbp->phydro->u1;
-  if (bondi.reset_ic) {
-    pmbp->phydro->peos->PrimToCons(w0_, u1_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  if (pmbp->padm == nullptr) {
+    auto &u0_ = pmbp->phydro->u0;
+    auto &u1_ = pmbp->phydro->u1;
+    if (bondi.reset_ic) {
+      pmbp->phydro->peos->PrimToCons(w0_, u1_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+    } else {
+      pmbp->phydro->peos->PrimToCons(w0_, u0_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+    }
   } else {
-    pmbp->phydro->peos->PrimToCons(w0_, u0_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+    if (bondi.reset_ic) {
+      // TODO(JMF): need to call PrimToCon in a way that operates on u1, not u0.
+      auto &u0_ = pmbp->pmhd->u0;
+      auto &u1_ = pmbp->pmhd->u1;
+      Kokkos::deep_copy(DevExeSpace(), u1_, u0_);
+      pmbp->pdyngr->PrimToConInit(0, n1-1, 0, n2-1, 0, n3-1);
+    } else {
+      pmbp->pdyngr->PrimToConInit(0, n1-1, 0, n2-1, 0, n3-1);
+    }
   }
 
   return;
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void ProblemGenerator::LinearWaveErrors_()
-//  \brief Computes errors in linear wave solution and outputs to file.
+//! \fn void ProblemGenerator::BondiErrors_()
+//! \brief Computes errors in Bondi solution and outputs to file, using generic error
+//! output function.
 
 void BondiErrors(ParameterInput *pin, Mesh *pm) {
   // calculate reference solution by calling pgen again.  Solution stored in second
   // register u1/b1 when flag is false.
   bondi.reset_ic=true;
   pm->pgen->BondiAccretion(pin, false);
-
-  Real l1_err[8];
-  int nvars=0;
-
-  // capture class variables for kernel
-  auto &indcs = pm->mb_indcs;
-  int &nx1 = indcs.nx1;
-  int &nx2 = indcs.nx2;
-  int &nx3 = indcs.nx3;
-  int &is = indcs.is;
-  int &js = indcs.js;
-  int &ks = indcs.ks;
-  MeshBlockPack *pmbp = pm->pmb_pack;
-  auto &size = pmbp->pmb->mb_size;
-
-  // compute errors for Hydro  -----------------------------------------------------------
-  if (pmbp->phydro != nullptr) {
-    nvars = pmbp->phydro->nhydro;
-
-    EOS_Data &eos = pmbp->phydro->peos->eos_data;
-    auto &u0_ = pmbp->phydro->u0;
-    auto &u1_ = pmbp->phydro->u1;
-
-    const int nmkji = (pmbp->nmb_thispack)*nx3*nx2*nx1;
-    const int nkji = nx3*nx2*nx1;
-    const int nji  = nx2*nx1;
-    array_sum::GlobalSum sum_this_mb;
-    Kokkos::parallel_reduce("Bondi-err-Sums",
-                            Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-    KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum) {
-      // compute n,k,j,i indices of thread
-      int m = (idx)/nkji;
-      int k = (idx - m*nkji)/nji;
-      int j = (idx - m*nkji - k*nji)/nx1;
-      int i = (idx - m*nkji - k*nji - j*nx1) + is;
-      k += ks;
-      j += js;
-
-      Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
-
-      // Hydro conserved variables:
-      array_sum::GlobalSum evars;
-      evars.the_array[IDN] = vol*fabs(u0_(m,IDN,k,j,i) - u1_(m,IDN,k,j,i));
-      evars.the_array[IM1] = vol*fabs(u0_(m,IM1,k,j,i) - u1_(m,IM1,k,j,i));
-      evars.the_array[IM2] = vol*fabs(u0_(m,IM2,k,j,i) - u1_(m,IM2,k,j,i));
-      evars.the_array[IM3] = vol*fabs(u0_(m,IM3,k,j,i) - u1_(m,IM3,k,j,i));
-      if (eos.is_ideal) {
-        evars.the_array[IEN] = vol*fabs(u0_(m,IEN,k,j,i) - u1_(m,IEN,k,j,i));
-      }
-
-      // fill rest of the_array with zeros, if narray < NREDUCTION_VARIABLES
-      for (int n=nvars; n<NREDUCTION_VARIABLES; ++n) {
-        evars.the_array[n] = 0.0;
-      }
-
-      // sum into parallel reduce
-      mb_sum += evars;
-    }, Kokkos::Sum<array_sum::GlobalSum>(sum_this_mb));
-
-    // store data into l1_err array
-    for (int n=0; n<nvars; ++n) {
-      l1_err[n] = sum_this_mb.the_array[n];
-    }
-  }
-
-#if MPI_PARALLEL_ENABLED
-  // sum over all ranks
-  if (global_variable::my_rank == 0) {
-    MPI_Reduce(MPI_IN_PLACE, l1_err, 8, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-  } else {
-    MPI_Reduce(l1_err, l1_err, 8, MPI_DOUBLE, MPI_SUM, 0,
-               MPI_COMM_WORLD);
-  }
-#endif
-
-  // normalize errors by number of cells
-  Real vol=  (pmbp->pmesh->mesh_size.x1max - pmbp->pmesh->mesh_size.x1min)
-            *(pmbp->pmesh->mesh_size.x2max - pmbp->pmesh->mesh_size.x2min)
-            *(pmbp->pmesh->mesh_size.x3max - pmbp->pmesh->mesh_size.x3min);
-  for (int i=0; i<nvars; ++i) l1_err[i] = l1_err[i]/vol;
-
-  // compute rms error
-  Real rms_err = 0.0;
-  for (int i=0; i<nvars; ++i) {
-    rms_err += SQR(l1_err[i]);
-  }
-  rms_err = std::sqrt(rms_err);
-
-  // open output file and write out errors
-  if (global_variable::my_rank==0) {
-    // open output file and write out errors
-    std::string fname;
-    fname.assign(pin->GetString("job","basename"));
-    fname.append("-errs.dat");
-    FILE *pfile;
-
-    // The file exists -- reopen the file in append mode
-    if ((pfile = std::fopen(fname.c_str(), "r")) != nullptr) {
-      if ((pfile = std::freopen(fname.c_str(), "a", pfile)) == nullptr) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << "Error output file could not be opened" <<std::endl;
-        std::exit(EXIT_FAILURE);
-      }
-
-    // The file es not exist -- open the file in write mode and add headers
-    } else {
-      if ((pfile = std::fopen(fname.c_str(), "w")) == nullptr) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << "Error output file could not be opened" <<std::endl;
-        std::exit(EXIT_FAILURE);
-      }
-      std::fprintf(pfile, "# Nx1  Nx2  Nx3   Ncycle  RMS-L1-err       ");
-      if (pmbp->phydro != nullptr) {
-        std::fprintf(pfile, "d_L1         M1_L1         M2_L1");
-        std::fprintf(pfile, "         M3_L1         E_L1 ");
-      }
-      std::fprintf(pfile, "\n");
-    }
-
-    // write errors
-    std::fprintf(pfile, "%04d", pmbp->pmesh->mesh_indcs.nx1);
-    std::fprintf(pfile, "  %04d", pmbp->pmesh->mesh_indcs.nx2);
-    std::fprintf(pfile, "  %04d", pmbp->pmesh->mesh_indcs.nx3);
-    std::fprintf(pfile, "  %05d  %e", pmbp->pmesh->ncycle, rms_err);
-    for (int i=0; i<nvars; ++i) {
-      std::fprintf(pfile, "  %e", l1_err[i]);
-    }
-    std::fprintf(pfile, "\n");
-    std::fclose(pfile);
-  }
+  pm->pgen->OutputErrors(pin, pm);
   return;
 }
 
@@ -609,13 +542,24 @@ void FixedBondiInflow(Mesh *pm) {
   int &ks = indcs.ks;  int &ke  = indcs.ke;
   auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
   auto bondi_ = bondi;
+  bool use_dyngr = pm->pmb_pack->pdyngr != nullptr;
 
   int nmb = pm->pmb_pack->nmb_thispack;
-  auto u0_ = pm->pmb_pack->phydro->u0;
-  auto w0_ = pm->pmb_pack->phydro->w0;
+  DvceArray5D<Real> u0_, w0_;
+  if (use_dyngr) {
+    u0_ = pm->pmb_pack->pmhd->u0;
+    w0_ = pm->pmb_pack->pmhd->w0;
+  } else {
+    u0_ = pm->pmb_pack->phydro->u0;
+    w0_ = pm->pmb_pack->phydro->w0;
+  }
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+  Real gm1 = 1.0;
+  if (!use_dyngr) {
+    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
+    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+    gm1 = bondi_.gm - 1.0;
+  }
   par_for("fixed_x1", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(ng-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x1 boundary
@@ -635,7 +579,7 @@ void FixedBondiInflow(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
       ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,i) = rho;
-      w0_(m,IEN,k,j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,i) = pgas/gm1;
       w0_(m,IM1,k,j,i) = uu1;
       w0_(m,IM2,k,j,i) = uu2;
       w0_(m,IM3,k,j,i) = uu3;
@@ -647,18 +591,24 @@ void FixedBondiInflow(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
       ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_, rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,(ie+i+1)) = rho;
-      w0_(m,IEN,k,j,(ie+i+1)) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,(ie+i+1)) = pgas/gm1;
       w0_(m,IM1,k,j,(ie+i+1)) = uu1;
       w0_(m,IM2,k,j,(ie+i+1)) = uu2;
       w0_(m,IM3,k,j,(ie+i+1)) = uu3;
     }
   });
   // PrimToCons on X1 physical boundary ghost zones
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+  if (use_dyngr) {
+    pm->pmb_pack->pdyngr->PrimToConInit(is-ng,is-1,0,(n2-1),0,(n3-1));
+    pm->pmb_pack->pdyngr->PrimToConInit(ie+1,ie+ng,0,(n2-1),0,(n3-1));
+  } else {
+    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
+    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js-1,0,(n3-1));
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je+1,je+ng,0,(n3-1));
+    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js-1,0,(n3-1));
+    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je+1,je+ng,0,(n3-1));
+  }
+
   par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x2 boundary
@@ -678,7 +628,7 @@ void FixedBondiInflow(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
       ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,i) = rho;
-      w0_(m,IEN,k,j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,i) = pgas/gm1;
       w0_(m,IM1,k,j,i) = uu1;
       w0_(m,IM2,k,j,i) = uu2;
       w0_(m,IM3,k,j,i) = uu3;
@@ -690,17 +640,22 @@ void FixedBondiInflow(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
       ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,(je+j+1),i) = rho;
-      w0_(m,IEN,k,(je+j+1),i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,(je+j+1),i) = pgas/gm1;
       w0_(m,IM1,k,(je+j+1),i) = uu1;
       w0_(m,IM2,k,(je+j+1),i) = uu2;
       w0_(m,IM3,k,(je+j+1),i) = uu3;
     }
   });
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+  if (use_dyngr) {
+    pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),js-ng,js-1,0,(n3-1));
+    pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),je+1,je+ng,0,(n3-1));
+  } else {
+    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
+    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  }
   par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // inner x3 boundary
@@ -720,7 +675,7 @@ void FixedBondiInflow(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
       ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,k,j,i) = rho;
-      w0_(m,IEN,k,j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,k,j,i) = pgas/gm1;
       w0_(m,IM1,k,j,i) = uu1;
       w0_(m,IM2,k,j,i) = uu2;
       w0_(m,IM3,k,j,i) = uu3;
@@ -732,14 +687,19 @@ void FixedBondiInflow(Mesh *pm) {
     if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
       ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
       w0_(m,IDN,(ke+k+1),j,i) = rho;
-      w0_(m,IEN,(ke+k+1),j,i) = pgas/(bondi_.gm - 1.0);
+      w0_(m,IEN,(ke+k+1),j,i) = pgas/gm1;
       w0_(m,IM1,(ke+k+1),j,i) = uu1;
       w0_(m,IM2,(ke+k+1),j,i) = uu2;
       w0_(m,IM3,(ke+k+1),j,i) = uu3;
     }
   });
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  if (use_dyngr) {
+    pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),0,(n2-1),ks-ng,ks-1);
+    pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  } else {
+    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  }
 
   return;
 }

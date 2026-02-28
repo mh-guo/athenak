@@ -5,6 +5,7 @@
 //========================================================================================
 //! \file turb.cpp
 //  \brief Problem generator for turbulence
+#include <iostream> // cout
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -18,7 +19,10 @@
 //! \fn void MeshBlock::Turb_()
 //  \brief Problem Generator for turbulence
 
-void ProblemGenerator::UserProblem(MeshBlockPack *pmbp, ParameterInput *pin) {
+void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+  if (restart) return;
+
+  MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   if (pmbp->phydro == nullptr && pmbp->pmhd == nullptr) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Turbulence problem generator can only be run with Hydro and/or MHD, but no "
@@ -27,7 +31,7 @@ void ProblemGenerator::UserProblem(MeshBlockPack *pmbp, ParameterInput *pin) {
   }
 
   // capture variables for kernel
-  auto &indcs = pmbp->coord.coord_data.mb_indcs;
+  auto &indcs = pmbp->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;

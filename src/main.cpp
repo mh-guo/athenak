@@ -28,15 +28,17 @@
 #include <iostream>
 #include <string>
 #include <memory>
+#include <cstdio> // sscanf
+#include <fstream>  // Include this for std::ifstream
 
 // Athena headers
 #include "athena.hpp"
 #include "globals.hpp"
-#include "utils/utils.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "outputs/outputs.hpp"
 #include "driver/driver.hpp"
+#include "utils/utils.hpp"
 
 // MPI/OpenMP headers
 #if MPI_PARALLEL_ENABLED
@@ -45,6 +47,10 @@
 
 #if OPENMP_PARALLEL_ENABLED
 #include <omp.h>
+#endif
+
+#if defined(KOKKOS_ENABLE_HIP)
+#include <hip/hip_runtime.h>
 #endif
 
 //----------------------------------------------------------------------------------------
@@ -57,11 +63,18 @@ int main(int argc, char *argv[]) {
   bool marg_flag = false;  // set to true if -m        argument is on cmdline
   bool narg_flag = false;  // set to true if -n        argument is on cmdline
   bool  res_flag = false;  // set to true if -r <file> argument is on cmdline
+  Real wtlim = 0;
 
   //--- Step 1. --------------------------------------------------------------------------
   // Initialize environment (must initialize MPI first, then Kokkos)
 
 #if MPI_PARALLEL_ENABLED
+#if defined(KOKKOS_ENABLE_HIP)
+  // JMF: This is a bizarre workaround to avoid segmentation faults on Frontier.
+  // See OLCFDEV-1655: Occasional seg-fault during MPI_Init inside the Frontier
+  // documentation.
+  (void) hipInit(0);
+#endif
 #if OPENMP_PARALLEL_ENABLED
   int mpiprv;
   if (MPI_SUCCESS != MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &mpiprv)) {
@@ -155,6 +168,11 @@ int main(int argc, char *argv[]) {
         case 'm':
           marg_flag = true;
           break;
+        case 't':                      // -t <hh:mm:ss>
+          int wth, wtm, wts;
+          std::sscanf(argv[++i], "%d:%d:%d", &wth, &wtm, &wts);
+          wtlim = static_cast<Real>(wth*3600 + wtm*60 + wts);
+          break;
         case 'c':
           if (global_variable::my_rank == 0) ShowConfig();
           Kokkos::finalize();
@@ -176,6 +194,7 @@ int main(int argc, char *argv[]) {
             std::cout << "  -n              parse input file and quit\n";
             std::cout << "  -c              show configuration and quit\n";
             std::cout << "  -m              output mesh structure and quit\n";
+            std::cout << "  -t hh:mm:ss     wall time limit for final output\n";
             std::cout << "  -h              this help\n";
             ShowConfig();
           }
@@ -202,6 +221,10 @@ int main(int argc, char *argv[]) {
     return(0);
   }
 
+  // Start the wall clock timer. This is done here rather than in the Driver to ensure
+  // that the time taken in ProblemGenerator is also captured.
+  Kokkos::Timer timer;
+
   //--- Step 3. --------------------------------------------------------------------------
   // Construct ParameterInput object and load data either from restart or input file.
   // With MPI, the input is read by every rank in parallel using MPI-IO.
@@ -209,23 +232,52 @@ int main(int argc, char *argv[]) {
   ParameterInput* pinput = new ParameterInput;
   IOWrapper infile, restartfile;
   // read parameters from restart file
+  bool single_file_per_rank = false; // DBF: flag for single_file_per_rank for rst files
   if (res_flag) {
-    restartfile.Open(restart_file.c_str(), IOWrapper::FileMode::read);
-    pinput->LoadFromFile(restartfile);
+    // Check if the path contains "rank_" directory
+    size_t rank_pos = restart_file.find("/rank_");
+    single_file_per_rank = (rank_pos != std::string::npos);
+
+    // If single_file_per_rank is true, modify the path for the current rank
+    if (single_file_per_rank) {
+        // Extract the base directory and file name
+        size_t last_slash = restart_file.rfind('/');
+        std::string base_dir = restart_file.substr(0, rank_pos);
+        std::string file_name = restart_file.substr(last_slash + 1);
+
+        // Construct the path for the current rank
+        char rank_dir[20];
+        std::snprintf(rank_dir, sizeof(rank_dir), "rank_%08d", global_variable::my_rank);
+        restart_file = base_dir + "/" + rank_dir + "/" + file_name;
+    }
+
+    // Now use restart_file for opening the file
+    std::ifstream file_check(restart_file);
+    if (!file_check.good()) {
+        std::cerr << "Error: Unable to open restart file: " << restart_file << std::endl;
+        // Handle the error (e.g., exit the program or use a default configuration)
+    }
+
+    // read parameters from restart file
+    restartfile.Open(restart_file.c_str(),IOWrapper::FileMode::read,single_file_per_rank);
+    pinput->LoadFromFile(restartfile, single_file_per_rank);
+    IOWrapperSizeT headeroffset = restartfile.GetPosition(single_file_per_rank);
   }
+
   // read parameters from input file.  If both -r and -i are specified, this will
   // override parameters from the restart file
   if (iarg_flag) {
     infile.Open(input_file.c_str(), IOWrapper::FileMode::read);
     pinput->LoadFromFile(infile);
     infile.Close();
+    pinput->CheckBlockNames();
   }
   pinput->ModifyFromCmdline(argc, argv);
 
   // Dump input parameters and quit if code was run with -n option.
   if (narg_flag) {
     if (global_variable::my_rank == 0) pinput->ParameterDump(std::cout);
-    if (res_flag) restartfile.Close();
+    if (res_flag) restartfile.Close(single_file_per_rank);
     delete pinput;
     Kokkos::finalize();
 #if MPI_PARALLEL_ENABLED
@@ -243,13 +295,13 @@ int main(int argc, char *argv[]) {
   if (!res_flag) {
     pmesh->BuildTreeFromScratch(pinput);
   } else {
-    pmesh->BuildTreeFromRestart(pinput, restartfile);
+    pmesh->BuildTreeFromRestart(pinput, restartfile, single_file_per_rank);
   }
 
   //  If code was run with -m option, write mesh structure to file and quit.
   if (marg_flag) {
     if (global_variable::my_rank == 0) {pmesh->WriteMeshStructure();}
-    if (res_flag) {restartfile.Close();}
+    if (res_flag) {restartfile.Close(single_file_per_rank);}
     delete pmesh;
     delete pinput;
     Kokkos::finalize();
@@ -264,24 +316,27 @@ int main(int argc, char *argv[]) {
   // Note these steps must occur after Mesh (including MeshBlocks and MeshBlockPack)
   // is fully constructed.
 
-  pmesh->pmb_pack->AddCoordinates(pinput);
-  pmesh->pmb_pack->AddPhysics(pinput);
+  pmesh->AddCoordinatesAndPhysics(pinput);
   if (!res_flag) {
     // set ICs using ProblemGenerator constructor for new runs
     pmesh->pgen = std::make_unique<ProblemGenerator>(pinput, pmesh);
   } else {
     // read ICs from restart file using ProblemGenerator constructor for restarts
-    pmesh->pgen = std::make_unique<ProblemGenerator>(pinput, pmesh, restartfile);
-    restartfile.Close();
+    pmesh->pgen = std::make_unique<ProblemGenerator>(pinput,
+                                                     pmesh,
+                                                     restartfile,
+                                                     single_file_per_rank);
+    restartfile.Close(single_file_per_rank);
   }
-
   //--- Step 6. --------------------------------------------------------------------------
   // Construct Driver and Outputs. Actual outputs (including initial conditions) are made
-  // in Driver.Initialize()
+  // in Driver.Initialize(). Add wall clock timer to Driver if necessary.
 
-  Driver* pdriver = new Driver(pinput, pmesh);
   ChangeRunDir(run_dir);
+  Driver* pdriver = new Driver(pinput, pmesh, wtlim, &timer);
   Outputs* pout = new Outputs(pinput, pmesh);
+
+
 
   //--- Step 7. --------------------------------------------------------------------------
   // Execute Driver.

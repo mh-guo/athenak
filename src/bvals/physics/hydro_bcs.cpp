@@ -11,14 +11,16 @@
 
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
+#include "hydro/hydro.hpp"
+#include "eos/eos.hpp"
 
 //----------------------------------------------------------------------------------------
-// \!fn void BoundaryValues::HydroBCs()
-// \brief Apply physical boundary conditions for all Hydro variables at faces of MB which
-//  are at the edge of the computational domain
+//! \!fn void BoundaryValues::HydroBCs()
+//! \brief Apply physical boundary conditions for all Hydro variables at faces of MB which
+//! are at the edge of the computational domain
 
-void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
-                              DvceArray5D<Real> u0) {
+void MeshBoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
+                                  DvceArray5D<Real> u0) {
   // loop over all MeshBlocks in this MeshBlockPack
   auto &pm = ppack->pmesh;
   auto &indcs = ppack->pmesh->mb_indcs;
@@ -31,8 +33,9 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
   int nvar = u0.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
   int nmb = ppack->nmb_thispack;
 
-  // only apply BCs if not periodic
-  if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
+  // only apply BCs if not (periodic) or (shear_periodic)
+  if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic &&
+      pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::shear_periodic) {
     int &is = indcs.is;
     int &ie = indcs.ie;
     par_for("hydrobc_x1", DevExeSpace(), 0,(nmb-1),0,(nvar-1),0,(n3-1),0,(n2-1),
@@ -42,9 +45,9 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
         case BoundaryFlag::reflect:
           for (int i=0; i<ng; ++i) {
             if (n==(IVX)) {
-              u0(m,n,k,j,is-i-1) = -u0(m,n,k,j,is);
+              u0(m,n,k,j,is-i-1) = -u0(m,n,k,j,is+i);
             } else {
-              u0(m,n,k,j,is-i-1) =  u0(m,n,k,j,is);
+              u0(m,n,k,j,is-i-1) =  u0(m,n,k,j,is+i);
             }
           }
           break;
@@ -65,6 +68,11 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
             } else {
               u0(m,n  ,k,j,is-i-1) = u0(m,n,k,j,is);
             }
+          }
+          break;
+        case BoundaryFlag::vacuum:
+          for (int i=0; i<ng; ++i) {
+            u0(m,n,k,j,is-i-1) = 0.0;
           }
           break;
         default:
@@ -101,11 +109,17 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
             }
           }
           break;
+        case BoundaryFlag::vacuum:
+          for (int i=0; i<ng; ++i) {
+            u0(m,n,k,j,ie+i+1) = 0.0;
+          }
+          break;
         default:
           break;
       }
     });
   }
+
   if (pm->one_d) return;
 
   // only apply BCs if not periodic
@@ -143,6 +157,12 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
               u0(m,n,k,js-j-1,i) = u0(m,n,k,js,i);
             }
           }
+          break;
+        case BoundaryFlag::vacuum:
+          for (int j=0; j<ng; ++j) {
+            u0(m,n,k,js-j-1,i) = 0.0;
+          }
+          break;
         default:
           break;
       }
@@ -176,6 +196,12 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
               u0(m,n,k,je+j+1,i) = u0(m,n,k,je,i);
             }
           }
+          break;
+        case BoundaryFlag::vacuum:
+          for (int j=0; j<ng; ++j) {
+            u0(m,n,k,je+j+1,i) = 0.0;
+          }
+          break;
         default:
           break;
       }
@@ -219,6 +245,11 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
           }
         }
         break;
+      case BoundaryFlag::vacuum:
+        for (int k=0; k<ng; ++k) {
+          u0(m,n,ks-k-1,j,i) = 0.0;
+        }
+        break;
       default:
         break;
     }
@@ -251,6 +282,11 @@ void BoundaryValues::HydroBCs(MeshBlockPack *ppack, DualArray2D<Real> u_in,
           } else {
             u0(m,n,ke+k+1,j,i) = u0(m,n,ke,j,i);
           }
+        }
+        break;
+      case BoundaryFlag::vacuum:
+        for (int k=0; k<ng; ++k) {
+          u0(m,n,ke+k+1,j,i) = 0.0;
         }
         break;
       default:
