@@ -1,7 +1,8 @@
 # AthenaXXX input file for hydro turbulence
 
 <comment>
-problem   = ti
+problem   = thermal instability
+reference = Guo, Kim, & Stone, ApJ 990, 49 (2025)
 
 <job>
 basename  = Ti        # problem ID: basename of output filenames
