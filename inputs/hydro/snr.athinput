@@ -1,0 +1,120 @@
+# Athena++ (Kokkos version) input file for spherical blast problem
+
+<comment>
+problem   = spherical blast wave
+reference = Gardiner. T.A. & Stone, J.M., JCP, 205, 509 (2005) (for MHD version of test)
+
+<job>
+basename  = Blast      # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 4          # Number of ghost cells
+nx1       = 256        # Number of zones in X1-direction
+x1min     = -32.0      # minimum value of X1
+x1max     = 32.0       # maximum value of X1
+ix1_bc    = periodic   # inner-X1 boundary flag
+ox1_bc    = periodic   # outer-X1 boundary flag
+
+nx2       = 256        # Number of zones in X2-direction
+x2min     = -32.0      # minimum value of X2
+x2max     = 32.0       # maximum value of X2
+ix2_bc    = periodic   # inner-X2 boundary flag
+ox2_bc    = periodic   # outer-X2 boundary flag
+
+nx3       = 256        # Number of zones in X3-direction
+x3min     = -32.0      # minimum value of X3
+x3max     = 32.0       # maximum value of X3
+ix3_bc    = periodic   # inner-X3 boundary flag
+ox3_bc    = periodic   # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 64          # Number of cells in each MeshBlock, X1-dir
+nx2       = 64          # Number of cells in each MeshBlock, X2-dir
+nx3       = 64          # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+integrator = rk3        # time integration algorithm
+cfl_number = 0.3        # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1         # cycle limit
+tlim       = 1.0        # time limit
+ndiag      = 1          # cycles between diagostic output
+
+<hydro>
+eos         = ideal          # EOS type
+reconstruct = ppm4           # spatial reconstruction method
+rsolver     = hllc           # Riemann-solver to be used
+gamma       = 1.666666666667 # gamma = C_p/C_v
+nscalars    = 4              # number of passive scalars in hydro
+conductivity = 0             # isotropic thermal conductivity
+tdep_conductivity = true     # isotropic thermal tdep_conductivity
+cond_ceiling = 1e10          # ceiling of conductivity
+sat_hflux   = true           # saturation of heat flux
+fofc        = true           # first-order flux correction
+dfloor      = 1e-4    # density floor
+pfloor      = 1e-2    # pressure floor
+tfloor      = 7e-2    # temperature floor
+
+<hydro_srcterms>
+ism_cooling = true           # turn on ism cooling
+hrate       = 5.0e-26        # ism heating rate
+mu_h        = 1.4            # mean molecular weight
+
+<units>
+length_cgs  = 3.0856775809623245e+18 # pc
+mass_cgs    = 3.015012867156497e+31  # number density 1 cm^-3
+time_cgs    = 3.15576e+13            # 1 Myr
+mu          = 0.618                  # mean molecular weight
+
+<problem>
+damb        = 0.8620       # ambient density
+tamb        = 93.125130    # ambient temperature
+radius      = 1.00         # Radius of the inner sphere
+mass_snr    = 197.85148    # mass of SNR
+etot_snr    = 3.4691068e9  # energy of SNR
+t_cold      = 2.589        # temperature of cold gas
+t_warm      = 71.06        # temperature of warm gas
+t_ion       = 281.4        # temperature of ionized gas
+t_hot       = 1.407e4      # temperature of hot gas
+v_shell     = 5.11356      # velocity of shell gas, 5km/s
+v_bubble    = 5.11356      # velocity of bubble gas, 5km/s
+user_srcs   = true         # turn on user source terms
+ndiag       = 10           # diagnostic information
+user_hist   = true         # user history output
+#cooling     = false        # turn on ism cooling with sub-cycling
+#hrate       = 5.0e-26      # ism heating rate
+add_snr     = true         # add SNR or not
+
+#rst         = true         # load data from restart file
+#rst_type    = 0            # the same level
+#rst_type    = 1            # coarse to fine
+#rst_file    = Ti.00001.rst # filename of restart file
+#rst_file    = ../../ism_net/ismnet_hyd/data/rst/Ti.00005.rst # filename of restart file
+
+#<turb_driving>
+#type = hydro
+#tcorr = 0.5           # ~ L / 2 pi urms 
+#dedt  = 0.           # ~ urms^3 / 2 L
+#nlow = 4
+#nhigh = 32
+#turb_flag   = 1       # 1 for decaying
+#turb_count  = 0       # times of turbulence driving
+
+<output1>
+file_type   = hst       # history data dump
+data_format = %13.6e    # Optional data format string
+dt          = 0.0001    # time increment between outputs
+
+<output2>
+file_type   = log       # diagnostic data
+dcycle      = 1         # cycle increment between outputs
+
+<output3>
+file_type   = rst       # restart data dump
+dt          = 1.0       # time increment between outputs
+
+<output4>
+file_type   = bin       # binary data dump
+variable    = hydro_w   # variables to be output
+#dt          = 0.002    # time increment between outputs
+dcycle      = 500       # cycle increment between outputs

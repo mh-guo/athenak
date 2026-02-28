@@ -248,7 +248,7 @@ void Diagnostic(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
      Kokkos::Max<Real>(max_eint));
   Real dt_hyd  = pmbp->phydro->dtnew;
   Real dt_cond = (pmbp->phydro->pcond != nullptr)? pmbp->phydro->pcond->dtnew : -1.0;
-  Real dt_src  = pmbp->phydro->psrc->dtnew;
+  Real dt_src  = (pmbp->phydro->psrc != nullptr)? pmbp->phydro->psrc->dtnew : -1.0;
 #if MPI_PARALLEL_ENABLED
   Real m_min[8] = {dtnew,min_dens,min_vtot,min_temp,min_eint,dt_hyd,dt_cond,dt_src};
   Real m_max[4] = {max_dens,max_vtot,max_temp,max_eint};

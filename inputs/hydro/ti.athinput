@@ -1,0 +1,107 @@
+# AthenaXXX input file for hydro turbulence
+
+<comment>
+problem   = ti
+
+<job>
+basename  = Ti        # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 4         # Number of ghost cells
+nx1       = 256       # Number of zones in X1-direction
+x1min     = -32.0     # minimum value of X1
+x1max     = 32.0      # maximum value of X1
+ix1_bc    = periodic  # Inner-X1 boundary condition flag
+ox1_bc    = periodic  # Outer-X1 boundary condition flag
+
+nx2       = 256       # Number of zones in X2-direction
+x2min     = -32.0     # minimum value of X2
+x2max     = 32.0      # maximum value of X2
+ix2_bc    = periodic  # Inner-X2 boundary condition flag
+ox2_bc    = periodic  # Outer-X2 boundary condition flag
+
+nx3       = 256       # Number of zones in X3-direction
+x3min     = -32.0     # minimum value of X3
+x3max     = 32.0      # maximum value of X3
+ix3_bc    = periodic  # Inner-X3 boundary condition flag
+ox3_bc    = periodic  # Outer-X3 boundary condition flag
+
+<meshblock>
+nx1       = 64        # Number of cells in each MeshBlock, X1-dir
+nx2       = 64        # Number of cells in each MeshBlock, X2-dir
+nx3       = 64        # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk3      # time integration algorithm
+cfl_number = 0.3      # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1       # cycle limit
+tlim       = 50.0     # time limit
+ndiag      = 1        # cycles between diagostic output
+
+<hydro>
+eos         = ideal   # EOS type
+reconstruct = ppm4    # spatial reconstruction method
+rsolver     = hllc    # Riemann-solver to be used
+gamma       = 1.66666666667   # gamma = C_p/C_v
+nscalars    = 4         # number of passive scalars in hydro
+conductivity = 0.24  # isotropic thermal conductivity, 1e7 in cgs
+#conductivity = 0.01  # isotropic thermal conductivity, 1e7 in cgs
+#conductivity = -1  # isotropic thermal conductivity, 9.68e4 in cgs
+#cond_ceiling = 1e10 #ceiling of conductivity
+#sat_hflux   = false     # saturation of heat flux
+#fofc       = true       # first-order flux correction
+
+dfloor      = 1e-4    # density floor
+pfloor      = 1e-2    # pressure floor
+tfloor      = 7e-2    # temperature floor
+
+<hydro_srcterms>
+ism_cooling = true      # turn on ism cooling
+hrate       = 5.0e-26   # ism heating rate
+mu_h        = 1.4       # mean molecular weight
+
+<units>
+length_cgs  = 3.0856775809623245e+18 # pc
+mass_cgs    = 3.015012867156497e+31  # number density 1 cm^-3
+time_cgs    = 3.15576e+13            # 1 Myr
+mu          = 0.618                  # mean molecular weight
+
+<problem>
+temp        = 471.233476   # temperture in Kelvin
+t_cold      = 2.589        # temperature of cold gas, 184K
+t_warm      = 71.06        # temperature of warm gas, 5050K
+t_ion       = 281.4        # temperature of ionized gas, 2e4K
+t_hot       = 1.407e4      # temperature of hot gas, 1e6K
+
+user_srcs   = true         # turn on user source terms
+ndiag       = 10           # diagnostic information
+user_hist   = true         # user history output
+
+<turb_init1>
+type  = hydro
+tcorr = 0.5           # ~ L / 2 pi urms 
+dedt  = 10.           # ~ urms^3 / 2 L
+nlow  = 16
+nhigh = 32
+turb_flag   = 1       # 1 for decaying
+turb_count  = 2       # times of turbulence driving
+seed = 1
+
+<output1>
+file_type   = hst        # history data dump
+data_format = %12.5e     # Optional data format string
+dt          = 0.01       # time increment between outputs
+
+<output2>
+file_type   = log        # diagnostic data
+dcycle      = 1          # cycle increment between outputs
+
+<output3>
+file_type   = rst        # restart data dump
+dt          = 10.0       # time increment between outputs
+
+<output4>
+file_type   = bin        # binary data dump
+variable    = hydro_w    # variables to be output
+dt          = 1.0        # time increment between outputs
