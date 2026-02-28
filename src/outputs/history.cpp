@@ -20,6 +20,7 @@
 #include "eos/eos.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "z4c/z4c.hpp"
 #include "coordinates/adm.hpp"
 #include "outputs.hpp"
 
@@ -44,6 +45,10 @@ HistoryOutput::HistoryOutput(ParameterInput *pin, Mesh *pm, OutputParameters op)
       hist_data.emplace_back(PhysicsModule::UserDefined);
     }
   }
+
+  if (pm->pmb_pack->pz4c != nullptr) {
+    hist_data.emplace_back(PhysicsModule::SpaceTimeDynamics);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -57,6 +62,8 @@ void HistoryOutput::LoadOutputData(Mesh *pm) {
       LoadHydroHistoryData(&data, pm);
     } else if (data.physics == PhysicsModule::MagnetoHydroDynamics) {
       LoadMHDHistoryData(&data, pm);
+    } else if (data.physics == PhysicsModule::SpaceTimeDynamics) {
+      LoadZ4cHistoryData(&data, pm);
     } else if (data.physics == PhysicsModule::UserDefined) {
       (pm->pgen->user_hist_func)(&data, pm);
     }
@@ -398,6 +405,8 @@ void HistoryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
         case PhysicsModule::MagnetoHydroDynamics:
           fname.append(".mhd");
           break;
+        case PhysicsModule::SpaceTimeDynamics:
+          fname.append(".z4c");
         case PhysicsModule::UserDefined:
           fname.append(".user");
           break;
