@@ -19,6 +19,14 @@
 #include "radiation/radiation.hpp"
 #include "pgen/pgen.hpp"
 
+namespace {
+struct bulb_pgen {
+  Real rho_norm;
+  Real rho_pow;
+};
+  bulb_pgen bulb;
+} // namespace
+
 // Prototypes for user-defined BCs and history functions
 void BulbSource(Mesh* pm, const Real bdt);
 
@@ -47,15 +55,29 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // return if restart
   if (restart) return;
 
+  bulb.rho_norm = pin->GetOrAddReal("problem", "rho_norm", 1.0);
+  bulb.rho_pow = pin->GetOrAddReal("problem", "rho_pow", 0.0);
+
+  Real dnorm = bulb.rho_norm;
+  Real dpow = bulb.rho_pow;
+
   if (pmbp->phydro != nullptr) {
     auto &w0 = pmbp->phydro->w0;
     par_for("rad_bulb_hyd",DevExeSpace(),0,nmb1,ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      w0(m,IDN,k,j,i) = 1.0;
+      Real x1v = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      Real rho = dnorm * pow(rad, dpow);
+      if (rad < 1.0) {
+        rho = dnorm;
+      }
+      w0(m,IDN,k,j,i) = rho;
       w0(m,IVX,k,j,i) = 0.0;
       w0(m,IVY,k,j,i) = 0.0;
       w0(m,IVZ,k,j,i) = 0.0;
-      w0(m,IEN,k,j,i) = 1.0;
+      w0(m,IEN,k,j,i) = rho;
     });
     // Convert primitives to conserved
     auto &u0 = pmbp->phydro->u0;
@@ -106,15 +128,26 @@ void BulbSource(Mesh* pm, const Real bdt) {
   int nmb1 = (pmbp->nmb_thispack-1);
   int nang1 = (pmbp->prad->prgeo->nangles-1);
 
+  Real dnorm = bulb.rho_norm;
+  Real dpow = bulb.rho_pow;
+
   if (pmbp->phydro != nullptr) {
     auto &w0 = pmbp->phydro->w0;
     par_for("rad_bulb_hyd",DevExeSpace(),0,nmb1,ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      w0(m,IDN,k,j,i) = 1.0;
+      Real x1v = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      Real rho = dnorm * pow(rad, dpow);
+      if (rad < 1.0) {
+        rho = dnorm;
+      }
+      w0(m,IDN,k,j,i) = rho;
       w0(m,IVX,k,j,i) = 0.0;
       w0(m,IVY,k,j,i) = 0.0;
       w0(m,IVZ,k,j,i) = 0.0;
-      w0(m,IEN,k,j,i) = 1.0;
+      w0(m,IEN,k,j,i) = rho;
     });
     // Convert primitives to conserved
     auto &u0 = pmbp->phydro->u0;
