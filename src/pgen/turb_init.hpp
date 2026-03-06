@@ -571,8 +571,6 @@ TaskStatus TurbulenceInit::InitializeModes(int stage) {
   if (pmy_pack->pionn != nullptr) w = (pmy_pack->phydro->w0); // assume neutral density
                                                               //     >> ionized density
   // Normalization: a constant Mach number
-  EOS_Data &eos = (pmy_pack->pmhd != nullptr) ?
-                  pmy_pack->pmhd->peos->eos_data : pmy_pack->phydro->peos->eos_data;
   auto &mbsize = pmy_pack->pmb->mb_size;
   Real &rmin = turb_rmin;
   par_for("force_amp",DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,

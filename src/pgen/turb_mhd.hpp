@@ -282,7 +282,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
 
   // turb_flag == 2 : toroidal field
   if (turb_flag == 2) {
-    auto &eos = pmy_pack->pmhd->peos->eos_data;
     auto &mbsize = pmy_pack->pmb->mb_size;
     Real &rmin = turb_rmin;
     par_for("a_toro", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
@@ -300,7 +299,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
 
   // turb_flag == 3 : poloidal field but slight radial within rmin
   if (turb_flag == 3) {
-    auto &eos = pmy_pack->pmhd->peos->eos_data;
     auto &mbsize = pmy_pack->pmb->mb_size;
     Real &rmin = turb_rmin;
     par_for("a_polo_rad", DevExeSpace(),0,nmb-1,0,ncells3-1,0,ncells2-1,0,ncells1-1,
@@ -533,7 +531,6 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
   if (pmy_pack->pionn != nullptr) w = (pmy_pack->phydro->w0); // assume neutral density
                                                               //     >> ionized density
 
-  auto &eos = pmy_pack->pmhd->peos->eos_data;
   auto &size = pmy_pack->pmb->mb_size;
   Real &rmin = turb_rmin;
 

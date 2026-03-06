@@ -4,7 +4,7 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file zoom_gr_galaxy.cpp
-//! \brief (@mhguo) Problem generator for black hole accretion from galactic scale
+//! \brief Problem generator for black hole accretion from galactic scale
 
 #include <cmath>   // abs(), NAN, pow(), sqrt()
 #include <cstring> // strcmp()
@@ -1599,7 +1599,6 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real beta = bdt/pm->dt;
   Real cfl_no = pm->cfl_no;
   auto &eos = eos_data;
-  Real use_e = eos_data.use_e;
   Real tfloor = eos_data.tfloor;
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
@@ -1631,7 +1630,6 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     j += js;
     Real dens = w0(m,IDN,k,j,i);
     Real temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
-    Real eint = w0(m,IEN,k,j,i);
     // compute cooling/heating terms
     Real lambda_cooling = (temp<=tfloor) ? 0.0 : ISMCoolFn(temp*temp_unit)/cooling_unit;
     Real cooling_heating = dens * dens * lambda_cooling;
