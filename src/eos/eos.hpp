@@ -30,6 +30,7 @@ struct EOS_Data {
   bool is_ideal;     // flag to denote ideal gas EOS
   bool use_e, use_t; // use internal energy density (e) or temperature (t) as primitive
   Real dfloor, pfloor, tfloor, sfloor;  // density, pressure, temperature, entropy floors
+  Real sfloor1, sfloor2, rho1, rho2; // density-dependent entropy floor
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
   Real sigma_max;    // ceiling on magnetization in MHD
 
