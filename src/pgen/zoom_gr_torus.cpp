@@ -1765,6 +1765,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   // int nflux = (is_mhd) ? 4 : 3;
+  // TODO(@mhguo): add radiation fluxes (if is_radiation_enabled)
   const int nflux = 29;
 
   // set number of and names of history variables for hydro or mhd
