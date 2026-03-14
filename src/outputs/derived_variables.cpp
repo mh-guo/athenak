@@ -979,10 +979,10 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     // set the loop limits for 1D/2D/3D problems
     int jl = js, ju = je, kl = ks, ku = ke;
     if (multi_d) {
-      jl = js-ng; ju = je+ng;
+      jl = js-ng, ju = je+ng;
     }
     if (three_d) {
-      kl = ks-ng; ku = ke+ng;
+      kl = ks-ng, ku = ke+ng;
     }
 
     auto dv = derived_var;
