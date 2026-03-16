@@ -140,6 +140,23 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       Real s2, b2, rpar;
       TransformToSRMHD(u,glower,gupper,s2,b2,rpar,u_sr);
 
+      // apply radius-dependent density floor to u_sr.d if enabled
+      // not u.d so u_sr.e is computed from the original u.d
+      // not w.d so the c2p algorithm is self-consistent
+      if (eos.rdfloor > 0.0) {
+        Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+        auto &z = x3v;
+        auto &a = spin;
+        Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
+        Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
+        // bound to [dfloor, rdfloor]
+        Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+        if (u_sr.d < dfloor_) {
+          u_sr.d = dfloor_;
+          dfloor_used = true;
+        }
+      }
+
       // call c2p function
       // (inline function in ideal_c2p_mhd.hpp file)
       SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,

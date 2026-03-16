@@ -11,6 +11,8 @@
 #include "eos.hpp"
 #include "eos/ideal_c2p_mhd.hpp"
 
+#include "coordinates/cell_locations.hpp"
+
 //----------------------------------------------------------------------------------------
 // ctor: also calls EOS base class constructor
 
@@ -34,6 +36,9 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
                           const bool only_testfloors,
                           const int il, const int iu, const int jl, const int ju,
                           const int kl, const int ku) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is, &js = indcs.js, &ks = indcs.ks;
+  auto &size = pmy_pack->pmb->mb_size;
   int &nmhd  = pmy_pack->pmhd->nmhd;
   int &nscal = pmy_pack->pmhd->nscalars;
   int &nmb = pmy_pack->nmb_thispack;
@@ -80,6 +85,30 @@ void IdealMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &b,
     // (inline function in ideal_c2p_mhd.hpp file)
     HydPrim1D w;
     bool dfloor_used=false, efloor_used=false, tfloor_used=false;
+    // apply radius-dependent density floor if enabled
+    if (eos.rdfloor > 0.0) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      Real rdfloor_ = eos.rdfloor * pow(rad/eos.rdfloor_rad, eos.rdfloor_pow);
+      // bound to [dfloor, rdfloor]
+      Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+      if (u.d < dfloor_) {
+        u.d = dfloor_;
+        dfloor_used = true;
+      }
+    }
+    // call inline c2p function
     SingleC2P_IdealMHD(u, eos, w, dfloor_used, efloor_used, tfloor_used);
 
     // set FOFC flag and quit loop if this function called only to check floors

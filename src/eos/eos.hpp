@@ -32,6 +32,7 @@ struct EOS_Data {
   Real dfloor, pfloor, tfloor, sfloor;  // density, pressure, temperature, entropy floors
   Real gamma_max;    // ceiling on Lorentz factor in SR/GR
   Real sigma_max;    // ceiling on magnetization in MHD
+  Real rdfloor, rdfloor_rad, rdfloor_pow;  // radius-dependent density floor
 
   // IDEAL GAS PRESSURE: converts primitive variable (either internal energy density e
   // or temperature e/d) into pressure.
