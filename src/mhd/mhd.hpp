@@ -135,6 +135,7 @@ class MHD {
   // cell-centered electric fields computed in CornerE
   DvceArray4D<Real> e1_cc, e2_cc, e3_cc;
   Real dtnew;
+  bool gr_dt = false;         // flag for accurate GR timestep calculation
 
   // following used for time derivatives in computation of jcon
   bool wbcc_saved = false;
