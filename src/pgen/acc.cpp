@@ -2661,6 +2661,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       // conserve energy is minus sign
       u0(m,IEN,k,j,i) += bdt * cooling_heating;
     } else {
+      int iter = 0;
       do {
         Real lambda_cooling = ISMCoolFn(temp*temp_unit)/cooling_unit;
         // soft function
@@ -2709,13 +2710,14 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
           temp = gm1*w.e/w.d;
           eint = w.e;
           sub_cycling_used = true;
+          iter++;
           sum1++;
         } else {
           u0(m,IEN,k,j,i) -= (bdt-bdt_now) * cooling_heating;
           sub_cycling = false;
         }
         bdt_now += bdt_cool;
-      } while (sub_cycling);
+      } while (sub_cycling && iter<10);
     }
     if (sub_cycling_used) {
       sum0++;
