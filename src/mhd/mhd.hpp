@@ -132,6 +132,8 @@ class MHD {
   DvceArray4D<Real> e3x1, e2x1;
   DvceArray4D<Real> e1x2, e3x2;
   DvceArray4D<Real> e2x3, e1x3;
+  // cell-centered electric fields computed in CornerE
+  DvceArray4D<Real> e1_cc, e2_cc, e3_cc;
   Real dtnew;
 
   // following used for time derivatives in computation of jcon
@@ -198,8 +200,6 @@ class MHD {
 
  private:
   MeshBlockPack* pmy_pack;   // ptr to MeshBlockPack containing this MHD
-  // temporary variables used to store face-centered electric fields returned by RS
-  DvceArray4D<Real> e1_cc, e2_cc, e3_cc;
 };
 
 } // namespace mhd
