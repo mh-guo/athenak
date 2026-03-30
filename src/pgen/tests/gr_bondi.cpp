@@ -113,6 +113,7 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   pgen_final_func = BondiErrors;
   user_bcs_func = FixedBondiInflow;
   user_hist_func = BondiFluxes;
+
   // Read problem-specific parameters from input file
   // global parameters
   bondi.k_adi = pin->GetReal("problem", "k_adi");
