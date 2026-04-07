@@ -8,11 +8,19 @@
 
 #include <float.h>
 
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <algorithm> // max
 #include <string>
 
 #include "athena.hpp"
+#include "globals.hpp"
+
+#if MPI_PARALLEL_ENABLED
+#include <mpi.h>
+#endif
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "eos/eos.hpp"
@@ -41,7 +49,13 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     tet_d2_x2f("tet_d2_x2f",1,1,1,1,1),
     tet_d3_x3f("tet_d3_x3f",1,1,1,1,1),
     na("na",1,1,1,1,1,1),
-    norm_to_tet("norm_to_tet",1,1,1,1,1,1) {
+    norm_to_tet("norm_to_tet",1,1,1,1,1,1),
+    ross_rho("ross_rho",1),
+    ross_t("ross_t",1),
+    planck_rho("planck_rho",1),
+    planck_t("planck_t",1),
+    ross_table("ross_table",1,1),
+    planck_table("planck_table",1,1) {
   // Check for general relativity
   if (!(pmy_pack->pcoord->is_general_relativistic)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -78,12 +92,42 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     rad_source = false;
   }
 
+  table_opacity = pin->GetOrAddBoolean("radiation","table_opacity",false);
+  ross_table_len_x = 0;
+  ross_table_len_y = 0;
+  planck_table_len_x = 0;
+  planck_table_len_y = 0;
+  op_table_use_r = false;
+  k_elec_opacity = 0.0;
+
   // Set radiation coupling parameters including scattering and absorption opacities,
   // radiation constant, and source term behavior.
   if (rad_source) {
     kappa_s = pin->GetReal("radiation","kappa_s");
     power_opacity = pin->GetOrAddBoolean("radiation","power_opacity",false);
-    if (!(power_opacity)) {
+    if (power_opacity && table_opacity) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "<radiation>/table_opacity and power_opacity cannot both be true"
+        << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (table_opacity) {
+      op_table_use_r = pin->GetOrAddBoolean("radiation","table_use_r",false);
+      k_elec_opacity = pin->GetOrAddReal("radiation","k_elec_opacity",0.2);
+      ross_table_len_x = pin->GetOrAddInteger("radiation","ross_table_x",0);
+      ross_table_len_y = pin->GetOrAddInteger("radiation","ross_table_y",0);
+      planck_table_len_x = pin->GetOrAddInteger("radiation","planck_table_x",0);
+      planck_table_len_y = pin->GetOrAddInteger("radiation","planck_table_y",0);
+      if (ross_table_len_x * ross_table_len_y * planck_table_len_x * planck_table_len_y == 0
+          || ross_table_len_x != planck_table_len_x || ross_table_len_y != planck_table_len_y) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "Opacity table: require positive ross_table_x/y and planck_table_x/y"
+          << " with matching Rosseland and Planck dimensions." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      kappa_a = 0.0;
+      kappa_p = 0.0;
+    } else if (!(power_opacity)) {
       kappa_a = pin->GetReal("radiation","kappa_a");
       kappa_p = pin->GetReal("radiation","kappa_p");
     }
@@ -209,6 +253,128 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(divfa,nmb,prgeo->nangles,ncells3,ncells2,ncells1);
     }
   }
+
+  if (rad_source && table_opacity) {
+    Kokkos::realloc(ross_rho, ross_table_len_x);
+    Kokkos::realloc(ross_t, ross_table_len_y);
+    Kokkos::realloc(ross_table, ross_table_len_y, ross_table_len_x);
+    Kokkos::realloc(planck_rho, planck_table_len_x);
+    Kokkos::realloc(planck_t, planck_table_len_y);
+    Kokkos::realloc(planck_table, planck_table_len_y, planck_table_len_x);
+    LoadOpacityTables(pin);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Radiation::LoadOpacityTables(ParameterInput *pin)
+//! \brief Rank 0 reads ASCII opacity tables; MPI_Bcast to all ranks; sync to device.
+
+void Radiation::LoadOpacityTables(ParameterInput *pin) {
+  std::string fross = pin->GetOrAddString("radiation","opacity_ross",
+                                          "./aveopacity.txt");
+  std::string fplanck = pin->GetOrAddString("radiation","opacity_planck",
+                                            "./PlanckOpacity.txt");
+  std::string flogt = pin->GetOrAddString("radiation","opacity_logt",
+                                          "./logT.txt");
+  std::string flogr = pin->GetOrAddString("radiation","opacity_logrho",
+                                          "./logRhoT.txt");
+
+  int nx = ross_table_len_x;
+  int ny = ross_table_len_y;
+
+  if (global_variable::my_rank == 0) {
+    FILE *fkappa = std::fopen(fross.c_str(), "r");
+    FILE *fpt = std::fopen(flogt.c_str(), "r");
+    FILE *fpr = std::fopen(flogr.c_str(), "r");
+    FILE *fpk = std::fopen(fplanck.c_str(), "r");
+    if (fkappa == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "Opacity table: could not open Rosseland table file \"" << fross
+        << "\": " << std::strerror(errno) << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (fpt == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "Opacity table: could not open log-T axis file \"" << flogt
+        << "\": " << std::strerror(errno) << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (fpr == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "Opacity table: could not open log-rho axis file \"" << flogr
+        << "\": " << std::strerror(errno) << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (fpk == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "Opacity table: could not open Planck table file \"" << fplanck
+        << "\": " << std::strerror(errno) << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < nx; ++i) {
+      if (std::fscanf(fpr, "%lf", &(ross_rho.h_view(i))) != 1) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "Opacity table: error reading log rho axis file." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+    for (int i = 0; i < ny; ++i) {
+      if (std::fscanf(fpt, "%lf", &(ross_t.h_view(i))) != 1) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "Opacity table: error reading log T axis file." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+    for (int j = 0; j < ny; ++j) {
+      for (int i = 0; i < nx; ++i) {
+        if (std::fscanf(fkappa, "%lf", &(ross_table.h_view(j,i))) != 1) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+            << std::endl << "Opacity table: error reading Rosseland table." << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+      }
+    }
+    for (int j = 0; j < ny; ++j) {
+      for (int i = 0; i < nx; ++i) {
+        if (std::fscanf(fpk, "%lf", &(planck_table.h_view(j,i))) != 1) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+            << std::endl << "Opacity table: error reading Planck table." << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+      }
+    }
+    std::fclose(fkappa);
+    std::fclose(fpt);
+    std::fclose(fpr);
+    std::fclose(fpk);
+  }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Bcast(ross_rho.h_view.data(), nx, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+  MPI_Bcast(ross_t.h_view.data(), ny, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+  MPI_Bcast(ross_table.h_view.data(), nx*ny, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+  MPI_Bcast(planck_table.h_view.data(), nx*ny, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#endif
+
+  for (int i = 0; i < nx; ++i) {
+    planck_rho.h_view(i) = ross_rho.h_view(i);
+  }
+  for (int i = 0; i < ny; ++i) {
+    planck_t.h_view(i) = ross_t.h_view(i);
+  }
+
+  ross_rho.template modify<HostMemSpace>();
+  ross_rho.template sync<DevExeSpace>();
+  ross_t.template modify<HostMemSpace>();
+  ross_t.template sync<DevExeSpace>();
+  planck_rho.template modify<HostMemSpace>();
+  planck_rho.template sync<DevExeSpace>();
+  planck_t.template modify<HostMemSpace>();
+  planck_t.template sync<DevExeSpace>();
+  ross_table.template modify<HostMemSpace>();
+  ross_table.template sync<DevExeSpace>();
+  planck_table.template modify<HostMemSpace>();
+  planck_table.template sync<DevExeSpace>();
 }
 
 //----------------------------------------------------------------------------------------

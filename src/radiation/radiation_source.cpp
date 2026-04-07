@@ -103,6 +103,15 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   Real &kappa_s_ = kappa_s;
   Real &kappa_p_ = kappa_p;
   bool &power_opacity_ = power_opacity;
+  bool &table_opacity_ = table_opacity;
+  bool &op_table_use_r_ = op_table_use_r;
+  Real &k_elec_opacity_ = k_elec_opacity;
+  auto &ross_rho_ = ross_rho;
+  auto &ross_t_ = ross_t;
+  auto &planck_rho_ = planck_rho;
+  auto &planck_t_ = planck_t;
+  auto &ross_table_ = ross_table;
+  auto &planck_table_ = planck_table;
   auto &nh_c_ = nh_c;
   auto &tt = tet_c;
   auto &tc = tetcov_c;
@@ -203,12 +212,21 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
 
     // set opacities
     Real sigma_a, sigma_s, sigma_p;
-    OpacityFunction(wdn, density_scale_,
-                    tgas, temperature_scale_,
-                    length_scale_, gm1, mean_mol_weight_,
-                    power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
-                    kappa_a_, kappa_s_, kappa_p_,
-                    sigma_a, sigma_s, sigma_p);
+    if (table_opacity_) {
+      TableOpacity(wdn, density_scale_,
+                   tgas, temperature_scale_,
+                   length_scale_, op_table_use_r_,
+                   ross_rho_, ross_t_, planck_rho_, planck_t_,
+                   ross_table_, planck_table_, k_elec_opacity_,
+                   sigma_a, sigma_s, sigma_p);
+    } else {
+      OpacityFunction(wdn, density_scale_,
+                      tgas, temperature_scale_,
+                      length_scale_, gm1, mean_mol_weight_,
+                      power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
+                      kappa_a_, kappa_s_, kappa_p_,
+                      sigma_a, sigma_s, sigma_p);
+    }
 
     // correct the density used for opacity setup
     Real wdn_opacity = fmax(wdn-dfloor, dfloor_op);

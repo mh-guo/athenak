@@ -103,6 +103,13 @@ class Radiation {
   Real kappa_s;             // constant scattering coefficient
   Real kappa_p;             // Planck - Rosseland mean coefficient
   bool power_opacity;       // flag to enable Kramer's law opacity for kappa_a
+  bool table_opacity;       // flag to use tabulated Rosseland/Planck mean opacities
+  bool op_table_use_r;      // if true, use T and R = rho/T^3 (cgs) as table axes
+  Real k_elec_opacity;      // electron scattering opacity in table units (split kappa_Ross)
+  int ross_table_len_x;     // Rosseland table: density axis length
+  int ross_table_len_y;     // Rosseland table: temperature axis length
+  int planck_table_len_x;   // Planck table x length (must match Rosseland for I/O)
+  int planck_table_len_y;   // Planck table y length (must match Rosseland for I/O)
   bool is_compton_enabled;  // flag to enable/disable compton
 
   // Flags and parameters for ad hoc fixes
@@ -137,6 +144,16 @@ class Radiation {
   // intensity arrays
   DvceArray5D<Real> i0;         // intensities
   DvceArray5D<Real> coarse_i0;  // intensities on 2x coarser grid (for SMR/AMR)
+
+  // Opacity tables (host read + MPI_Bcast, then sync to device); see LoadOpacityTables
+  DualArray1D<Real> ross_rho;
+  DualArray1D<Real> ross_t;
+  DualArray1D<Real> planck_rho;
+  DualArray1D<Real> planck_t;
+  DualArray2D<Real> ross_table;
+  DualArray2D<Real> planck_table;
+
+  void LoadOpacityTables(ParameterInput *pin);
 
   // Boundary communication buffers and functions for i
   MeshBoundaryValuesCC *pbval_i;
