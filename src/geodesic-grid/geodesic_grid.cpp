@@ -229,11 +229,26 @@ GeodesicGrid::GeodesicGrid(int nlev, bool rotate, bool fluxes) :
       }
     }
 
-    // rotate geodesic mesh
+    // rotate geodesic mesh (OptimalAngles is expensive; result depends only on nlevel)
     if (rotate_geo) {
       Real rotangles[2];
-      OptimalAngles(rotangles);
-      RotateGrid(rotangles[0],rotangles[1]);
+      // Per-nlevel cache: no extra headers; if nlevel exceeds max, skip caching.
+      constexpr int k_opt_cache_max = 512;
+      static Real s_opt_zeta[k_opt_cache_max + 1];
+      static Real s_opt_psi[k_opt_cache_max + 1];
+      static bool s_opt_cached[k_opt_cache_max + 1];
+      if (nlevel <= k_opt_cache_max && s_opt_cached[nlevel]) {
+        rotangles[0] = s_opt_zeta[nlevel];
+        rotangles[1] = s_opt_psi[nlevel];
+      } else {
+        OptimalAngles(rotangles);
+        if (nlevel <= k_opt_cache_max) {
+          s_opt_zeta[nlevel] = rotangles[0];
+          s_opt_psi[nlevel] = rotangles[1];
+          s_opt_cached[nlevel] = true;
+        }
+      }
+      RotateGrid(rotangles[0], rotangles[1]);
     }
 
     // set grid positions
