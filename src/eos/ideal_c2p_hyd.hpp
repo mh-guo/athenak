@@ -128,6 +128,12 @@ void SingleC2P_IdealSRHyd(HydCons1D &u, const EOS_Data &eos, const Real s2, HydP
     efloor_used = true;
   }
 
+  // apply specific internal energy (temperature) floor
+  if (u.e < u.d*eos.tfloor/gm1) {
+    u.e = u.d*eos.tfloor/gm1;
+    efloor_used = true;
+  }
+
   // Recast all variables (eq C2)
   Real q = u.e/u.d;
   Real r = sqrt(s2)/u.d;
@@ -203,6 +209,7 @@ void SingleC2P_IdealSRHyd(HydCons1D &u, const EOS_Data &eos, const Real s2, HydP
   // compute specific internal energy density then apply floor
   Real eps = lor*q - z*r + (z*z)/(1.0 + lor);   // (C16)
   Real epsmin = fmax(eos.pfloor/(dens*gm1), eos.sfloor*pow(dens, gm1)/gm1);
+  epsmin = fmax(epsmin, eos.tfloor/gm1);
   if (eps <= epsmin) {
     eps = epsmin;
     efloor_used = true;
