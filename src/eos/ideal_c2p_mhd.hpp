@@ -146,6 +146,12 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
     efloor_used = true;
   }
 
+  // apply specific internal energy (temperature) floor
+  if (u.e < u.d*eos.tfloor/gm1 + 0.5*b2) {
+    u.e = u.d*eos.tfloor/gm1 + 0.5*b2;
+    efloor_used = true;
+  }
+
   // Recast all variables (eq 22-24)
   Real q = u.e/u.d;
   Real r = sqrt(s2)/u.d;
@@ -266,6 +272,7 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   // compute specific internal energy density then apply floors
   Real eps = lor*(qbar - mu*rbar) + z2/(lor + 1.0);
   Real epsmin = fmax(eos.pfloor/(dens*gm1), eos.sfloor*pow(dens, gm1)/gm1);
+  epsmin = fmax(epsmin, eos.tfloor/gm1);
   if (eps <= epsmin) {
     eps = epsmin;
     efloor_used = true;

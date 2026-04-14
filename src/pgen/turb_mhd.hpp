@@ -562,7 +562,8 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
       sum_m2 += dvol*force_new_(m,1,k,j,i);
       sum_m3 += dvol*force_new_(m,2,k,j,i);
     }
-  }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2), Kokkos::Sum<Real>(m3));
+  }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2),
+     Kokkos::Sum<Real>(m3));
 #if MPI_PARALLEL_ENABLED
   Real m_sum2[4] = {m0,m1,m2,m3};
   Real gm_sum2[4];
