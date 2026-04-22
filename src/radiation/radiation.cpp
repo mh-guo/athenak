@@ -9,8 +9,10 @@
 #include <float.h>
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <algorithm> // max
 #include <string>
@@ -30,8 +32,39 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "units/units.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_opacities.hpp"
 
 namespace radiation {
+namespace {
+// opacity_table_diag: one parallel_for calls device TableOpacity (d_view) after h->d sync
+void TableOpacityDeviceProbe(Real dens, Real temp, Real density_scale, Real temperature_scale,
+                             Real length_scale, bool op_table_use_r, Real k_elec,
+                             const DualArray1D<Real> &ross_rho,
+                             const DualArray1D<Real> &ross_t,
+                             const DualArray1D<Real> &planck_rho,
+                             const DualArray1D<Real> &planck_t,
+                             const DualArray2D<Real> &ross_table,
+                             const DualArray2D<Real> &planck_table,
+                             Real &sa, Real &ss, Real &sp) {
+  Kokkos::View<Real[3], DevExeSpace> d_sig("opacity_diag_sig");
+  Kokkos::parallel_for(
+    "OpacityTable diag TableOpacity", Kokkos::RangePolicy<DevExeSpace>(0, 1),
+    KOKKOS_LAMBDA(int) {
+      Real a = 0.0, s = 0.0, p = 0.0;
+      TableOpacity(dens, density_scale, temp, temperature_scale, length_scale, op_table_use_r,
+                    ross_rho, ross_t, planck_rho, planck_t, ross_table, planck_table, k_elec,
+                    a, s, p);
+      d_sig(0) = a;
+      d_sig(1) = s;
+      d_sig(2) = p;
+    });
+  Kokkos::fence();
+  auto h_sig = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), d_sig);
+  sa = h_sig(0);
+  ss = h_sig(1);
+  sp = h_sig(2);
+}
+} // namespace
 //----------------------------------------------------------------------------------------
 // constructor, initializes data structures and parameters
 
@@ -270,6 +303,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
 //! \brief Rank 0 reads ASCII opacity tables; MPI_Bcast to all ranks; sync to device.
 
 void Radiation::LoadOpacityTables(ParameterInput *pin) {
+  bool opacity_table_diag = pin->GetOrAddBoolean("radiation","opacity_table_diag",false);
+
   std::string fross = pin->GetOrAddString("radiation","opacity_ross",
                                           "./aveopacity.txt");
   std::string fplanck = pin->GetOrAddString("radiation","opacity_planck",
@@ -363,6 +398,66 @@ void Radiation::LoadOpacityTables(ParameterInput *pin) {
     planck_t.h_view(i) = ross_t.h_view(i);
   }
 
+  if (opacity_table_diag && global_variable::my_rank == 0) {
+    Real density_scale = 1.0;
+    Real temperature_scale = 1.0;
+    Real length_scale = 1.0;
+    if (are_units_enabled) {
+      density_scale = pmy_pack->punit->density_cgs();
+      temperature_scale = pmy_pack->punit->temperature_cgs();
+      length_scale = pmy_pack->punit->length_cgs();
+    }
+    auto rho_h = ross_rho.h_view;
+    auto t_h = ross_t.h_view;
+    auto rt_h = ross_table.h_view;
+    auto pt_h = planck_table.h_view;
+
+    bool mono_rho = true;
+    for (int i = 1; i < nx; ++i) {
+      if (rho_h(i) <= rho_h(i-1)) {
+        mono_rho = false;
+        break;
+      }
+    }
+    bool mono_t = true;
+    for (int j = 1; j < ny; ++j) {
+      if (t_h(j) <= t_h(j-1)) {
+        mono_t = false;
+        break;
+      }
+    }
+    Real kr_min = rt_h(0,0), kr_max = rt_h(0,0);
+    Real kp_min = pt_h(0,0), kp_max = pt_h(0,0);
+    for (int j = 0; j < ny; ++j) {
+      for (int i = 0; i < nx; ++i) {
+        kr_min = std::min(kr_min, rt_h(j,i));
+        kr_max = std::max(kr_max, rt_h(j,i));
+        kp_min = std::min(kp_min, pt_h(j,i));
+        kp_max = std::max(kp_max, pt_h(j,i));
+      }
+    }
+
+    std::cout << std::endl << "[radiation] opacity_table_diag: loaded opacity tables"
+              << std::endl << "  files: ross=\"" << fross << "\" planck=\"" << fplanck << "\""
+              << std::endl << "         logrho=\"" << flogr << "\" logT=\"" << flogt << "\""
+              << std::endl << "  grid: nx=" << nx << " ny=" << ny
+              << "  table_use_r=" << (op_table_use_r ? "true" : "false")
+              << "  k_elec_opacity=" << k_elec_opacity
+              << std::endl << "  axis log10(rho) [" << rho_h(0) << ", " << rho_h(nx-1) << "]"
+              << " strictly increasing: " << (mono_rho ? "yes" : "NO (lookup assumes sorted)")
+              << std::endl << "  axis log10(T)   [" << t_h(0) << ", " << t_h(ny-1) << "]"
+              << " strictly increasing: " << (mono_t ? "yes" : "NO (lookup assumes sorted)")
+              << std::endl << "  Rosseland kappa in table: min=" << kr_min << " max=" << kr_max
+              << std::endl << "  Planck kappa in table:    min=" << kp_min << " max=" << kp_max
+              << std::endl << "  table corners Rosseland (j,i)=(0,0),(ny-1,nx-1): "
+              << rt_h(0,0) << ", " << rt_h(ny-1,nx-1)
+              << std::endl << "  table corners Planck:    "
+              << pt_h(0,0) << ", " << pt_h(ny-1,nx-1)
+              << std::endl << "  units for TableOpacity probe: density_scale=" << density_scale
+              << " temperature_scale=" << temperature_scale
+              << " length_scale=" << length_scale << std::endl;
+  }
+
   ross_rho.template modify<HostMemSpace>();
   ross_rho.template sync<DevExeSpace>();
   ross_t.template modify<HostMemSpace>();
@@ -375,6 +470,51 @@ void Radiation::LoadOpacityTables(ParameterInput *pin) {
   ross_table.template sync<DevExeSpace>();
   planck_table.template modify<HostMemSpace>();
   planck_table.template sync<DevExeSpace>();
+
+  if (opacity_table_diag && global_variable::my_rank == 0) {
+    Real density_scale = 1.0;
+    Real temperature_scale = 1.0;
+    Real length_scale = 1.0;
+    if (are_units_enabled) {
+      density_scale = pmy_pack->punit->density_cgs();
+      temperature_scale = pmy_pack->punit->temperature_cgs();
+      length_scale = pmy_pack->punit->length_cgs();
+    }
+    auto rho_h = ross_rho.h_view;
+    auto t_h = ross_t.h_view;
+    Real log_x_mid = 0.5*(rho_h(0) + rho_h(nx-1));
+    Real log_t_mid = 0.5*(t_h(0) + t_h(ny-1));
+    Real temp_mid = std::pow(10.0, log_t_mid) / temperature_scale;
+    Real dens_mid = 0.0;
+    if (op_table_use_r) {
+      dens_mid = std::pow(10.0, log_x_mid + 3.0*log_t_mid - 18.0) / density_scale;
+    } else {
+      dens_mid = std::pow(10.0, log_x_mid) / density_scale;
+    }
+    Real sa = 0.0, ss = 0.0, sp = 0.0;
+    TableOpacityDeviceProbe(dens_mid, temp_mid, density_scale, temperature_scale, length_scale,
+                            op_table_use_r, k_elec_opacity,
+                            ross_rho, ross_t, planck_rho, planck_t, ross_table, planck_table,
+                            sa, ss, sp);
+    std::cout << std::scientific << std::setprecision(8)
+              << "  probe (log-space center, device TableOpacity): dens=" << dens_mid
+              << " temp=" << temp_mid
+              << " -> sigma_a=" << sa << " sigma_s=" << ss << " sigma_p=" << sp << std::endl;
+
+    Real probe_rho = pin->GetOrAddReal("radiation","opacity_diag_rho",0.0);
+    Real probe_temp = pin->GetOrAddReal("radiation","opacity_diag_temp",0.0);
+    if (probe_rho > 0.0 && probe_temp > 0.0) {
+      TableOpacityDeviceProbe(probe_rho, probe_temp, density_scale, temperature_scale, length_scale,
+                              op_table_use_r, k_elec_opacity,
+                              ross_rho, ross_t, planck_rho, planck_t, ross_table, planck_table,
+                              sa, ss, sp);
+      std::cout << std::scientific << std::setprecision(8)
+                << "  probe (opacity_diag_rho/temp, device TableOpacity): dens=" << probe_rho
+                << " temp=" << probe_temp
+                << " -> sigma_a=" << sa << " sigma_s=" << ss << " sigma_p=" << sp << std::endl;
+    }
+    std::cout << std::defaultfloat;
+  }
 }
 
 //----------------------------------------------------------------------------------------

@@ -26,7 +26,9 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_opacities.hpp"
 #include "radiation/radiation_tetrad.hpp"
+#include "units/units.hpp"
 #include "particles/particles.hpp"
 #include "outputs.hpp"
 #include "utils/current.hpp"
@@ -1086,8 +1088,124 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     });
   }
 
+  // radiation-fluid opacities (sigma_a,s,p); uses current w0 / bcc0 (see rad_fluid_sigma)
+  if (name.compare("rad_fluid_sigma") == 0) {
+    if (derived_var.extent(4) <= 1)
+      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+    auto dv = derived_var;
+    auto &coord = pm->pmb_pack->pcoord->coord_data;
+    bool &flat = coord.is_minkowski;
+    Real &spin = coord.bh_spin;
+    auto excision_flux_ = pm->pmb_pack->pcoord->excision_flux;
+
+    auto prad = pm->pmb_pack->prad;
+    Real density_scale_ = 1.0, temperature_scale_ = 1.0, length_scale_ = 1.0;
+    Real mean_mol_weight_ = 1.0;
+    Real rosseland_coef_ = 1.0, planck_minus_rosseland_coef_ = 0.0;
+    if (prad->are_units_enabled) {
+      density_scale_ = pm->pmb_pack->punit->density_cgs();
+      temperature_scale_ = pm->pmb_pack->punit->temperature_cgs();
+      length_scale_ = pm->pmb_pack->punit->length_cgs();
+      mean_mol_weight_ = pm->pmb_pack->punit->mu();
+      rosseland_coef_ = pm->pmb_pack->punit->rosseland_coef_cgs;
+      planck_minus_rosseland_coef_ = pm->pmb_pack->punit->planck_minus_rosseland_coef_cgs;
+    }
+
+    Real gm1, dfloor;
+    if (pm->pmb_pack->phydro != nullptr) {
+      gm1 = pm->pmb_pack->phydro->peos->eos_data.gamma - 1.0;
+      dfloor = pm->pmb_pack->phydro->peos->eos_data.dfloor;
+    } else {
+      gm1 = pm->pmb_pack->pmhd->peos->eos_data.gamma - 1.0;
+      dfloor = pm->pmb_pack->pmhd->peos->eos_data.dfloor;
+    }
+
+    DvceArray5D<Real> w0_;
+    DvceArray5D<Real> bcc0_;
+    const bool is_mhd_pack = (pm->pmb_pack->pmhd != nullptr);
+    if (pm->pmb_pack->phydro != nullptr) {
+      w0_ = pm->pmb_pack->phydro->w0;
+    } else {
+      w0_ = pm->pmb_pack->pmhd->w0;
+      bcc0_ = pm->pmb_pack->pmhd->bcc0;
+    }
+
+    bool correct_radsrc_opacity_ = prad->correct_radsrc_opacity;
+    Real dfloor_op_ = prad->dfloor_opacity;
+    Real dtrunc_max_ = prad->dens_trunc_max;
+    Real tau_trunc_ = prad->tau_truncation;
+    Real sigmoid_res_ = prad->sigmoid_residual;
+    Real kappa_s_ = prad->kappa_s;
+    bool table_opacity_ = prad->table_opacity;
+    bool power_opacity_ = prad->power_opacity;
+    bool op_table_use_r_ = prad->op_table_use_r;
+    Real k_elec_opacity_ = prad->k_elec_opacity;
+    auto ross_rho_ = prad->ross_rho;
+    auto ross_t_ = prad->ross_t;
+    auto planck_rho_ = prad->planck_rho;
+    auto planck_t_ = prad->planck_t;
+    auto ross_table_ = prad->ross_table;
+    auto planck_table_ = prad->planck_table;
+    Real kappa_a_ = prad->kappa_a;
+    Real kappa_p_ = prad->kappa_p;
+
+    int i0 = i_dv;
+    par_for("rad_fluid_sigma", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+      Real glower[4][4], gupper[4][4];
+      ComputeMetricAndInverse(x1v,x2v,x3v,flat,spin,glower,gupper);
+
+      Real &wdn = w0_(m,IDN,k,j,i);
+      Real &wvx = w0_(m,IVX,k,j,i);
+      Real &wvy = w0_(m,IVY,k,j,i);
+      Real &wvz = w0_(m,IVZ,k,j,i);
+      Real &wen = w0_(m,IEN,k,j,i);
+
+      Real bccx = 0.0, bccy = 0.0, bccz = 0.0;
+      if (is_mhd_pack) {
+        bccx = bcc0_(m,IBX,k,j,i);
+        bccy = bcc0_(m,IBY,k,j,i);
+        bccz = bcc0_(m,IBZ,k,j,i);
+      }
+
+      Real sigma_a = 0.0, sigma_s = 0.0, sigma_p = 0.0;
+      radiation::RadiationFluidCellSigmas(
+          wdn, wvx, wvy, wvz, wen, gm1, glower, gupper,
+          excision_flux_, m, k, j, i,
+          size.d_view(m).dx1, size.d_view(m).dx2, size.d_view(m).dx3,
+          correct_radsrc_opacity_, is_mhd_pack,
+          bccx, bccy, bccz,
+          dfloor, dfloor_op_, dtrunc_max_, tau_trunc_, sigmoid_res_, kappa_s_,
+          table_opacity_, power_opacity_,
+          density_scale_, temperature_scale_, length_scale_,
+          op_table_use_r_,
+          ross_rho_, ross_t_, planck_rho_, planck_t_, ross_table_, planck_table_,
+          k_elec_opacity_,
+          mean_mol_weight_, rosseland_coef_, planck_minus_rosseland_coef_,
+          kappa_a_, kappa_p_,
+          sigma_a, sigma_s, sigma_p);
+
+      dv(m,i0,k,j,i) = sigma_a;
+      dv(m,i0+1,k,j,i) = sigma_s;
+      dv(m,i0+2,k,j,i) = sigma_p;
+    });
+    i_dv += 3;
+  }
+
   // radiation moments
-  if (name.compare(0, 3, "rad") == 0) {
+  if (name.compare(0, 3, "rad") == 0 && name.compare("rad_fluid_sigma") != 0) {
     // Determine if coordinate and/or fluid frame moments required
     bool needs_coord_only = (name.compare("rad_coord") == 0);
     bool needs_fluid_only = (name.compare("rad_fluid") == 0);

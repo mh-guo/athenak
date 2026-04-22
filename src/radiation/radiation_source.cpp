@@ -179,83 +179,28 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     Real gamma = sqrt(1.0 + q);
     Real u0 = gamma/alpha;
 
-    // compute sigma_cold
-    Real sigma_cold = 0.0;
-    if (correct_radsrc_opacity_ && is_mhd_enabled_) {
-      Real u1 = wvx - alpha * gamma * gupper[0][1];
-      Real u2 = wvy - alpha * gamma * gupper[0][2];
-      Real u3 = wvz - alpha * gamma * gupper[0][3];
-
-      // lower vector indices
-      Real u_1 = glower[1][0]*u0 + glower[1][1]*u1 + glower[1][2]*u2 + glower[1][3]*u3;
-      Real u_2 = glower[2][0]*u0 + glower[2][1]*u1 + glower[2][2]*u2 + glower[2][3]*u3;
-      Real u_3 = glower[3][0]*u0 + glower[3][1]*u1 + glower[3][2]*u2 + glower[3][3]*u3;
-
-      // calculate 4-magnetic field
-      auto &bccx = bcc0_(m,IBX,k,j,i);
-      auto &bccy = bcc0_(m,IBY,k,j,i);
-      auto &bccz = bcc0_(m,IBZ,k,j,i);
-      Real b0_ = u_1*bccx + u_2*bccy + u_3*bccz;
-      Real b1_ = (bccx + b0_ * u1) / u0;
-      Real b2_ = (bccy + b0_ * u2) / u0;
-      Real b3_ = (bccz + b0_ * u3) / u0;
-
-      // lower vector indices
-      Real b_0 = glower[0][0]*b0_ + glower[0][1]*b1_ + glower[0][2]*b2_ + glower[0][3]*b3_;
-      Real b_1 = glower[1][0]*b0_ + glower[1][1]*b1_ + glower[1][2]*b2_ + glower[1][3]*b3_;
-      Real b_2 = glower[2][0]*b0_ + glower[2][1]*b1_ + glower[2][2]*b2_ + glower[2][3]*b3_;
-      Real b_3 = glower[3][0]*b0_ + glower[3][1]*b1_ + glower[3][2]*b2_ + glower[3][3]*b3_;
-      Real b_sq = b0_*b_0 + b1_*b_1 + b2_*b_2 + b3_*b_3;
-
-      sigma_cold = b_sq/wdn;
-    } // endif (correct_radsrc_opacity_ && is_mhd_enabled_)
-
-    // set opacities
-    Real sigma_a, sigma_s, sigma_p;
-    if (table_opacity_) {
-      TableOpacity(wdn, density_scale_,
-                   tgas, temperature_scale_,
-                   length_scale_, op_table_use_r_,
-                   ross_rho_, ross_t_, planck_rho_, planck_t_,
-                   ross_table_, planck_table_, k_elec_opacity_,
-                   sigma_a, sigma_s, sigma_p);
-    } else {
-      OpacityFunction(wdn, density_scale_,
-                      tgas, temperature_scale_,
-                      length_scale_, gm1, mean_mol_weight_,
-                      power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
-                      kappa_a_, kappa_s_, kappa_p_,
-                      sigma_a, sigma_s, sigma_p);
+    Real bccx = 0.0, bccy = 0.0, bccz = 0.0;
+    if (is_mhd_enabled_) {
+      bccx = bcc0_(m,IBX,k,j,i);
+      bccy = bcc0_(m,IBY,k,j,i);
+      bccz = bcc0_(m,IBZ,k,j,i);
     }
-
-    // correct the density used for opacity setup
-    Real wdn_opacity = fmax(wdn-dfloor, dfloor_op);
-    if (correct_radsrc_opacity_) {
-      if (excision_flux_(m,k,j,i)) {
-        wdn_opacity = dfloor_op;
-      } else {
-        Real delta_l = fmax(fmax(size.d_view(m).dx1, size.d_view(m).dx2), size.d_view(m).dx3);
-        Real dtrunc = fmax(0.0, sigma_cold)*tau_trunc / (kappa_s_*delta_l);
-        dtrunc = fmin(dtrunc_max, fmax(dfloor, dtrunc)); // dfloor <= dtrunc <= dtrunc_max
-        Real fac_trunc = dtrunc / dfloor;
-        Real wid_trunc = 0.5*log10(fac_trunc) / log(1./sigmoid_res - 1.);
-        Real wdn_real = fmax(wdn-dfloor, dfloor_op);
-        Real del_reduce = log10(dfloor) - log10(dfloor_op);
-
-        Real fac_inv = 1.0;
-        if (fabs(fac_trunc-1) > 1e-12) {
-          fac_inv = 1.0 + exp( -1./wid_trunc * ( log10(wdn_real) - (log10(dfloor) + 0.5*log10(fac_trunc)) ) );
-        }
-
-        Real lg_rho_op = log10(wdn_real) - (1.-1./fac_inv) * del_reduce;
-        wdn_opacity = pow(10.0, lg_rho_op);
-      } // endelse
-
-      // apply the reduced density
-      sigma_a *= wdn_opacity/wdn;
-      sigma_s *= wdn_opacity/wdn;
-      sigma_p *= wdn_opacity/wdn;
-    } // endif correct_radsrc_opacity_
+    Real sigma_a, sigma_s, sigma_p;
+    RadiationFluidCellSigmas(
+        wdn, wvx, wvy, wvz, wen, gm1, glower, gupper,
+        excision_flux_, m, k, j, i,
+        size.d_view(m).dx1, size.d_view(m).dx2, size.d_view(m).dx3,
+        correct_radsrc_opacity_, is_mhd_enabled_,
+        bccx, bccy, bccz,
+        dfloor, dfloor_op, dtrunc_max, tau_trunc, sigmoid_res, kappa_s_,
+        table_opacity_, power_opacity_,
+        density_scale_, temperature_scale_, length_scale_,
+        op_table_use_r_,
+        ross_rho_, ross_t_, planck_rho_, planck_t_, ross_table_, planck_table_,
+        k_elec_opacity_,
+        mean_mol_weight_, rosseland_coef_, planck_minus_rosseland_coef_,
+        kappa_a_, kappa_p_,
+        sigma_a, sigma_s, sigma_p);
 
     Real dtcsiga = dt_*sigma_a;
     Real dtcsigs = dt_*sigma_s;
