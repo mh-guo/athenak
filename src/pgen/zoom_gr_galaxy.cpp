@@ -1678,7 +1678,29 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         Real s2;
         // call c2p function
         TransformToSRHyd(u,glower,gupper,s2,u_sr);
-        SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
+
+        // calculate local eos parameters
+        EOS_Data eos_ = eos;
+        if (eos.rdfloor > 0.0) {
+          Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+          auto &z = x3v;
+          auto &a = spin;
+          Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
+          Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
+          // bound to [dfloor, rdfloor]
+          Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+          // apply radius-dependent density floor to u_sr.d if enabled
+          // not u.d so u_sr.e is computed from the original u.d self-consistently
+          // not w.d so the c2p algorithm is self-consistent
+          if (u_sr.d < dfloor_) {
+            u_sr.d = dfloor_;
+            dfloor_used = true;
+          }
+          // assign local pressure floor
+          eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
+        }
+        
+        SingleC2P_IdealSRHyd(u_sr, eos_, s2, w,
                             dfloor_used, efloor_used, c2p_failure, iter_used);
         // add cooling/heating term
         w.e -= bdt * cooling_heating;
@@ -1696,6 +1718,21 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         MHDCons1D u_sr;
         Real s2, b2, rpar;
         TransformToSRMHD(u_m,glower,gupper,s2,b2,rpar,u_sr);
+
+        // calculate local eos parameters
+        EOS_Data eos_ = eos;
+        if (eos.rdfloor > 0.0) {
+          Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+          auto &z = x3v;
+          auto &a = spin;
+          Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
+          Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
+          // bound to [dfloor, rdfloor]
+          Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+          eos_.dfloor = dfloor_;
+          eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
+        }
+
         // call c2p function
         // (inline function in ideal_c2p_mhd.hpp file)
         SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
