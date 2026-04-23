@@ -150,7 +150,14 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
         Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
         // bound to [dfloor, rdfloor]
         Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
-        eos_.dfloor = dfloor_;
+        // apply radius-dependent density floor to u_sr.d if enabled
+        // not u.d so u_sr.e is computed from the original u.d self-consistently
+        // not w.d so the c2p algorithm is self-consistent
+        if (u_sr.d < dfloor_) {
+          u_sr.d = dfloor_;
+          dfloor_used = true;
+        }
+        // assign local pressure floor
         eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
       }
 
@@ -173,6 +180,10 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
         w.vy *= factor;
         w.vz *= factor;
       }
+      // if (dfloor_used) {
+      //   Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      //   printf("dfloor_used at %d %d %d %d, x1v=%e, x2v=%e, x3v=%e, rad=%e, w.d=%e, w.e=%e, w.vx=%e, w.vy=%e, w.vz=%e\n", m, k, j, i, x1v, x2v, x3v, rad, w.d, w.e, w.vx, w.vy, w.vz);
+      // }
     }
 
     // set FOFC flag and quit loop if this function called only to check floors
