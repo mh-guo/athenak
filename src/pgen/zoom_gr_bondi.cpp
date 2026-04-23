@@ -12,6 +12,8 @@
 #include <sstream>
 #include <string> // string
 #include <cstdio> // fclose
+#include <limits> // numeric_limits
+#include <memory> // make_unique
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -175,7 +177,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real lambda_cooling = ISMCoolFn(bondi.temp_inf*temp_unit)/cooling_unit;
       if (bondi.tau_cool > 0.0) {
         Real t_cool = bondi.tau_cool * t_char;
-        bondi.rho_inf = bondi.temp_inf / (t_cool * gm1 * lambda_cooling);  
+        bondi.rho_inf = bondi.temp_inf / (t_cool * gm1 * lambda_cooling);
       } else {
         Real t_cool = bondi.temp_inf / (bondi.rho_inf * gm1 * lambda_cooling);
         bondi.tau_cool = t_cool / t_char;
@@ -220,7 +222,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(bondi.spin));
   int nintp = pin->GetOrAddInteger("problem", "hist_nintp", 2);
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux, nintp));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::pow(2.0,0.5), nintp));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::sqrt(2.0), nintp));
   int hist_nr = pin->GetOrAddInteger("problem", "hist_nr", 4);
   Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 3.0);
   Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
@@ -272,7 +274,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-    // TODO: add flat IC
+    // TODO(@mhguo): add flat IC
     ComputePrimitiveSingle(x1v,x2v,x3v,coord,bondi_,rho,pgas,uu1,uu2,uu3);
     // Calculate perturbation
     auto rand_gen = rand_pool64.get_state(); // get random number state this thread
@@ -842,7 +844,7 @@ void FixedBondiInflow(Mesh *pm) {
       }
     });
   }
-  // TODO (@mhguo): check whether it should be is or is-1, also in gr_torus problem
+  // TODO(@mhguo): check whether it should be is or is-1, also in gr_torus problem
   // ConsToPrim over all X1 ghost zones *and* at the innermost/outermost X1-active zones
   // of Meshblocks, even if Meshblock face is not at the edge of computational domain
   if (!is_mhd) {
@@ -1072,8 +1074,8 @@ void FixedBondiInflow(Mesh *pm) {
     pmbp->pmhd->peos->PrimToCons(w0_,bcc0_,u0_,0,n1m1,0,n2m1,ke+1,ke+ng);
   }
 
-  // TODO: assuming MHD!
-  // TODO: think whether need refining check as we don't use u1
+  // TODO(@mhguo): assuming MHD!
+  // TODO(@mhguo): think whether need refining check as we don't use u1
   // bool refining = (pm->pmr != nullptr) ? pm->pmr->refining : false;
   if (is_mhd && bondi_.bc_type == 1) { // && !refining
     Real rbout = bondi_.rb_out;
@@ -1168,7 +1170,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
               << " NHISTORY_VARIABLES" << std::endl;
     exit(EXIT_FAILURE);
   }
-  // TODO: add angular momentum components
+  // TODO(@mhguo): add angular momentum components
   // no more than 7 characters per label
   std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
     "lx","ly","lz","lzout","phi","eint","b^2","alpha","lor","u0","u_0","ur","uph","b0",
@@ -1312,7 +1314,7 @@ void BondiFluxes(HistoryData *pdata, Mesh *pm) {
       Real bernl_hyd = (on)? -(1.0 + gamma*int_ie/int_dn)*u_0-1.0 : 0.0;
 
       Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
-        t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx, 
+        t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx,
         int_ie, b_sq, alpha, lor, u0, u_0, ur, uph, b0, b_0, br, bph,
         t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
       };
@@ -1443,7 +1445,29 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         Real s2;
         // call c2p function
         TransformToSRHyd(u,glower,gupper,s2,u_sr);
-        SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
+
+        // calculate local eos parameters
+        EOS_Data eos_ = eos;
+        if (eos.rdfloor > 0.0) {
+          Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+          auto &z = x3v;
+          auto &a = spin;
+          Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
+          Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
+          // bound to [dfloor, rdfloor]
+          Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+          // apply radius-dependent density floor to u_sr.d if enabled
+          // not u.d so u_sr.e is computed from the original u.d self-consistently
+          // not w.d so the c2p algorithm is self-consistent
+          if (u_sr.d < dfloor_) {
+            u_sr.d = dfloor_;
+            dfloor_used = true;
+          }
+          // assign local pressure floor
+          eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
+        }
+        
+        SingleC2P_IdealSRHyd(u_sr, eos_, s2, w,
                             dfloor_used, efloor_used, c2p_failure, iter_used);
         // add cooling/heating term
         w.e -= bdt * cooling_heating;
@@ -1454,19 +1478,34 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         u_m.my = u0(m,IM2,k,j,i);
         u_m.mz = u0(m,IM3,k,j,i);
         u_m.e  = u0(m,IEN,k,j,i);
-        //TODO: are you sure bcc is updated?
+        //TODO(@mhguo): are you sure bcc is updated?
         u_m.bx = bcc(m,IBX,k,j,i);
         u_m.by = bcc(m,IBY,k,j,i);
         u_m.bz = bcc(m,IBZ,k,j,i);
         MHDCons1D u_sr;
         Real s2, b2, rpar;
         TransformToSRMHD(u_m,glower,gupper,s2,b2,rpar,u_sr);
+
+        // calculate local eos parameters
+        EOS_Data eos_ = eos;
+        if (eos.rdfloor > 0.0) {
+          Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+          auto &z = x3v;
+          auto &a = spin;
+          Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
+          Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
+          // bound to [dfloor, rdfloor]
+          Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+          eos_.dfloor = dfloor_;
+          eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
+        }
+
         // call c2p function
         // (inline function in ideal_c2p_mhd.hpp file)
         SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
                             dfloor_used, efloor_used, c2p_failure, iter_used);
         // add cooling/heating term
-        // TODO: subcycling here?
+        // TODO(@mhguo): subcycling here?
         w.e -= bdt * cooling_heating;
         // load single state of primitive variables
         w_m.d  = w.d;

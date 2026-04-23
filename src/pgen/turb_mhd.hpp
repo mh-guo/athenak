@@ -154,6 +154,7 @@ TurbulenceMhd::~TurbulenceMhd() {
 // \brief Initializes driving, and so is only executed once at start of calc.
 // Cannot be included in constructor since (it seems) Kokkos::par_for not allowed in cons.
 
+// TODO(@leva): consider AMR support
 TaskStatus TurbulenceMhd::InitializeModes(int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
@@ -556,13 +557,14 @@ TaskStatus TurbulenceMhd::InitializeModes(int stage) {
     Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
     Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
     Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
-    if (rad < rmin) {
+    if (rad < rmin) { //TODO(@mhguo): why? why not > rmin?
       sum_m0 += dvol;
       sum_m1 += dvol*force_new_(m,0,k,j,i);
       sum_m2 += dvol*force_new_(m,1,k,j,i);
       sum_m3 += dvol*force_new_(m,2,k,j,i);
     }
-  }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2), Kokkos::Sum<Real>(m3));
+  }, Kokkos::Sum<Real>(m0), Kokkos::Sum<Real>(m1), Kokkos::Sum<Real>(m2),
+     Kokkos::Sum<Real>(m3));
 #if MPI_PARALLEL_ENABLED
   Real m_sum2[4] = {m0,m1,m2,m3};
   Real gm_sum2[4];

@@ -127,9 +127,8 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
       Real s2;
       TransformToSRHyd(u,glower,gupper,s2,u_sr);
 
-      // apply radius-dependent density floor to u_sr.d if enabled
-      // not u.d so u_sr.e is computed from the original u.d
-      // not w.d so the c2p algorithm is self-consistent
+      // calculate local eos parameters
+      EOS_Data eos_ = eos;
       if (eos.rdfloor > 0.0) {
         Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
         auto &z = x3v;
@@ -138,15 +137,20 @@ void IdealGRHydro::ConsToPrim(DvceArray5D<Real> &cons, DvceArray5D<Real> &prim,
         Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
         // bound to [dfloor, rdfloor]
         Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
+        // apply radius-dependent density floor to u_sr.d if enabled
+        // not u.d so u_sr.e is computed from the original u.d self-consistently
+        // not w.d so the c2p algorithm is self-consistent
         if (u_sr.d < dfloor_) {
           u_sr.d = dfloor_;
           dfloor_used = true;
         }
+        // assign local pressure floor
+        eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
       }
 
       // call c2p function
       // (inline function in ideal_c2p_hyd.hpp file)
-      SingleC2P_IdealSRHyd(u_sr, eos, s2, w,
+      SingleC2P_IdealSRHyd(u_sr, eos_, s2, w,
                            dfloor_used, efloor_used, c2p_failure, iter_used);
 
       // apply velocity ceiling if necessary
