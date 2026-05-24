@@ -28,6 +28,7 @@
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "pgen.hpp"
+#include "restart_regrid.hpp"
 
 
 //----------------------------------------------------------------------------------------
@@ -102,6 +103,47 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   }
   user_srcs = pin->GetOrAddBoolean("problem","user_srcs",false);
   user_hist = pin->GetOrAddBoolean("problem","user_hist",false);
+
+  if (RestartRegrid::IsEnabled(pin)) {
+    IOWrapperSizeT restart_payload_offset =
+        RestartRegrid::LoadAndProlongate(pin, pm, resfile, single_file_per_rank);
+    // call problem generator again to re-initialize data, fn ptrs, as needed
+    // second argument true since this IS a restart
+    CallProblemGenerator(pin, true);
+
+    if (pm->pzoom != nullptr && pm->pzoom->read_rst) {
+      pm->pzoom->ReadRestartStateForRegrid(resfile, restart_payload_offset);
+    }
+
+    // Check that user defined BCs were enrolled if needed
+    if (user_bcs) {
+      if (user_bcs_func == nullptr) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "User BCs specified in <mesh> block, but not enrolled "
+                  << "during restart by SetProblemData()." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    // Check that user defined srcterms were enrolled if needed
+    if (user_srcs) {
+      if (user_srcs_func == nullptr) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "User SRCs specified in <problem> block, but not "
+                  << "enrolled by UserProblem()." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    // Check that user defined history outputs were enrolled if needed
+    if (user_hist) {
+      if (user_hist_func == nullptr) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "User history output specified in <problem> block, "
+                  << "but not enrolled by UserProblem()." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    return;
+  }
 
   // get spatial dimensions of arrays, including ghost zones
   auto &indcs = pm->pmb_pack->pmesh->mb_indcs;

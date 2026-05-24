@@ -37,6 +37,7 @@
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "outputs/outputs.hpp"
+#include "pgen/restart_regrid.hpp"
 #include "driver/driver.hpp"
 #include "utils/utils.hpp"
 
@@ -292,8 +293,11 @@ int main(int argc, char *argv[]) {
   // pointer to Mesh.
 
   Mesh* pmesh = new Mesh(pinput);
+  bool restart_regrid = res_flag && RestartRegrid::IsEnabled(pinput);
   if (!res_flag) {
     pmesh->BuildTreeFromScratch(pinput);
+  } else if (restart_regrid) {
+    pmesh->BuildTreeFromRestartRegrid(pinput, restartfile, single_file_per_rank);
   } else {
     pmesh->BuildTreeFromRestart(pinput, restartfile, single_file_per_rank);
   }

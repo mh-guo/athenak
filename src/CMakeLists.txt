@@ -122,6 +122,7 @@ add_executable(
         outputs/pdf.cpp
 
         pgen/pgen.cpp
+        pgen/restart_regrid.cpp
         pgen/tests/advection.cpp
         pgen/tests/collapse.cpp
         pgen/tests/cpaw.cpp

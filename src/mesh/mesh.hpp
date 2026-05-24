@@ -152,6 +152,8 @@ class Mesh {
   void BuildTreeFromScratch(ParameterInput *pin);
   void BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
                             bool single_file_per_rank=false);
+  void BuildTreeFromRestartRegrid(ParameterInput *pin, IOWrapper &resfile,
+                                  bool single_file_per_rank=false);
   void PrintMeshDiagnostics();
   void WriteMeshStructure();
   void NewTimeStep(const Real tlim);

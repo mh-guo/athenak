@@ -159,6 +159,7 @@ class CyclicZoom {
                         bool single_file_per_rank);
   void ReadRestartFile(IOWrapper &resfile, IOWrapperSizeT offset_zoom,
                        bool single_file_per_rank);
+  void ReadRestartStateForRegrid(IOWrapper &resfile, IOWrapperSizeT offset_zoom);
 
  private:
   // data

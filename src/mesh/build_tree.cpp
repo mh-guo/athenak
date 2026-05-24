@@ -508,3 +508,222 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
   cfl_no = pin->GetReal("time", "cfl_number");
   if (global_variable::my_rank == 0) {PrintMeshDiagnostics();}
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void Mesh::BuildTreeFromRestartRegrid():
+//! Constructs the MeshBlockTree for 2x restart regrids.  The block topology, time,
+//! timestep, and costs are read from the restart file, while mesh and MeshBlock sizes are
+//! kept from the overriding input file.
+
+void Mesh::BuildTreeFromRestartRegrid(ParameterInput *pin, IOWrapper &resfile,
+                                      bool single_file_per_rank) {
+  int factor = pin->GetOrAddInteger("restart_regrid", "factor", 2);
+  if (factor != 2) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "<restart_regrid>/factor currently must be 2"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
+  IOWrapperSizeT headersize = 3*sizeof(int) + 2*sizeof(Real)
+    + sizeof(RegionSize) + 2*sizeof(RegionIndcs);
+  char *headerdata = new char[headersize];
+  if (global_variable::my_rank == 0 || single_file_per_rank) {
+    IOWrapperSizeT read_size = resfile.Read_bytes(headerdata, 1, headersize,
+                                                  single_file_per_rank);
+    if (read_size != headersize) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Header size read from restart file is incorrect, "
+                << "expected " << headersize << ", got " << read_size << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
+#if MPI_PARALLEL_ENABLED
+  if (!single_file_per_rank) {
+    int mpi_err = MPI_Bcast(headerdata, headersize, MPI_CHAR, 0, MPI_COMM_WORLD);
+    if (mpi_err != MPI_SUCCESS) {
+      char error_string[1024];
+      int length_of_error_string;
+      MPI_Error_string(mpi_err, error_string, &length_of_error_string);
+      std::cout << "MPI_Bcast failed with error: " << error_string << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+#endif
+
+  int old_nmb_total, old_root_level, old_ncycle;
+  RegionSize old_mesh_size;
+  RegionIndcs old_mesh_indcs, old_mb_indcs;
+  Real old_time, old_dt;
+  IOWrapperSizeT hdos = 0;
+  std::memcpy(&old_nmb_total, &(headerdata[hdos]), sizeof(int));
+  hdos += sizeof(int);
+  std::memcpy(&old_root_level, &(headerdata[hdos]), sizeof(int));
+  hdos += sizeof(int);
+  std::memcpy(&old_mesh_size, &(headerdata[hdos]), sizeof(RegionSize));
+  hdos += sizeof(RegionSize);
+  std::memcpy(&old_mesh_indcs, &(headerdata[hdos]), sizeof(RegionIndcs));
+  hdos += sizeof(RegionIndcs);
+  std::memcpy(&old_mb_indcs, &(headerdata[hdos]), sizeof(RegionIndcs));
+  hdos += sizeof(RegionIndcs);
+  std::memcpy(&old_time, &(headerdata[hdos]), sizeof(Real));
+  hdos += sizeof(Real);
+  std::memcpy(&old_dt, &(headerdata[hdos]), sizeof(Real));
+  hdos += sizeof(Real);
+  std::memcpy(&old_ncycle, &(headerdata[hdos]), sizeof(int));
+  delete [] headerdata;
+
+  auto fail_regrid = [](const char *msg) {
+    std::cout << "### FATAL ERROR in restart regrid" << std::endl
+              << msg << std::endl;
+    std::exit(EXIT_FAILURE);
+  };
+  if (mesh_indcs.ng != old_mesh_indcs.ng || mb_indcs.ng != old_mb_indcs.ng) {
+    fail_regrid("New and old nghost must match.");
+  }
+  if (mesh_indcs.nx1 != factor*old_mesh_indcs.nx1 ||
+      (old_mesh_indcs.nx2 > 1 && mesh_indcs.nx2 != factor*old_mesh_indcs.nx2) ||
+      (old_mesh_indcs.nx2 == 1 && mesh_indcs.nx2 != old_mesh_indcs.nx2) ||
+      (old_mesh_indcs.nx3 > 1 && mesh_indcs.nx3 != factor*old_mesh_indcs.nx3) ||
+      (old_mesh_indcs.nx3 == 1 && mesh_indcs.nx3 != old_mesh_indcs.nx3)) {
+    fail_regrid("New active <mesh>/nx* must be exactly 2x the restart mesh.");
+  }
+  if (mb_indcs.nx1 != factor*old_mb_indcs.nx1 ||
+      (old_mb_indcs.nx2 > 1 && mb_indcs.nx2 != factor*old_mb_indcs.nx2) ||
+      (old_mb_indcs.nx2 == 1 && mb_indcs.nx2 != old_mb_indcs.nx2) ||
+      (old_mb_indcs.nx3 > 1 && mb_indcs.nx3 != factor*old_mb_indcs.nx3) ||
+      (old_mb_indcs.nx3 == 1 && mb_indcs.nx3 != old_mb_indcs.nx3)) {
+    fail_regrid("New active <meshblock>/nx* must be exactly 2x the restart meshblock.");
+  }
+  if (mesh_size.x1min != old_mesh_size.x1min || mesh_size.x1max != old_mesh_size.x1max ||
+      mesh_size.x2min != old_mesh_size.x2min || mesh_size.x2max != old_mesh_size.x2max ||
+      mesh_size.x3min != old_mesh_size.x3min || mesh_size.x3max != old_mesh_size.x3max) {
+    fail_regrid("Restart regrid requires unchanged physical mesh extents.");
+  }
+
+  nmb_total = old_nmb_total;
+  root_level = old_root_level;
+  time = old_time;
+  dt = old_dt;
+  ncycle = old_ncycle;
+
+  nmb_rootx1 = mesh_indcs.nx1/mb_indcs.nx1;
+  nmb_rootx2 = mesh_indcs.nx2/mb_indcs.nx2;
+  nmb_rootx3 = mesh_indcs.nx3/mb_indcs.nx3;
+  if (nmb_rootx1 != old_mesh_indcs.nx1/old_mb_indcs.nx1 ||
+      nmb_rootx2 != old_mesh_indcs.nx2/old_mb_indcs.nx2 ||
+      nmb_rootx3 != old_mesh_indcs.nx3/old_mb_indcs.nx3) {
+    fail_regrid("Restart regrid requires the same MeshBlock logical layout.");
+  }
+
+  int current_level = root_level;
+  if (adaptive) {
+    max_level = pin->GetOrAddInteger("mesh_refinement", "num_levels", 1) + root_level - 1;
+    if (max_level > 31) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Number of refinement levels must be smaller than "
+                << 31 - root_level + 1 << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
+    max_level = 31;
+  }
+
+  cost_eachmb = new float[nmb_total];
+  rank_eachmb = new int[nmb_total];
+  lloc_eachmb = new LogicalLocation[nmb_total];
+  gids_eachrank = new int[global_variable::nranks];
+  nmb_eachrank = new int[global_variable::nranks];
+
+  IOWrapperSizeT listsize = sizeof(LogicalLocation) + sizeof(float);
+  char *idlist = new char[listsize*nmb_total];
+  if (global_variable::my_rank == 0 || single_file_per_rank) {
+    if (resfile.Read_bytes(idlist, listsize, nmb_total, single_file_per_rank) !=
+        static_cast<unsigned int>(nmb_total)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Incorrect number of MeshBlocks in restart file; "
+                << "restart file is broken." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  if (!single_file_per_rank) {
+    MPI_Bcast(idlist, listsize*nmb_total, MPI_CHAR, 0, MPI_COMM_WORLD);
+  }
+#endif
+
+  int os = 0;
+  for (int i=0; i<nmb_total; i++) {
+    std::memcpy(&(lloc_eachmb[i]), &(idlist[os]), sizeof(LogicalLocation));
+    os += sizeof(LogicalLocation);
+  }
+  for (int i=0; i<nmb_total; i++) {
+    std::memcpy(&(cost_eachmb[i]), &(idlist[os]), sizeof(float));
+    os += sizeof(float);
+    if (lloc_eachmb[i].level > current_level) current_level = lloc_eachmb[i].level;
+  }
+  delete [] idlist;
+  if (!adaptive) max_level = current_level;
+
+  ptree = std::make_unique<MeshBlockTree>(this);
+  ptree->CreateRootGrid();
+  for (int i=0; i<nmb_total; i++) {ptree->AddNodeWithoutRefinement(lloc_eachmb[i]);}
+  {
+    int nnb;
+    ptree->CreateZOrderedLLList(lloc_eachmb, nullptr, nnb);
+    if (nnb != nmb_total) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "Tree reconstruction failed. Total number of blocks in "
+        << "reconstructed tree=" << nnb << ", number in file=" << nmb_total << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
+#ifdef MPI_PARALLEL_ENABLED
+  if (!single_file_per_rank) {
+    if (nmb_total < global_variable::nranks) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line "
+        << __LINE__ << std::endl
+        << "Fewer MeshBlocks (nmb_total=" << nmb_total << ") than MPI ranks (nranks="
+        << global_variable::nranks << ")" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+#endif
+
+  LoadBalance(cost_eachmb, rank_eachmb, gids_eachrank, nmb_eachrank, nmb_total);
+  int mbp_gids = gids_eachrank[global_variable::my_rank];
+  int mbp_gide = mbp_gids + nmb_eachrank[global_variable::my_rank] - 1;
+  nmb_thisrank = nmb_eachrank[global_variable::my_rank];
+
+  pmb_pack = new MeshBlockPack(this, mbp_gids, mbp_gide);
+  pmb_pack->AddMeshBlocks(pin);
+  pmb_pack->pmb->SetNeighbors(ptree, rank_eachmb);
+
+  nmb_maxperrank = nmb_thisrank;
+  if (adaptive) {
+    if (pin->DoesParameterExist("mesh_refinement", "max_nmb_per_rank")) {
+      nmb_maxperrank = pin->GetReal("mesh_refinement", "max_nmb_per_rank");
+      if (nmb_maxperrank < nmb_thisrank) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "On rank=" << global_variable::my_rank << " Root grid requires "
+          << "more MeshBlocks (nmb_thisrank=" << nmb_thisrank << ") than specified by "
+          << "<mesh_refinement>/max_nmb_per_rank=" << nmb_maxperrank << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    } else {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "With AMR maximum number of MeshBlocks per rank must be "
+        << "specified in input file using <mesh_refinement>/max_nmb_per_rank"
+        << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
+  if (multilevel) {
+    pmr = new MeshRefinement(this, pin);
+  }
+  cfl_no = pin->GetReal("time", "cfl_number");
+  if (global_variable::my_rank == 0) {PrintMeshDiagnostics();}
+}

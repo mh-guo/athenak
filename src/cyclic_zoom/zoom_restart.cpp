@@ -7,6 +7,7 @@
 //! \brief Functions to write and read cyclic zoom restart data
 
 #include <iostream>
+#include <cstdlib>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -204,4 +205,34 @@ void CyclicZoom::ReadRestartFile(IOWrapper &resfile, IOWrapperSizeT offset_zoom,
   PrintCyclicZoomDiagnostics();
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CyclicZoom::ReadRestartStateForRegrid()
+//! \brief Read only the cyclic zoom restart state for restart regrids.
+
+void CyclicZoom::ReadRestartStateForRegrid(IOWrapper &resfile,
+                                           IOWrapperSizeT offset_zoom) {
+  int my_rank = global_variable::my_rank;
+
+  char *zrdata = new char[sizeof(ZoomState)];
+  if (my_rank == 0) {
+    resfile.Read_bytes_at(zrdata, 1, sizeof(ZoomState), offset_zoom);
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Bcast(zrdata, sizeof(ZoomState), MPI_CHAR, 0, MPI_COMM_WORLD);
+#endif
+  std::memcpy(&(zstate), &(zrdata[0]), sizeof(ZoomState));
+  delete [] zrdata;
+
+  UpdateAMRFromRestart();
+  if (zstate.zone == 0) {
+    PrintCyclicZoomDiagnostics();
+    return;
+  }
+
+  std::cout << "### FATAL ERROR in cyclic zoom restart regrid" << std::endl
+            << "Cyclic zoom restart regrid is supported only when restarted zone is 0."
+            << std::endl;
+  std::exit(EXIT_FAILURE);
 }
