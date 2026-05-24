@@ -1090,8 +1090,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 
   // radiation-fluid opacities (sigma_a,s,p); uses current w0 / bcc0 (see rad_fluid_sigma)
   if (name.compare("rad_fluid_sigma") == 0) {
-    if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &coord = pm->pmb_pack->pcoord->coord_data;
     bool &flat = coord.is_minkowski;

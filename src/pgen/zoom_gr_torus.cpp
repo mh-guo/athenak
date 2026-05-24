@@ -172,23 +172,24 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Spherical Grid for user-defined history
   auto &grids = spherical_grids;
   const Real rflux =
-    (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(torus.spin));
-  int nintp = 2;
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux, nintp));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 1.5*std::sqrt(2.0), nintp));
+    (is_radiation_enabled) ? ceil(r_excise) : 1.0 + sqrt(1.0 - SQR(torus.spin));
+  int nintp = pin->GetOrAddInteger("problem", "hist_nintp", 2);
+  int nlevels = pin->GetOrAddInteger("problem", "hist_nlevels", 10);
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, nlevels, rflux, nintp));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, nlevels, 1.5*std::sqrt(2.0), nintp));
   Real hist_dr = pin->GetOrAddReal("problem", "hist_dr", 0.5); // log2 dr
   Real rmin = pin->GetOrAddReal("problem", "hist_rmin", 3.0);
   Real rmax = pin->GetOrAddReal("problem", "hist_rmax", 0.75*pmy_mesh_->mesh_size.x1max);
   int hist_nr = static_cast<int>(std::log2(rmax/rmin)/hist_dr)+1;
   for (int i=0; i<hist_nr; i++) {
     Real r_i = std::pow(2.0,static_cast<Real>(i)*hist_dr)*rmin;
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, r_i, nintp));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, nlevels, r_i, nintp));
   }
   if (global_variable::my_rank == 0) {
     std::cout << "Spherical grids for user-defined history:" << std::endl;
     std::cout << "  rmin = " << rmin << " rmax = " << rmax << std::endl;
-    for (auto &grid : grids) {
-      std::cout << "  r = " << grid->radius << std::endl;
+    for (int i=0; i<grids.size(); i++) {
+      std::cout << "  i = " << i << " r = " << grids[i]->radius << std::endl;
     }
   }
   user_hist_func = TorusFluxes;
@@ -1761,18 +1762,26 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
     to_ien = 1.0 / (gamma - 1.);
   }
 
+  // TorusFluxes history row: nbase gas/MHD values, then optional 3 radiation values.
+  static constexpr int nbase = 29;
+  static constexpr int nradmom = 10;  // upper-triangle r^{mu nu}
+
   // extract grids, number of radii, number of fluxes, and history appending index
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   // int nflux = (is_mhd) ? 4 : 3;
-  // TODO(@mhguo): add radiation fluxes (if is_radiation_enabled)
-  const int nflux = 29;
+  const bool is_radiation_enabled = (pmbp->prad != nullptr);
+  const int nflux = nbase + (is_radiation_enabled ? 3 : 0);
+  int nang1 = 0;
+  if (is_radiation_enabled) { nang1 = pmbp->prad->prgeo->nangles - 1; }
 
   // set number of and names of history variables for hydro or mhd
   //  (1) mass accretion rate
   //  (2) energy flux
   //  (3) angular momentum flux
   //  (4) magnetic flux (iff MHD)
+  //  (if radiation) + r00, redot, redoto: r^00; mixed r^r_0 (Boyer r, same as gas ur/br);
+  //     redoto = r^r_0 when r^{0r} > 0, with r^{0r} = (dr/dx^i)r^{0i} (radial part of r^{0\mu})
   pdata->nhist = nradii*nflux;
   if (pdata->nhist > NHISTORY_VARIABLES) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -1781,10 +1790,16 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
     exit(EXIT_FAILURE);
   }
   // no more than 7 characters per label
-  std::string data_label[nflux] = {"r","out","m","mout","mdot","mdotout","edot","edotout",
-    "lx","ly","lz","lzout","phi","eint","b^2","alpha","lor","u0","u_0","ur","uph","b0",
-    "b_0","br","bph","edothyd","edho","edotadv","edao"
+  std::vector<std::string> data_label = {
+    "r", "out", "m", "mout", "mdot", "mdotout", "edot", "edotout", "lx", "ly", "lz",
+    "lzout", "phi", "eint", "b^2", "alpha", "lor", "u0", "u_0", "ur", "uph", "b0",
+    "b_0", "br", "bph", "edothyd", "edho", "edotadv", "edao"
   };
+  if (is_radiation_enabled) {
+    data_label.push_back("r00");
+    data_label.push_back("redot");
+    data_label.push_back("redoto");
+  }
   int gi0 = 0;
   if (pm->pzoom != nullptr) {
     gi0 += 1;
@@ -1799,8 +1814,46 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
     }
   }
 
+  auto &indcs = pm->mb_indcs;
+  int &ng = indcs.ng;
+  int n1 = indcs.nx1 + 2*ng;
+  int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
+  int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
+  int nmb = pmbp->nmb_thispack;
+  DvceArray5D<Real> rad_moments;
+  if (is_radiation_enabled) {
+    Kokkos::realloc(rad_moments, nmb, nradmom, n3, n2, n1);
+    auto rad_moments_ = rad_moments;
+    auto i0_ = pmbp->prad->i0;
+    auto tet_c_ = pmbp->prad->tet_c;
+    auto tetcov_c_ = pmbp->prad->tetcov_c;
+    auto nh_c_ = pmbp->prad->nh_c;
+    auto solid_angles_ = pmbp->prad->prgeo->solid_angles;
+    par_for("torus_rad_moments", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real n0 = tet_c_(m,0,0,k,j,i);
+      for (int nmu=0, n12=0; nmu<4; ++nmu) {
+        for (int nnu=nmu; nnu<4; ++nnu, ++n12) {
+          Real s = 0.0;
+          for (int ord=0; ord<=nang1; ++ord) {
+            Real nmu_coord = 0.0, nnu_coord = 0.0, n_0 = 0.0;
+            for (int d=0; d<4; ++d) {
+              nmu_coord += tet_c_(m,d,nmu,k,j,i)*nh_c_.d_view(ord,d);
+              nnu_coord += tet_c_(m,d,nnu,k,j,i)*nh_c_.d_view(ord,d);
+              n_0       += tetcov_c_(m,d,0,k,j,i)*nh_c_.d_view(ord,d);
+            }
+            s += nmu_coord*nnu_coord*(i0_(m,ord,k,j,i)/(n0*n_0))*
+                 solid_angles_.d_view(ord);
+          }
+          rad_moments_(m,n12,k,j,i) = s;
+        }
+      }
+    });
+  }
+
   // go through angles at each radii:
   DualArray2D<Real> interpolated_bcc;  // needed for MHD
+  DualArray2D<Real> interpolated_rad_moments;
   for (int g=0; g<nradii; ++g) {
     // zero fluxes at this radius
     for (int i=0; i<nflux; ++i) {
@@ -1814,6 +1867,13 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Kokkos::deep_copy(interpolated_bcc, grids[g]->interp_vals);
       interpolated_bcc.template modify<DevExeSpace>();
       interpolated_bcc.template sync<HostMemSpace>();
+    }
+    if (is_radiation_enabled) {
+      grids[g]->InterpolateToSphere(nradmom, rad_moments);
+      Kokkos::realloc(interpolated_rad_moments, grids[g]->nangles, nradmom);
+      Kokkos::deep_copy(interpolated_rad_moments, grids[g]->interp_vals);
+      interpolated_rad_moments.template modify<DevExeSpace>();
+      interpolated_rad_moments.template sync<HostMemSpace>();
     }
     grids[g]->InterpolateToSphere(nvars, w0_);
 
@@ -1905,6 +1965,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Real sqrtmdet = (r2+SQR(spin*cos(theta)));
 
       // flags
+      // assuming you always have density on this rank
       Real on = (int_dn != 0.0)? 1.0 : 0.0; // check if angle is on this rank
       Real is_out = (ur>0.0)? 1.0 : 0.0;
 
@@ -1922,15 +1983,60 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       Real t1_0_hyd = (int_dn + gamma*int_ie)*ur*u_0;
       Real bernl_hyd = (on)? -(1.0 + gamma*int_ie/int_dn)*u_0-1.0 : 0.0;
 
-      Real flux_data[nflux] = {r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
+      // Coordinate-frame radiation moments are computed cell-centered on device,
+      // interpolated to the sphere, then contracted with the surface radial direction.
+      Real r00 = 0.0, redot = 0.0, redoto = 0.0;
+      if (is_radiation_enabled) {
+        Real rup[4][4];
+        rup[0][0] = interpolated_rad_moments.h_view(n,0);
+        rup[0][1] = interpolated_rad_moments.h_view(n,1);
+        rup[0][2] = interpolated_rad_moments.h_view(n,2);
+        rup[0][3] = interpolated_rad_moments.h_view(n,3);
+        rup[1][1] = interpolated_rad_moments.h_view(n,4);
+        rup[1][2] = interpolated_rad_moments.h_view(n,5);
+        rup[1][3] = interpolated_rad_moments.h_view(n,6);
+        rup[2][2] = interpolated_rad_moments.h_view(n,7);
+        rup[2][3] = interpolated_rad_moments.h_view(n,8);
+        rup[3][3] = interpolated_rad_moments.h_view(n,9);
+        rup[1][0] = rup[0][1];
+        rup[2][0] = rup[0][2];
+        rup[3][0] = rup[0][3];
+        rup[2][1] = rup[1][2];
+        rup[3][1] = rup[1][3];
+        rup[3][2] = rup[2][3];
+        r00 = rup[0][0];
+        // r^r_0: same radial alignment as gas t1_0 (u^r via dr/dx^i u^i), not Cartesian u^1.
+        // r^{r nu} = (dr/dx^i) r^{i nu} for i=1,2,3; static CKS uses r=r(x,y,z) with dr/dt=0.
+        // r^r_0 = g_{0 nu} r^{r nu} (nu contravariant on r); sum over nu.
+        redot = 0.0;
+        for (int nu=0; nu<4; ++nu) {
+          const Real rrnu = drdx*rup[1][nu] + drdy*rup[2][nu] + drdz*rup[3][nu];
+          redot += glower[0][nu]*rrnu;
+        }
+        // r^{0r} = (dr/dx^i) r^{0i} (i=1,2,3): r-component of the energy current M^i = r^{0i},
+        // not a surface-integrated flux and not the same as mixed r^r_0; used only for sign of
+        // "r-outward" radiative energy flow when masking redotf -> redotof.
+        const Real r0r = drdx*rup[0][1] + drdy*rup[0][2] + drdz*rup[0][3];
+        const Real is_rad_out = (r0r > 0.0) ? 1.0 : 0.0;
+        redoto = redot*is_rad_out;
+      }
+
+      // gas/MHD: same order as data_label (0 .. nbase-1)
+      const Real base_flux[nbase] = {
+        r, is_out, int_dn, int_dn*is_out, m_flx, m_flx*is_out,
         t1_0, t1_0*is_out, t1_1, t1_2, t1_3, t1_3*is_out, phi_flx,
         int_ie, b_sq, alpha, lor, u0, u_0, ur, uph, b0, b_0, br, bph,
         t1_0_hyd, t1_0_hyd*is_out, bernl_hyd, bernl_hyd*is_out
       };
 
-      pdata->hdata[gi0+nflux*g+0] = (global_variable::my_rank == 0)? flux_data[0] : 0.0;
-      for (int i=1; i<nflux; ++i) {
-        pdata->hdata[gi0+nflux*g+i] += flux_data[i]*sqrtmdet*domega*on;
+      pdata->hdata[gi0+nflux*g+0] = (global_variable::my_rank == 0) ? base_flux[0] : 0.0;
+      for (int i=1; i<nbase; ++i) {
+        pdata->hdata[gi0+nflux*g+i] += base_flux[i]*sqrtmdet*domega*on;
+      }
+      if (is_radiation_enabled) {
+        pdata->hdata[gi0+nflux*g+nbase+0] += r00*sqrtmdet*domega*on;
+        pdata->hdata[gi0+nflux*g+nbase+1] += redot*sqrtmdet*domega*on;
+        pdata->hdata[gi0+nflux*g+nbase+2] += redoto*sqrtmdet*domega*on;
       }
     }
   }
