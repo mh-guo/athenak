@@ -36,13 +36,25 @@ static void GetBoyerLindquistCoordinates(struct xrb_pgen pgen,
                                          Real *pr, Real *ptheta, Real *pphi);
 
 KOKKOS_INLINE_FUNCTION
-Real CalculatePotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3);
+Real CalculateRochePotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3);
 
 KOKKOS_INLINE_FUNCTION
 static void CalculateRocheAcceleration(struct xrb_pgen pgen,
                                      Real x1, Real x2, Real x3,
                                      Real vx, Real vy, Real vz,
                                      Real *ax, Real *ay, Real *az);
+
+KOKKOS_INLINE_FUNCTION
+static void CalculateBackgroundState(struct xrb_pgen pgen,
+                                   Real x1, Real x2, Real x3,
+                                   Real dx1, Real dx2, Real dx3,
+                                   Real *prho_bg, Real *ppgas_bg);
+
+KOKKOS_INLINE_FUNCTION
+static void CalculateDonorState(struct xrb_pgen pgen,
+                                Real x1, Real x2, Real x3,
+                                Real dx1, Real dx2, Real dx3,
+                                Real *prho, Real *ppgas);
 
 // Useful container for physical parameters of the binary.
 // Geometry: accretor at origin, donor centered at (+a_sep, 0, 0).
@@ -57,6 +69,8 @@ struct xrb_pgen {
   Real m_donor;                               // donor star mass
   Real m_accretor;                            // accretor star mass (1 in GR units)
   Real r_donor;                               // donor star radius
+  Real r_donor_mask;                          // radius for fixed donor interior BC
+  bool fix_donor;                             // enforce donor mask each BC call
   Real mass_ratio;                            // mass ratio: m_accretor / m_total
   Real rho_min, rho_pow, pgas_min, pgas_pow;  // background atmosphere parameters
 };
@@ -66,6 +80,8 @@ xrb_pgen xrb;
 } // namespace
 
 void NoInflowXRB(Mesh *pm);
+void ApplyDonorMask(Mesh *pm);
+void UserBcsXRB(Mesh *pm);
 void XRBSourceTerms(Mesh *pm, const Real bdt);
 void AccretorFluxes(HistoryData *pdata, Mesh *pm);
 
@@ -85,7 +101,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     exit(EXIT_FAILURE);
   }
 
-  user_bcs_func = NoInflowXRB;
+  user_bcs_func = UserBcsXRB;
   user_srcs_func = XRBSourceTerms;
   user_hist_func = AccretorFluxes;
 
@@ -119,11 +135,29 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.m_donor = pin->GetReal("problem", "m_donor");
   xrb.m_accretor = pin->GetOrAddReal("problem", "m_accretor", 1.0);
   xrb.r_donor = pin->GetReal("problem", "r_donor");
+  xrb.fix_donor = pin->GetOrAddBoolean("problem", "fix_donor", false);
+  xrb.r_donor_mask = pin->GetOrAddReal("problem", "r_donor_mask", xrb.r_donor);
   xrb.mass_ratio = xrb.m_accretor / (xrb.m_donor + xrb.m_accretor);
   xrb.rho_min = pin->GetReal("problem", "rho_min");
   xrb.rho_pow = pin->GetReal("problem", "rho_pow");
   xrb.pgas_min = pin->GetReal("problem", "pgas_min");
   xrb.pgas_pow = pin->GetReal("problem", "pgas_pow");
+
+  if (global_variable::my_rank == 0) {
+    std::cout << "xrb.gamma_adi = " << xrb.gamma_adi << std::endl;
+    std::cout << "xrb.k_adi = " << xrb.k_adi << std::endl;
+    std::cout << "xrb.a_sep = " << xrb.a_sep << std::endl;
+    std::cout << "xrb.m_donor = " << xrb.m_donor << std::endl;
+    std::cout << "xrb.m_accretor = " << xrb.m_accretor << std::endl;
+    std::cout << "xrb.r_donor = " << xrb.r_donor << std::endl;
+    std::cout << "xrb.fix_donor = " << xrb.fix_donor << std::endl;
+    std::cout << "xrb.r_donor_mask = " << xrb.r_donor_mask << std::endl;
+    std::cout << "xrb.mass_ratio = " << xrb.mass_ratio << std::endl;
+    std::cout << "xrb.rho_min = " << xrb.rho_min << std::endl;
+    std::cout << "xrb.rho_pow = " << xrb.rho_pow << std::endl;
+    std::cout << "xrb.pgas_min = " << xrb.pgas_min << std::endl;
+    std::cout << "xrb.pgas_pow = " << xrb.pgas_pow << std::endl;
+  }
 
   if (restart) return;
 
@@ -176,50 +210,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real &dx2 = size.d_view(m).dx2;
     Real &dx3 = size.d_view(m).dx3;
 
-    Real rho_bg, pgas_bg;
-    if (pgen.is_gr) {
-      Real r, theta, phi;
-      GetBoyerLindquistCoordinates(pgen, x1v, x2v, x3v, &r, &theta, &phi);
-
-      Real r_excise_cell, theta_excise, phi_excise;
-      GetBoyerLindquistCoordinates(pgen, x1v + copysign(0.5*dx1, x1v),
-                                        x2v + copysign(0.5*dx2, x2v),
-                                        x3v + copysign(0.5*dx3, x3v),
-                                        &r_excise_cell, &theta_excise, &phi_excise);
-      if (r_excise_cell > 1.0) {
-        rho_bg = pgen.rho_min * pow(r, pgen.rho_pow);
-        pgas_bg = pgen.pgas_min * pow(r, pgen.pgas_pow);
-      } else {
-        rho_bg = pgen.dexcise;
-        pgas_bg = pgen.pexcise;
-      }
-    } else {
-      Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-      Real r_eff = fmax(r, pgen.r_soft);
-      rho_bg = pgen.rho_min * pow(r_eff, pgen.rho_pow);
-      pgas_bg = pgen.pgas_min * pow(r_eff, pgen.pgas_pow);
-    }
-
-    Real rho = rho_bg;
-    Real pgas = pgas_bg;
+    Real rho, pgas;
+    CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
     Real uu1 = 0.0;
     Real uu2 = 0.0;
     Real uu3 = 0.0;
     const Real urad = 0.0;
 
-    Real potential_surface =
-      CalculatePotential(pgen, pgen.a_sep - pgen.r_donor, 0.0, 0.0);
-    Real potential = CalculatePotential(pgen, x1v, x2v, x3v);
-    Real x_d = x1v - pgen.a_sep;
-    Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
-    Real delta_phi = potential_surface - potential;
-    if (d_donor < pgen.r_donor && delta_phi > 0.0) {
-      rho = pow((gm1/(pgen.gamma_adi*pgen.k_adi))*delta_phi, 1.0/gm1);
-      pgas = pgen.k_adi * pow(rho, pgen.gamma_adi);
-    }
-
-    w0_(m,IDN,k,j,i) = fmax(rho, rho_bg);
-    w0_(m,IEN,k,j,i) = fmax(pgas, pgas_bg) / gm1;
+    w0_(m,IDN,k,j,i) = rho;
+    w0_(m,IEN,k,j,i) = pgas / gm1;
     w0_(m,IVX,k,j,i) = 0.0;
     w0_(m,IVY,k,j,i) = 0.0;
     w0_(m,IVZ,k,j,i) = 0.0;
@@ -274,18 +273,71 @@ static void GetBoyerLindquistCoordinates(struct xrb_pgen pgen,
 }
 
 KOKKOS_INLINE_FUNCTION
-Real CalculatePotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
-  Real x = x1 - pgen.a_sep;
-  Real y = x2;
-  Real z = x3;
+Real CalculateRochePotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
   Real d_accretor = sqrt(SQR(x1) + SQR(x2) + SQR(x3)); // distance to accretor
-  Real d_donor = sqrt(SQR(x) + SQR(y) + SQR(z)); // distance to donor
+  Real d_donor = sqrt(SQR(x1-pgen.a_sep) + SQR(x2) + SQR(x3)); // distance to donor
   Real m_tot = pgen.m_accretor + pgen.m_donor;
   Real omega_sq = m_tot / (pgen.a_sep*pgen.a_sep*pgen.a_sep);
   Real x_com = pgen.m_donor * pgen.a_sep / m_tot;
   Real potential = -pgen.m_donor/d_donor - pgen.m_accretor/d_accretor;
   potential -= 0.5*omega_sq*(SQR(x1 - x_com) + SQR(x2));
   return potential;
+}
+
+KOKKOS_INLINE_FUNCTION
+static void CalculateBackgroundState(struct xrb_pgen pgen,
+                                   Real x1, Real x2, Real x3,
+                                   Real dx1, Real dx2, Real dx3,
+                                   Real *prho_bg, Real *ppgas_bg) {
+  if (pgen.is_gr) {
+    Real r, theta, phi;
+    GetBoyerLindquistCoordinates(pgen, x1, x2, x3, &r, &theta, &phi);
+
+    Real r_excise_cell, theta_excise, phi_excise;
+    GetBoyerLindquistCoordinates(pgen, x1 + copysign(0.5*dx1, x1),
+                                      x2 + copysign(0.5*dx2, x2),
+                                      x3 + copysign(0.5*dx3, x3),
+                                      &r_excise_cell, &theta_excise, &phi_excise);
+    if (r_excise_cell > 1.0) {
+      *prho_bg = pgen.rho_min * pow(r, pgen.rho_pow);
+      *ppgas_bg = pgen.pgas_min * pow(r, pgen.pgas_pow);
+    } else {
+      *prho_bg = pgen.dexcise;
+      *ppgas_bg = pgen.pexcise;
+    }
+  } else {
+    Real r = sqrt(SQR(x1) + SQR(x2) + SQR(x3));
+    Real r_eff = fmax(r, pgen.r_soft);
+    *prho_bg = pgen.rho_min * pow(r_eff, pgen.rho_pow);
+    *ppgas_bg = pgen.pgas_min * pow(r_eff, pgen.pgas_pow);
+  }
+}
+
+KOKKOS_INLINE_FUNCTION
+static void CalculateDonorState(struct xrb_pgen pgen,
+                                Real x1, Real x2, Real x3,
+                                Real dx1, Real dx2, Real dx3,
+                                Real *prho, Real *ppgas) {
+  Real rho_bg, pgas_bg;
+  CalculateBackgroundState(pgen, x1, x2, x3, dx1, dx2, dx3, &rho_bg, &pgas_bg);
+
+  Real rho = rho_bg;
+  Real pgas = pgas_bg;
+  Real gm1 = pgen.gamma_adi - 1.0;
+
+  Real potential_surface =
+    CalculateRochePotential(pgen, pgen.a_sep - pgen.r_donor, 0.0, 0.0);
+  Real potential = CalculateRochePotential(pgen, x1, x2, x3);
+  Real x_d = x1 - pgen.a_sep;
+  Real d_donor = sqrt(SQR(x_d) + SQR(x2) + SQR(x3));
+  Real delta_phi = potential_surface - potential;
+  if (d_donor < pgen.r_donor && delta_phi > 0.0) {
+    rho = pow((gm1/(pgen.gamma_adi*pgen.k_adi))*delta_phi, 1.0/gm1);
+    pgas = pgen.k_adi * pow(rho, pgen.gamma_adi);
+  }
+
+  *prho = fmax(rho, rho_bg);
+  *ppgas = fmax(pgas, pgas_bg);
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -308,8 +360,8 @@ static void CalculateRocheAcceleration(struct xrb_pgen pgen,
   Real ay_val = 0.0;
   Real az_val = 0.0;
 
-  // Donor point-mass gravity (skip inside the stellar surface).
-  if (d_d > pgen.r_donor) {
+  // Donor point-mass gravity (skip inside the stellar inner mask).
+  if (d_d > 0.9*pgen.r_donor_mask) {
     Real inv_d_d3 = pgen.m_donor / (d_d*d_d_sq);
     ax_val -= inv_d_d3 * x_d;
     ay_val -= inv_d_d3 * y_d;
@@ -392,6 +444,69 @@ void XRBSourceTerms(Mesh *pm, const Real bdt) {
       }
     }
   });
+}
+
+void ApplyDonorMask(Mesh *pm) {
+  if (!xrb.fix_donor) return;
+
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  auto &size = pmbp->pmb->mb_size;
+  auto &w0_ = pmbp->phydro->w0;
+  auto &u0_ = pmbp->phydro->u0;
+  auto pgen = xrb;
+  Real gm1 = pgen.gamma_adi - 1.0;
+  int nmb1 = pmbp->nmb_thispack - 1;
+
+  par_for("xrb_donor_mask", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real &dx1 = size.d_view(m).dx1;
+    Real &dx2 = size.d_view(m).dx2;
+    Real &dx3 = size.d_view(m).dx3;
+
+    Real x_d = x1v - pgen.a_sep;
+    Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
+    if (d_donor <= pgen.r_donor_mask) {
+      Real rho, pgas;
+      CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
+      Real eint = pgas / gm1;
+      w0_(m,IDN,k,j,i) = rho;
+      w0_(m,IVX,k,j,i) = 0.0;
+      w0_(m,IVY,k,j,i) = 0.0;
+      w0_(m,IVZ,k,j,i) = 0.0;
+      u0_(m,IDN,k,j,i) = rho;
+      u0_(m,IM1,k,j,i) = 0.0;
+      u0_(m,IM2,k,j,i) = 0.0;
+      u0_(m,IM3,k,j,i) = 0.0;
+      if (pgen.is_gr) {
+        w0_(m,IEN,k,j,i) = -eint;
+        u0_(m,IEN,k,j,i) = -eint;
+      } else {
+        w0_(m,IEN,k,j,i) = eint;
+        u0_(m,IEN,k,j,i) = eint;
+      }
+    }
+  });
+}
+
+void UserBcsXRB(Mesh *pm) {
+  ApplyDonorMask(pm);
+  NoInflowXRB(pm);
 }
 
 void NoInflowXRB(Mesh *pm) {
