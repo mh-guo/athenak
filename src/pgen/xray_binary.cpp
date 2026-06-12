@@ -10,10 +10,6 @@
 #include <stdio.h>
 #include <math.h>
 
-#if MPI_PARALLEL_ENABLED
-#include <mpi.h>
-#endif
-
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -212,12 +208,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     const Real urad = 0.0;
 
     Real potential_surface =
-      CalculatePotential(pgen, pgen.a_sep + pgen.r_donor, 0.0, 0.0);
+      CalculatePotential(pgen, pgen.a_sep - pgen.r_donor, 0.0, 0.0);
     Real potential = CalculatePotential(pgen, x1v, x2v, x3v);
     Real x_d = x1v - pgen.a_sep;
-    Real r_from_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
+    Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
     Real delta_phi = potential_surface - potential;
-    if (r_from_donor < pgen.r_donor && delta_phi > 0.0) {
+    if (d_donor < pgen.r_donor && delta_phi > 0.0) {
       rho = pow((gm1/(pgen.gamma_adi*pgen.k_adi))*delta_phi, 1.0/gm1);
       pgas = pgen.k_adi * pow(rho, pgen.gamma_adi);
     }
@@ -282,8 +278,8 @@ Real CalculatePotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
   Real x = x1 - pgen.a_sep;
   Real y = x2;
   Real z = x3;
-  Real d_accretor = sqrt(SQR(x1) + SQR(x2) + SQR(x3));
-  Real d_donor = sqrt(SQR(x) + SQR(y) + SQR(z));
+  Real d_accretor = sqrt(SQR(x1) + SQR(x2) + SQR(x3)); // distance to accretor
+  Real d_donor = sqrt(SQR(x) + SQR(y) + SQR(z)); // distance to donor
   Real m_tot = pgen.m_accretor + pgen.m_donor;
   Real omega_sq = m_tot / (pgen.a_sep*pgen.a_sep*pgen.a_sep);
   Real x_com = pgen.m_donor * pgen.a_sep / m_tot;
@@ -300,8 +296,8 @@ static void CalculateRocheAcceleration(struct xrb_pgen pgen,
   Real x_d = x1 - pgen.a_sep;
   Real y_d = x2;
   Real z_d = x3;
-  Real r_d_sq = SQR(x_d) + SQR(y_d) + SQR(z_d);
-  Real r_d = sqrt(r_d_sq);
+  Real d_d_sq = SQR(x_d) + SQR(y_d) + SQR(z_d);
+  Real d_d = sqrt(d_d_sq); // distance to donor
 
   Real m_tot = pgen.m_accretor + pgen.m_donor;
   Real omega_sq = m_tot / (pgen.a_sep*pgen.a_sep*pgen.a_sep);
@@ -313,22 +309,22 @@ static void CalculateRocheAcceleration(struct xrb_pgen pgen,
   Real az_val = 0.0;
 
   // Donor point-mass gravity (skip inside the stellar surface).
-  if (r_d > pgen.r_donor) {
-    Real inv_r_d3 = pgen.m_donor / (r_d*r_d_sq);
-    ax_val -= inv_r_d3 * x_d;
-    ay_val -= inv_r_d3 * y_d;
-    az_val -= inv_r_d3 * z_d;
+  if (d_d > pgen.r_donor) {
+    Real inv_d_d3 = pgen.m_donor / (d_d*d_d_sq);
+    ax_val -= inv_d_d3 * x_d;
+    ay_val -= inv_d_d3 * y_d;
+    az_val -= inv_d_d3 * z_d;
   }
 
   // Accretor gravity in Newtonian mode (included in metric via CoordSrcTerms in GR).
   if (!pgen.is_gr) {
-    Real r_a_sq = SQR(x1) + SQR(x2) + SQR(x3);
-    Real r_a = sqrt(r_a_sq);
-    Real r_a_eff = fmax(r_a, pgen.r_soft);
-    Real inv_r_a3 = pgen.m_accretor / (r_a_eff*r_a_eff*r_a_eff);
-    ax_val -= inv_r_a3 * x1;
-    ay_val -= inv_r_a3 * x2;
-    az_val -= inv_r_a3 * x3;
+    Real d_a_sq = SQR(x1) + SQR(x2) + SQR(x3);
+    Real d_a = sqrt(d_a_sq);
+    Real d_a_eff = fmax(d_a, pgen.r_soft);
+    Real inv_d_a3 = pgen.m_accretor / (d_a_eff*d_a_eff*d_a_eff);
+    ax_val -= inv_d_a3 * x1;
+    ay_val -= inv_d_a3 * x2;
+    az_val -= inv_d_a3 * x3;
   }
 
   // Centrifugal acceleration in the corotating frame.
