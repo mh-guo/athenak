@@ -73,9 +73,210 @@ struct xrb_pgen {
   bool fix_donor;                             // enforce donor mask each BC call
   Real mass_ratio;                            // mass ratio: m_accretor / m_total
   Real rho_min, rho_pow, pgas_min, pgas_pow;  // background atmosphere parameters
+  bool heating;                               // Scherbak-style envelope heating (Eq. 7)
+  Real t_kh;                                  // KH expansion timescale (Eq. 12)
+  Real L_heat;                                // derived from t_kh via Eq. (12)
+  Real heat_M_ext;                            // envelope mass with Phi > Phi_h (Eq. 11)
+  Real heat_R_h;                              // radius at Phi_h (Eq. 12)
+  Real heat_phi_h;                            // Roche potential at heated shell center
+  Real heat_phi_surface;                      // Roche potential at donor surface
+  Real heat_delta_phi;                        // Gaussian width in potential (Eq. 9)
+  Real heat_t0;                               // ramp center time
+  Real heat_dt_ramp;                          // ramp width time
+  Real heating_norm;                          // L_heat / int(unnormalized profile dV)
 };
 
 xrb_pgen xrb;
+
+KOKKOS_INLINE_FUNCTION
+Real HeatProfile(struct xrb_pgen pgen, Real phi,
+                         Real x1, Real x2, Real x3) {
+  if (phi > pgen.heat_phi_surface) return 0.0;
+  Real x_d = x1 - pgen.a_sep;
+  Real d_donor = sqrt(SQR(x_d) + SQR(x2) + SQR(x3));
+  if (pgen.fix_donor && d_donor <= pgen.r_donor_mask) return 0.0;
+  Real dphi = pgen.heat_delta_phi;
+  if (dphi <= 0.0) return 0.0;
+  return exp(-SQR(phi - pgen.heat_phi_h) / (2.0*SQR(dphi)));
+}
+
+Real FindHeatRadius(struct xrb_pgen pgen) {
+  Real d_lo = 0.0;
+  Real d_hi = pgen.r_donor;
+  for (int n = 0; n < 64; ++n) {
+    Real d_mid = 0.5*(d_lo + d_hi);
+    Real phi = CalculateRochePotential(pgen, pgen.a_sep - d_mid, 0.0, 0.0);
+    if (phi < pgen.heat_phi_h) {
+      d_lo = d_mid;
+    } else {
+      d_hi = d_mid;
+    }
+  }
+  return 0.5*(d_lo + d_hi);
+}
+
+void ComputeHeatEnvelopeMass(Mesh *pm, Real *pM_ext) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &size = pmbp->pmb->mb_size;
+  const int nmkji = pmbp->nmb_thispack * nx3 * nx2 * nx1;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
+  auto pgen = xrb;
+
+  Real local_mass = 0.0;
+  Kokkos::parallel_reduce("xrb_heat_mext",
+                          Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int idx, Real &lmass) {
+    int m = idx / nkji;
+    int k = (idx - m*nkji) / nji;
+    int j = (idx - m*nkji - k*nji) / nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    Real &dx1 = size.d_view(m).dx1;
+    Real &dx2 = size.d_view(m).dx2;
+    Real &dx3 = size.d_view(m).dx3;
+
+    Real phi = CalculateRochePotential(pgen, x1v, x2v, x3v);
+    if (phi > pgen.heat_phi_h) {
+      Real rho, pgas;
+      CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
+      lmass += rho * dx1 * dx2 * dx3;
+    }
+  }, local_mass);
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &local_mass, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  *pM_ext = local_mass;
+}
+
+void SetupHeating(Mesh *pm) {
+  if (!xrb.heating) return;
+
+  xrb.heat_delta_phi = (xrb.heat_phi_surface - xrb.heat_phi_h) * (xrb.gamma_adi - 1.0);
+  if (xrb.heat_delta_phi <= 0.0) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "heat_phi_h must be deeper than heat_phi_surface (more negative Phi)"
+                << std::endl;
+    }
+    exit(EXIT_FAILURE);
+  }
+
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &size = pmbp->pmb->mb_size;
+  const int nmkji = pmbp->nmb_thispack * nx3 * nx2 * nx1;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
+  auto pgen = xrb;
+
+  Real local_sum = 0.0;
+  Kokkos::parallel_reduce("xrb_heat_norm",
+                          Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int idx, Real &lsum) {
+    int m = idx / nkji;
+    int k = (idx - m*nkji) / nji;
+    int j = (idx - m*nkji - k*nji) / nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+
+    Real phi = CalculateRochePotential(pgen, x1v, x2v, x3v);
+    Real profile = HeatProfile(pgen, phi, x1v, x2v, x3v);
+    if (profile > 0.0) {
+      lsum += profile * size.d_view(m).dx1 * size.d_view(m).dx2 * size.d_view(m).dx3;
+    }
+  }, local_sum);
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &local_sum, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  if (local_sum <= 0.0) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "Heating normalization integral is zero." << std::endl
+                << "Check heat_phi_h vs fix_donor/r_donor_mask: heating is disabled"
+                << " inside r_donor_mask." << std::endl;
+    }
+    exit(EXIT_FAILURE);
+  }
+  xrb.heating_norm = xrb.L_heat / local_sum;
+}
+
+void InitializeHeating(ParameterInput *pin, Mesh *pm) {
+  xrb.heating = pin->GetOrAddBoolean("problem", "heating", false);
+  if (!xrb.heating) return;
+
+  Real m_tot = xrb.m_accretor + xrb.m_donor;
+  Real omega = sqrt(m_tot / (xrb.a_sep*xrb.a_sep*xrb.a_sep));
+  Real phi_surface =
+    CalculateRochePotential(xrb, xrb.a_sep - xrb.r_donor, 0.0, 0.0);
+  xrb.heat_phi_surface = pin->GetOrAddReal("problem", "heat_phi_surface", phi_surface);
+
+  // Default Phi_h: avoid donor-center singularity; with fix_donor place shell
+  // between r_donor_mask and r_donor so heating is not zeroed by the mask.
+  Real R_h_default;
+  if (xrb.fix_donor && xrb.r_donor_mask > 0.0 && xrb.r_donor_mask < xrb.r_donor) {
+    R_h_default = 0.5*(xrb.r_donor_mask + xrb.r_donor);
+  } else {
+    R_h_default = 0.5*xrb.r_donor;
+  }
+  Real phi_h_default =
+    CalculateRochePotential(xrb, xrb.a_sep - R_h_default, 0.0, 0.0);
+  xrb.heat_phi_h = pin->GetOrAddReal("problem", "heat_phi_h", phi_h_default);
+  xrb.heat_t0 = pin->GetOrAddReal("problem", "heat_t0", 15.0/omega);
+  xrb.heat_dt_ramp = pin->GetOrAddReal("problem", "heat_dt_ramp", 5.0/omega);
+
+  ComputeHeatEnvelopeMass(pm, &xrb.heat_M_ext);
+  xrb.heat_R_h = FindHeatRadius(xrb);
+  if (xrb.heat_M_ext <= 0.0 || xrb.heat_R_h <= 0.0) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "Invalid heat envelope mass or R_h for t_kh heating setup" << std::endl;
+    }
+    exit(EXIT_FAILURE);
+  }
+
+  xrb.t_kh = pin->GetOrAddReal("problem", "t_kh", 525.0/omega);
+  if (xrb.t_kh <= 0.0) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "t_kh must be positive" << std::endl;
+    }
+    exit(EXIT_FAILURE);
+  }
+  // Scherbak Eq. (12): t_kh = M_1 M_ext / (R_h L_heat)
+  xrb.L_heat = xrb.m_donor * xrb.heat_M_ext / (xrb.heat_R_h * xrb.t_kh);
+  SetupHeating(pm);
+}
 
 } // namespace
 
@@ -142,6 +343,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.rho_pow = pin->GetReal("problem", "rho_pow");
   xrb.pgas_min = pin->GetReal("problem", "pgas_min");
   xrb.pgas_pow = pin->GetReal("problem", "pgas_pow");
+  InitializeHeating(pin, pmy_mesh_);
 
   if (global_variable::my_rank == 0) {
     std::cout << "xrb.gamma_adi = " << xrb.gamma_adi << std::endl;
@@ -157,6 +359,19 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << "xrb.rho_pow = " << xrb.rho_pow << std::endl;
     std::cout << "xrb.pgas_min = " << xrb.pgas_min << std::endl;
     std::cout << "xrb.pgas_pow = " << xrb.pgas_pow << std::endl;
+    std::cout << "xrb.heating = " << xrb.heating << std::endl;
+    if (xrb.heating) {
+      std::cout << "xrb.t_kh = " << xrb.t_kh << std::endl;
+      std::cout << "xrb.L_heat = " << xrb.L_heat << std::endl;
+      std::cout << "xrb.heat_M_ext = " << xrb.heat_M_ext << std::endl;
+      std::cout << "xrb.heat_R_h = " << xrb.heat_R_h << std::endl;
+      std::cout << "xrb.heat_phi_h = " << xrb.heat_phi_h << std::endl;
+      std::cout << "xrb.heat_phi_surface = " << xrb.heat_phi_surface << std::endl;
+      std::cout << "xrb.heat_delta_phi = " << xrb.heat_delta_phi << std::endl;
+      std::cout << "xrb.heat_t0 = " << xrb.heat_t0 << std::endl;
+      std::cout << "xrb.heat_dt_ramp = " << xrb.heat_dt_ramp << std::endl;
+      std::cout << "xrb.heating_norm = " << xrb.heating_norm << std::endl;
+    }
   }
 
   if (restart) return;
@@ -406,6 +621,7 @@ void XRBSourceTerms(Mesh *pm, const Real bdt) {
   const bool is_ideal = pmbp->phydro->peos->eos_data.is_ideal;
   auto pgen = xrb;
   int nmb1 = pmbp->nmb_thispack - 1;
+  Real time = pm->time;
 
   par_for("xrb_srcterm", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -441,6 +657,21 @@ void XRBSourceTerms(Mesh *pm, const Real bdt) {
         u0_(m,IEN,k,j,i) -= work;
       } else {
         u0_(m,IEN,k,j,i) += work;
+      }
+
+      //  et al. 2025 Eq. (7): Gaussian in Roche potential, tanh time ramp.
+      if (pgen.heating) {
+        Real phi = CalculateRochePotential(pgen, x1v, x2v, x3v);
+        Real profile = HeatProfile(pgen, phi, x1v, x2v, x3v);
+        if (profile > 0.0) {
+          Real ramp = 0.5*(tanh((time - pgen.heat_t0)/pgen.heat_dt_ramp) + 1.0);
+          Real eps_heat = ramp * pgen.heating_norm * profile;
+          if (pgen.is_gr) {
+            u0_(m,IEN,k,j,i) -= bdt * eps_heat;
+          } else {
+            u0_(m,IEN,k,j,i) += bdt * eps_heat;
+          }
+        }
       }
     }
   });
