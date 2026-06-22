@@ -1729,7 +1729,15 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
           Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
           // bound to [dfloor, rdfloor]
           Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
-          eos_.dfloor = dfloor_;
+          // apply radius-dependent density floor to u_sr.d if enabled
+          // not u.d so u_sr.e is computed from the original u.d self-consistently
+          // not w.d so the c2p algorithm is self-consistent
+          if (u_sr.d < dfloor_) {
+            rpar *= u_sr.d / dfloor_;  // keep rpar = (B.m)/D consistent with floored D
+            u_sr.d = dfloor_;
+            dfloor_used = true;
+          }
+          // assign local pressure floor
           eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
         }
 

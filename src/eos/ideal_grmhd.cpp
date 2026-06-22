@@ -154,6 +154,7 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
         // not u.d so u_sr.e is computed from the original u.d self-consistently
         // not w.d so the c2p algorithm is self-consistent
         if (u_sr.d < dfloor_) {
+          rpar *= u_sr.d / dfloor_;  // keep rpar = (B.m)/D consistent with floored D
           u_sr.d = dfloor_;
           dfloor_used = true;
         }

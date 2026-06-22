@@ -136,6 +136,7 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
 
   // apply density floor to u.d, without changing momentum or energy
   if (u.d < udfloor) {
+    rpar *= u.d / udfloor;  // keep rpar = (B.m)/D consistent with floored D
     u.d = udfloor;
     dfloor_used = true;
   }
