@@ -40,7 +40,10 @@ void ZoomData::StoreData(int zm, int m) {
     auto w_ = pmbp->pmhd->w0;
     StoreCCData(zm, u0, coarse_u0, m, u_);
     StoreCCData(zm, w0, coarse_w0, m, w_);
-    StoreCoarsePrim(zm, coarse_w0, m, w_);
+    // TODO(@mhguo): a better way to handle the low-temperature case
+    if (pmbp->prad == nullptr) {
+      StoreCoarsePrim(zm, coarse_w0, m, w_);
+    }
     auto efld = pmbp->pmhd->efld;
     StoreEFieldsBeforeAMR(zm, m, efld);
   }

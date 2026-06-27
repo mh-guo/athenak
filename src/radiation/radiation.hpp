@@ -119,6 +119,9 @@ class Radiation {
   Real dens_trunc_max;
   Real tau_truncation;
   Real sigmoid_residual; // sigmoid residual must be less than 1./3
+  bool erad_ceiling;     // enable near-horizon radiation energy ceiling
+  Real erad_rho_max;     // ceiling on E_rad / rho
+  Real erad_max_alpha;   // apply ceiling where alpha is below this value
 
   // radiation source term (i.e., beam)
   SourceTerms *psrc = nullptr;

@@ -59,6 +59,9 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   Real &dtrunc_max  = dens_trunc_max;
   Real &tau_trunc   = tau_truncation;
   Real &sigmoid_res = sigmoid_residual;
+  bool &erad_ceiling_ = erad_ceiling;
+  Real &erad_rho_max_ = erad_rho_max;
+  Real &erad_max_alpha_ = erad_max_alpha;
 
   // Extract coordinate/excision data
   auto &coord = pmy_pack->pcoord->coord_data;
@@ -544,6 +547,29 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
                        tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
             if (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_) { i0_(m,n,k,j,i) = 0.0; }
           }
+        }
+      }
+    }
+
+    // Apply a localized safety ceiling to the radiation energy per density.
+    // This keeps the angular distribution intact by rescaling all angles together.
+    if (erad_ceiling_ && alpha < erad_max_alpha_ && erad_rho_max_ > 0.0 && wdn > 0.0) {
+      Real erad = 0.0;
+      for (int n=0; n<=nang1; ++n) {
+        Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) +
+                   tc(m,1,0,k,j,i)*nh_c_.d_view(n,1) +
+                   tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) +
+                   tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
+        Real denom = n0*n_0;
+        if (denom != 0.0) {
+          erad += fmax(i0_(m,n,k,j,i)/denom, 0.0)*solid_angles_.d_view(n);
+        }
+      }
+      Real erad_lim = erad_rho_max_*wdn;
+      if (erad > erad_lim) {
+        Real fac = erad_lim/erad;
+        for (int n=0; n<=nang1; ++n) {
+          i0_(m,n,k,j,i) *= fac;
         }
       }
     }

@@ -180,6 +180,12 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
   }
 
+  // Optional near-horizon radiation energy ceiling. This is intended as a
+  // localized safety limiter and is disabled by default.
+  erad_ceiling = pin->GetOrAddBoolean("radiation","erad_ceiling",false);
+  erad_rho_max = pin->GetOrAddReal("radiation","erad_rho_max",(FLT_MAX));
+  erad_max_alpha = pin->GetOrAddReal("radiation","erad_max_alpha",0.8);
+
   // Check for fluid evolution
   fixed_fluid = pin->GetOrAddBoolean("radiation","fixed_fluid",false);
 

@@ -634,5 +634,9 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // close file, clean up
   resfile.Close(single_file_per_rank);
 
+  if (global_variable::my_rank == 0) {
+    std::cout << "Restart file written successfully" << std::endl;
+  }
+
   return;
 }
