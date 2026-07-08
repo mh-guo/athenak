@@ -46,6 +46,7 @@
 #include "radiation/radiation.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "cyclic_zoom/cyclic_zoom.hpp"
+#include "pgen/turb_seed.hpp"
 
 #include <Kokkos_Random.hpp>
 
@@ -259,14 +260,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   torus.pexcise = coord.pexcise;
 
   // Compute angular momentum and prepare constants describing primitives
+  // If l_peak >= 0 is given in the input file, use it instead of computing it from
+  // r_peak.  fm_torus with l_peak = 0 gives a non-rotating spherical polytrope in
+  // hydrostatic equilibrium (h*exp(nu) = const) with surface at r_edge; log h is
+  // capped at its r_peak value (see LogHAux), so the core inside r_peak has
+  // rho = rho_max, starts at rest in the normal frame, and simply falls in
+  Real l_peak_in = pin->GetOrAddReal("problem", "l_peak", -1.0);
   if (torus.fm_torus) {
-    torus.l_peak = CalculateLFromRPeak(torus, torus.r_peak);
+    torus.l_peak = (l_peak_in >= 0.0) ? l_peak_in
+                                      : CalculateLFromRPeak(torus, torus.r_peak);
   } else if (torus.chakrabarti_torus) {
     CalculateCN(torus, &torus.c_param, &torus.n_param);
     torus.l_peak = CalculateL(torus, torus.r_peak, 1.0);
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "Unrecognized torus type in input file" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if (torus.l_peak == 0.0 && (torus.r_peak <= 2.0 || torus.r_edge <= torus.r_peak)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "l_peak = 0 (polytrope) requires 2 < r_peak < r_edge" << std::endl;
     exit(EXIT_FAILURE);
   }
   // Common to both tori:
@@ -362,10 +375,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       sin_vartheta = fabs(sin_theta);
     }
 
-    // Determine if we are in the torus
+    // Determine if we are in the torus (r <= r_edge if non-rotating polytrope)
     Real log_h;
     bool in_torus = false;
-    if (r >= trs.r_edge) {
+    if (r >= trs.r_edge || trs.l_peak == 0.0) {
       log_h = LogHAux(trs, r, sin_vartheta) - trs.log_h_edge;  // (FM 3.6)
       if (log_h >= 0.0) {
         in_torus = true;
@@ -430,6 +443,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       uu1 = u1 - gupper[0][1]/gupper[0][0] * u0;
       uu2 = u2 - gupper[0][2]/gupper[0][0] * u0;
       uu3 = u3 - gupper[0][3]/gupper[0][0] * u0;
+
+      // reset the capped core (r < r_peak) of a non-rotating polytrope to rest in
+      // the normal frame, since no static solution exists near/inside the horizon
+      if (trs.l_peak == 0.0 && r < trs.r_peak) {
+        uu1 = 0.0;
+        uu2 = 0.0;
+        uu3 = 0.0;
+      }
     }
 
     // Set primitive values, including random perturbations to pressure
@@ -743,10 +764,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         sin_vartheta = fabs(sin_theta);
       }
 
-      // Determine if we are in the torus
+      // Determine if we are in the torus (r <= r_edge if non-rotating polytrope)
       Real log_h;
       bool in_torus = false;
-      if (r >= trs.r_edge) {
+      if (r >= trs.r_edge || trs.l_peak == 0.0) {
         log_h = LogHAux(trs, r, sin_vartheta) - trs.log_h_edge;  // (FM 3.6)
         if (log_h >= 0.0) {
           in_torus = true;
@@ -809,6 +830,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (torus.is_vertical_field) {
       bnorm = sqrt((ptotmax/(0.5*bsqmax_intorus))/torus.potential_beta_min);
     }
+    // guard degenerate case: potential support unresolved -> b0=0 everywhere ->
+    // bsqmax=0 and bnorm=inf, which would turn b0 into 0*inf=NaN
+    if (!std::isfinite(bnorm)) {
+      bnorm = 0.0;
+      if (global_variable::my_rank == 0) {
+        std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "torus vector potential is zero on this grid; "
+                  << "skipping magnetic field normalization (b0=0)" << std::endl;
+      }
+    }
 
     par_for("pgen_normb0", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -831,6 +862,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       w_by = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
       w_bz = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
     });
+  }
+
+  // Apply one-shot turbulence seed perturbations from any <turb_seed*> blocks
+  // (see pgen/turb_seed.hpp); operates on primitives, so must precede PrimToCons
+  for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+    if (it->block_name.compare(0, 9, "turb_seed") == 0) {
+      TurbSeed tseed(it->block_name, pmbp, pin);
+      tseed.Apply();
+    }
   }
 
   // Convert primitives to conserved
@@ -890,6 +930,9 @@ static Real CalculateLFromRPeak(struct torus_pgen pgen, Real r) {
 
 KOKKOS_INLINE_FUNCTION
 static Real LogHAux(struct torus_pgen pgen, Real r, Real sin_theta) {
+  // for a non-rotating polytrope (l_peak = 0), cap log h, which diverges toward the
+  // horizon, at its r_peak value (so that rho <= rho_max)
+  if (pgen.l_peak == 0.0) r = fmax(r, pgen.r_peak);
   Real tol_trunc=1e-15;
   Real logh;
   if (pgen.fm_torus) {
@@ -1331,8 +1374,8 @@ static void CalculateVectorPotentialInTiltedTorus(struct torus_pgen pgen,
     }
 
   } else {
-    if (r >= pgen.r_edge) {
-      // Determine if we are in the torus
+    if (r >= pgen.r_edge || pgen.l_peak == 0.0) {
+      // Determine if we are in the torus (r <= r_edge if non-rotating polytrope)
       Real rho;
       Real gm1 = pgen.gamma_adi-1.0;
       bool in_torus = false;
