@@ -76,9 +76,11 @@ struct xrb_pgen {
   bool heating;                               // Scherbak-style envelope heating (Eq. 7)
   Real t_kh;                                  // KH expansion timescale (Eq. 12)
   Real L_heat;                                // derived from t_kh via Eq. (12)
-  Real heat_M_ext;                            // envelope mass with Phi > Phi_h (Eq. 11)
+  Real heat_f_ext;                            // M_ext / M_gas input (Eq. 11)
+  Real heat_M_gas;                            // integrated donor gas mass
+  Real heat_m_ext;                            // heat_f_ext * heat_M_gas (Eq. 11)
   Real heat_R_h;                              // radius at Phi_h (Eq. 12)
-  Real heat_phi_h;                            // Roche potential at heated shell center
+  Real heat_phi_h;                            // derived Roche potential at heated shell
   Real heat_phi_surface;                      // Roche potential at donor surface
   Real heat_delta_phi;                        // Gaussian width in potential (Eq. 9)
   Real heat_t0;                               // ramp center time
@@ -115,7 +117,7 @@ Real FindHeatRadius(struct xrb_pgen pgen) {
   return 0.5*(d_lo + d_hi);
 }
 
-void ComputeHeatEnvelopeMass(Mesh *pm, Real *pM_ext) {
+void ComputeHeatEnvelopeMass(Mesh *pm, Real phi_h_thresh, Real *pM_ext) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
   int is = indcs.is, js = indcs.js, ks = indcs.ks;
@@ -150,8 +152,12 @@ void ComputeHeatEnvelopeMass(Mesh *pm, Real *pM_ext) {
     Real &dx2 = size.d_view(m).dx2;
     Real &dx3 = size.d_view(m).dx3;
 
+    Real x_d = x1v - pgen.a_sep;
+    Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
+    if (d_donor >= pgen.r_donor) return;
+
     Real phi = CalculateRochePotential(pgen, x1v, x2v, x3v);
-    if (phi > pgen.heat_phi_h) {
+    if (phi > phi_h_thresh) {
       Real rho, pgas;
       CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
       lmass += rho * dx1 * dx2 * dx3;
@@ -162,6 +168,86 @@ void ComputeHeatEnvelopeMass(Mesh *pm, Real *pM_ext) {
   MPI_Allreduce(MPI_IN_PLACE, &local_mass, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
   *pM_ext = local_mass;
+}
+
+void ComputeDonorGasMass(Mesh *pm, Real *pM_gas) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &size = pmbp->pmb->mb_size;
+  const int nmkji = pmbp->nmb_thispack * nx3 * nx2 * nx1;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
+  auto pgen = xrb;
+
+  Real local_mass = 0.0;
+  Kokkos::parallel_reduce("xrb_heat_mgas",
+                          Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int idx, Real &lmass) {
+    int m = idx / nkji;
+    int k = (idx - m*nkji) / nji;
+    int j = (idx - m*nkji - k*nji) / nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    Real &dx1 = size.d_view(m).dx1;
+    Real &dx2 = size.d_view(m).dx2;
+    Real &dx3 = size.d_view(m).dx3;
+
+    Real x_d = x1v - pgen.a_sep;
+    Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
+    if (d_donor >= pgen.r_donor) return;
+
+    Real rho, pgas;
+    CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
+    lmass += rho * dx1 * dx2 * dx3;
+  }, local_mass);
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &local_mass, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  *pM_gas = local_mass;
+}
+
+Real FindPhiHFromMext(Mesh *pm, Real target_m_ext) {
+  Real phi_hi = xrb.heat_phi_surface;
+  Real phi_lo =
+    CalculateRochePotential(xrb, xrb.a_sep - 0.01*xrb.r_donor, 0.0, 0.0);
+
+  Real m_lo = 0.0;
+  ComputeHeatEnvelopeMass(pm, phi_lo, &m_lo);
+
+  if (target_m_ext <= 0.0 || target_m_ext > m_lo) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "heat_m_ext out of range: target=" << target_m_ext
+                << " max envelope mass=" << m_lo << std::endl;
+    }
+    exit(EXIT_FAILURE);
+  }
+
+  for (int n = 0; n < 64; ++n) {
+    Real phi_mid = 0.5*(phi_lo + phi_hi);
+    Real m_mid = 0.0;
+    ComputeHeatEnvelopeMass(pm, phi_mid, &m_mid);
+    if (m_mid > target_m_ext) {
+      phi_lo = phi_mid;
+    } else {
+      phi_hi = phi_mid;
+    }
+  }
+  return 0.5*(phi_lo + phi_hi);
 }
 
 void SetupHeating(Mesh *pm) {
@@ -240,27 +326,33 @@ void InitializeHeating(ParameterInput *pin, Mesh *pm) {
   Real phi_surface =
     CalculateRochePotential(xrb, xrb.a_sep - xrb.r_donor, 0.0, 0.0);
   xrb.heat_phi_surface = pin->GetOrAddReal("problem", "heat_phi_surface", phi_surface);
-
-  // Default Phi_h: avoid donor-center singularity; with fix_donor place shell
-  // between r_donor_mask and r_donor so heating is not zeroed by the mask.
-  Real R_h_default;
-  if (xrb.fix_donor && xrb.r_donor_mask > 0.0 && xrb.r_donor_mask < xrb.r_donor) {
-    R_h_default = 0.5*(xrb.r_donor_mask + xrb.r_donor);
-  } else {
-    R_h_default = 0.5*xrb.r_donor;
+  xrb.heat_f_ext = pin->GetOrAddReal("problem", "heat_f_ext", 1.0e-3);
+  if (xrb.heat_f_ext <= 0.0) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "heat_f_ext must be positive" << std::endl;
+    }
+    exit(EXIT_FAILURE);
   }
-  Real phi_h_default =
-    CalculateRochePotential(xrb, xrb.a_sep - R_h_default, 0.0, 0.0);
-  xrb.heat_phi_h = pin->GetOrAddReal("problem", "heat_phi_h", phi_h_default);
+
+  ComputeDonorGasMass(pm, &xrb.heat_M_gas);
+  if (xrb.heat_M_gas <= 0.0) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "Donor gas mass is zero; check k_adi and r_donor" << std::endl;
+    }
+    exit(EXIT_FAILURE);
+  }
+  xrb.heat_m_ext = xrb.heat_f_ext * xrb.heat_M_gas;
+  xrb.heat_phi_h = FindPhiHFromMext(pm, xrb.heat_m_ext);
   xrb.heat_t0 = pin->GetOrAddReal("problem", "heat_t0", 15.0/omega);
   xrb.heat_dt_ramp = pin->GetOrAddReal("problem", "heat_dt_ramp", 5.0/omega);
 
-  ComputeHeatEnvelopeMass(pm, &xrb.heat_M_ext);
   xrb.heat_R_h = FindHeatRadius(xrb);
-  if (xrb.heat_M_ext <= 0.0 || xrb.heat_R_h <= 0.0) {
+  if (xrb.heat_R_h <= 0.0) {
     if (global_variable::my_rank == 0) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-                << "Invalid heat envelope mass or R_h for t_kh heating setup" << std::endl;
+                << "Invalid R_h for t_kh heating setup" << std::endl;
     }
     exit(EXIT_FAILURE);
   }
@@ -274,7 +366,7 @@ void InitializeHeating(ParameterInput *pin, Mesh *pm) {
     exit(EXIT_FAILURE);
   }
   // Scherbak Eq. (12): t_kh = M_1 M_ext / (R_h L_heat)
-  xrb.L_heat = xrb.m_donor * xrb.heat_M_ext / (xrb.heat_R_h * xrb.t_kh);
+  xrb.L_heat = xrb.m_donor * xrb.heat_m_ext / (xrb.heat_R_h * xrb.t_kh);
   SetupHeating(pm);
 }
 
@@ -363,7 +455,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     if (xrb.heating) {
       std::cout << "xrb.t_kh = " << xrb.t_kh << std::endl;
       std::cout << "xrb.L_heat = " << xrb.L_heat << std::endl;
-      std::cout << "xrb.heat_M_ext = " << xrb.heat_M_ext << std::endl;
+      std::cout << "xrb.heat_f_ext = " << xrb.heat_f_ext << std::endl;
+      std::cout << "xrb.heat_M_gas = " << xrb.heat_M_gas << std::endl;
+      std::cout << "xrb.heat_m_ext = " << xrb.heat_m_ext << std::endl;
       std::cout << "xrb.heat_R_h = " << xrb.heat_R_h << std::endl;
       std::cout << "xrb.heat_phi_h = " << xrb.heat_phi_h << std::endl;
       std::cout << "xrb.heat_phi_surface = " << xrb.heat_phi_surface << std::endl;
