@@ -1,0 +1,159 @@
+# AthenaK input: xray_binary pgen, Scherbak et al. 2025 q_0.5_mid_heat (Newtonian)
+# Accretor at origin, donor on +x; Roche polytropic IC + corotating-frame sources.
+#
+# Paper mapping (Table 1, q_0.5_mid_heat):
+#   q = 0.5           -> m_accretor/m_donor = 1/2
+#   x0 = 0.43         -> r_donor/a_sep = 0.43
+#   gamma = 1.4
+#   t_kh = 525/Omega  -> t_kh below (or omit for code default)
+#   M_ext/M_gas ~ 1e-3 at M1=2/3 -> heat_f_ext = 1.5e-3
+# Paper K=0.228 (a=1 Roche code); k_adi here sets rho scale at large a_sep.
+#
+# Optional smoke: set nlim = 1. Production: nlim = -1, tlim ~ 1e12.
+
+<comment>
+problem   = x-ray binary Roche donor (Scherbak q_0.5 mid heat)
+reference = Scherbak et al. 2025, ApJ 990, 172 (target physics)
+
+<job>
+basename  = xrb
+
+<mesh>
+nghost = 4          # Number of ghost cells
+nx1    = 128        # number of cells in x1-direction
+x1min  = -4194304   # minimum x1  (2^22)
+x1max  =  4194304   # maximum x1  (2^22)
+ix1_bc = user       # inner boundary
+ox1_bc = user       # outer boundary
+
+nx2    = 128        # number of cells in x2-direction
+x2min  = -4194304   # minimum x2
+x2max  =  4194304   # maximum x2
+ix2_bc = user       # inner boundary
+ox2_bc = user       # outer boundary
+
+nx3    = 128        # number of cells in x3-direction
+x3min  = -4194304   # minimum x3
+x3max  =  4194304   # maximum x3
+ix3_bc = user       # inner boundary
+ox3_bc = user       # outer boundary
+
+<meshblock>
+nx1  = 32           # Number of cells in each MeshBlock, X1-dir
+nx2  = 32           # Number of cells in each MeshBlock, X2-dir
+nx3  = 32           # Number of cells in each MeshBlock, X3-dir
+
+<mesh_refinement>
+refinement = static    # type of refinement
+#refinement       = adaptive  # type of refinement
+#max_nmb_per_rank = 1072      # max allowed number of MBs per device (memory limit for AMR)
+#cycle_check     = 1         # cycles between checking mesh for ref/derefinement
+#refinement_interval = 1      # cycles between allowing successive ref/derefinement
+#num_levels       = 23
+
+<refined_region1>
+#level = 22
+level = 4
+x1min = -1.0
+x1max =  1.0
+x2min = -1.0
+x2max =  1.0
+x3min = -1.0
+x3max =  1.0
+
+<refined_region2>
+#level = 22
+level = 3
+x1min = 0.95e6
+x1max = 1.05e6
+x2min = -0.5e6
+x2max =  0.5e6
+x3min = -0.5e6
+x3max =  0.5e6
+
+<time>
+evolution  = dynamic     # dynamic/kinematic/static
+integrator = rk2         # time integration algorithm
+cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1          # cycle limit (-1 = no limit)
+tlim       = 1.0e12      # time limit
+ndiag      = 10          # cycles between diagostic output
+
+<coord>
+general_rel = false      # general relativity
+a           = 0.0        # black hole spin a (0 <= a/M < 1)
+excise      = false      # excise r_ks <= 1.0 (GR only)
+dexcise     = 1.0e-5     # density inside excision
+pexcise     = 2.0e-11    # pressure inside excision
+
+<hydro>
+eos         = ideal      # EOS type
+reconstruct = ppm4       # spatial reconstruction method
+rsolver     = hllc       # Riemann-solver to be used
+dfloor      = 1.0e-10    # floor on density rho
+pfloor      = 5.0e-20    # floor on gas pressure p_gas
+tfloor      = 5.0e-10    # floor on gas temperature, 5e-10 = 3.3e3 K
+rdfloor     = 1.0e-4     # radius-dependent floor on density rho
+rdfloor_rad = 1.0e0      # radius at which rdfloor is applied
+rdfloor_pow = -2.0       # power-law index for rdfloor
+gamma       = 1.4        # ratio of specific heats Gamma
+fofc        = true       # Enable first order flux correction
+gamma_max   = 20.0       # Enable ceiling on Lorentz factor
+sigma_max   = 1.0e4      # ceiling on magnetization
+
+<units>
+bhmass_msun = 1.0e1      # black hole mass in solar masses
+density_cgs = 1.0e-10    # density unit (cgs)
+mu          = 0.618      # mean molecular weight
+
+<problem>
+a_sep      = 1.0e6       # binary separation; donor at (+a_sep, 0, 0)
+m_donor    = 2.0         # donor mass (paper q=0.5)
+m_accretor = 1.0         # accretor mass at origin
+r_donor    = 4.3e5       # donor radius (r_donor/a_sep = 0.43 = paper x0)
+fix_donor  = true        # fix donor density and pressure
+r_donor_mask = 2.0e5     # donor inner mask radius
+r_soft     = 1.0e4       # Newtonian accretor gravity softening
+k_adi      = 1.0e-5      # polytrope constant K in p = K rho^Gamma
+rho_min    = 1.0e-8      # background on rho given by rho_min ...
+rho_pow    = -2.0        # ... * r^rho_pow
+pgas_min   = 1.0e-10     # background on p_gas given by pgas_min ...
+pgas_pow   = -2.5        # ... * r^pgas_pow
+user_srcs  = true        # enable Roche corotating-frame source terms
+user_hist  = true        # enroll user-defined history function (accretor fluxes)
+heating    = true        # Scherbak 2025 Eq. (7) envelope heating
+heat_f_ext = 1.5e-3      # M_ext / M_gas (Eq. 11); Scherbak ~1e-3 in normalized units
+t_kh       = 3.03e11     # KH timescale (Eq. 12); default ~525/Omega
+#heat_phi_surface = ...  # default: Phi at (a_sep - r_donor, 0, 0)
+#heat_t0 = ...            # default: 15/Omega
+#heat_dt_ramp = ...       # default: 5/Omega
+
+<output1>
+file_type = log         # diagnostic data
+dcycle    = 100         # cycle increment between outputs
+
+<output2>
+file_type  = hst        # History output
+data_format = %13.6e    # Optional data format string
+#dt         = 1.0e1      # time increment between outputs
+dcycle     = 200        # cycle increment between outputs
+
+<output3>
+file_type  = rst        # Restart dump
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 10000      # cycle increment between outputs
+
+<output4>
+file_type  = bin        # Binary data dump
+id         = full       # output id tag
+variable   = hydro_w    # variables to be output
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 1000       # cycle increment between outputs
+
+<output5>
+file_type  = cbin       # Coarsened binary data dump
+id         = full       # output id tag
+coarsen_factor = 2      # coarsen factor for binary output
+variable   = hydro_w    # variables to be output
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 1000       # cycle increment between outputs
