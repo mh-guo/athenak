@@ -90,7 +90,7 @@ pexcise     = 2.0e-11    # pressure inside excision
 eos         = ideal      # EOS type
 reconstruct = ppm4       # spatial reconstruction method
 rsolver     = hllc       # Riemann-solver to be used
-dfloor      = 1.0e-10    # floor on density rho
+dfloor      = 1.0e-12    # floor on density rho
 pfloor      = 5.0e-20    # floor on gas pressure p_gas
 tfloor      = 5.0e-10    # floor on gas temperature, 5e-10 = 3.3e3 K
 rdfloor     = 1.0e-4     # radius-dependent floor on density rho
@@ -115,10 +115,10 @@ fix_donor  = true        # fix donor density and pressure
 r_donor_mask = 2.0e5     # donor inner mask radius
 r_soft     = 1.0e4       # Newtonian accretor gravity softening
 k_adi      = 1.0e-5      # polytrope constant K in p = K rho^Gamma
-rho_min    = 1.0e-8      # background on rho given by rho_min ...
-rho_pow    = -2.0        # ... * r^rho_pow
-pgas_min   = 1.0e-10     # background on p_gas given by pgas_min ...
-pgas_pow   = -2.5        # ... * r^pgas_pow
+rho_min    = 1.0e-10     # background on rho given by rho_min ...
+rho_pow    = -0.0        # ... * r^rho_pow
+pgas_min   = 1.0e-15     # background on p_gas given by pgas_min ...
+pgas_pow   = -0.0        # ... * r^pgas_pow
 user_srcs  = true        # enable Roche corotating-frame source terms
 user_hist  = true        # enroll user-defined history function (accretor fluxes)
 heating    = true        # Scherbak 2025 Eq. (7) envelope heating
