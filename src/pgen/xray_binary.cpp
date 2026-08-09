@@ -5,13 +5,19 @@
 //========================================================================================
 //! \file xray_binary.cpp
 //! \brief Problem generator for x-ray binary with donor on +x and accretor at origin.
-//! Supports Newtonian Cartesian hydro and GR hydro (+ optional radiation).
+//! Supports Newtonian/GR hydro or MHD (+ optional radiation in GR).
+//! MHD magnetic field options (independent; both off => B=0):
+//!   mean_field = poloidal : donor-envelope poloidal field from vector potential
+//!   <turb_seed*> blocks   : one-shot seed (see pgen/turb_seed.hpp)
+//! fix_donor mask resets fluid only (never face B) to preserve divB=0.
 
 #include <stdio.h>
 #include <math.h>
 
+#include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -24,10 +30,13 @@
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
+#include "eos/ideal_c2p_mhd.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "geodesic-grid/spherical_grid.hpp"
 #include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "pgen/turb_seed.hpp"
 
 namespace {
 KOKKOS_INLINE_FUNCTION
@@ -86,9 +95,65 @@ struct xrb_pgen {
   Real heat_t0;                               // ramp center time
   Real heat_dt_ramp;                          // ramp width time
   Real heating_norm;                          // L_heat / int(unnormalized profile dV)
+  // MHD mean field (donor poloidal); unused when mean_field=none
+  bool mean_field_poloidal;
+  Real potential_beta_min;
+  Real potential_rho_cut;
+  Real potential_rho_pow;
 };
 
 xrb_pgen xrb;
+
+//----------------------------------------------------------------------------------------
+//! Donor-centered poloidal vector potential A_phi * e_phi (about z through donor).
+//! A_phi = [max(rho - rho_cut, 0)]^rho_pow evaluated from the Roche polytrope.
+
+KOKKOS_INLINE_FUNCTION
+static Real DonorAphi(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
+  Real rho, pgas;
+  CalculateDonorState(pgen, x1, x2, x3, 0.0, 0.0, 0.0, &rho, &pgas);
+  Real excess = rho - pgen.potential_rho_cut;
+  if (excess <= 0.0) return 0.0;
+  return pow(excess, pgen.potential_rho_pow);
+}
+
+KOKKOS_INLINE_FUNCTION
+static void DonorVectorPotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3,
+                                 Real *pa1, Real *pa2, Real *pa3) {
+  Real xd = x1 - pgen.a_sep;
+  Real rcyl = sqrt(SQR(xd) + SQR(x2));
+  Real aphi = DonorAphi(pgen, x1, x2, x3);
+  if (rcyl <= 1.0e-30 || aphi == 0.0) {
+    *pa1 = 0.0;
+    *pa2 = 0.0;
+    *pa3 = 0.0;
+    return;
+  }
+  *pa1 = -aphi * x2 / rcyl;
+  *pa2 =  aphi * xd / rcyl;
+  *pa3 = 0.0;
+}
+
+KOKKOS_INLINE_FUNCTION
+static Real A1(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
+  Real a1, a2, a3;
+  DonorVectorPotential(pgen, x1, x2, x3, &a1, &a2, &a3);
+  return a1;
+}
+
+KOKKOS_INLINE_FUNCTION
+static Real A2(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
+  Real a1, a2, a3;
+  DonorVectorPotential(pgen, x1, x2, x3, &a1, &a2, &a3);
+  return a2;
+}
+
+KOKKOS_INLINE_FUNCTION
+static Real A3(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
+  Real a1, a2, a3;
+  DonorVectorPotential(pgen, x1, x2, x3, &a1, &a2, &a3);
+  return a3;
+}
 
 KOKKOS_INLINE_FUNCTION
 Real HeatProfile(struct xrb_pgen pgen, Real phi,
@@ -380,11 +445,13 @@ void AccretorFluxes(HistoryData *pdata, Mesh *pm);
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
-  if (pmbp->phydro == nullptr) {
+  if ((pmbp->phydro == nullptr && pmbp->pmhd == nullptr) ||
+      (pmbp->phydro != nullptr && pmbp->pmhd != nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "xray_binary requires a <hydro> block" << std::endl;
+              << "xray_binary requires exactly one of <hydro> or <mhd>" << std::endl;
     exit(EXIT_FAILURE);
   }
+  const bool use_mhd = (pmbp->pmhd != nullptr);
 
   const bool is_gr = pmbp->pcoord->is_general_relativistic;
   const bool is_radiation_enabled = (pmbp->prad != nullptr);
@@ -402,6 +469,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int is = indcs.is, js = indcs.js, ks = indcs.ks;
   int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
   auto &coord = pmbp->pcoord->coord_data;
+  int nmb = pmbp->nmb_thispack;
 
   xrb.is_gr = is_gr;
   xrb.spin = coord.bh_spin;
@@ -422,7 +490,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
 
-  xrb.gamma_adi = pmbp->phydro->peos->eos_data.gamma;
+  if (use_mhd) {
+    xrb.gamma_adi = pmbp->pmhd->peos->eos_data.gamma;
+  } else {
+    xrb.gamma_adi = pmbp->phydro->peos->eos_data.gamma;
+  }
   xrb.k_adi = pin->GetReal("problem", "k_adi");
   xrb.a_sep = pin->GetReal("problem", "a_sep");
   xrb.m_donor = pin->GetReal("problem", "m_donor");
@@ -435,6 +507,27 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.rho_pow = pin->GetReal("problem", "rho_pow");
   xrb.pgas_min = pin->GetReal("problem", "pgas_min");
   xrb.pgas_pow = pin->GetReal("problem", "pgas_pow");
+
+  // MHD mean-field options
+  xrb.mean_field_poloidal = false;
+  xrb.potential_beta_min = 100.0;
+  xrb.potential_rho_cut = 0.0;
+  xrb.potential_rho_pow = 1.0;
+  if (use_mhd) {
+    std::string mean_field = pin->GetOrAddString("problem", "mean_field", "none");
+    if (mean_field == "poloidal") {
+      xrb.mean_field_poloidal = true;
+      xrb.potential_beta_min = pin->GetOrAddReal("problem", "potential_beta_min", 100.0);
+      xrb.potential_rho_cut = pin->GetOrAddReal("problem", "potential_rho_cut",
+                                                2.0*xrb.rho_min);
+      xrb.potential_rho_pow = pin->GetOrAddReal("problem", "potential_rho_pow", 1.0);
+    } else if (mean_field != "none") {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "problem/mean_field must be 'none' or 'poloidal'" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+
   InitializeHeating(pin, pmy_mesh_);
 
   if (global_variable::my_rank == 0) {
@@ -466,12 +559,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       std::cout << "xrb.heat_dt_ramp = " << xrb.heat_dt_ramp << std::endl;
       std::cout << "xrb.heating_norm = " << xrb.heating_norm << std::endl;
     }
+    if (use_mhd) {
+      std::cout << "xrb.mean_field_poloidal = " << xrb.mean_field_poloidal << std::endl;
+      if (xrb.mean_field_poloidal) {
+        std::cout << "xrb.potential_beta_min = " << xrb.potential_beta_min << std::endl;
+        std::cout << "xrb.potential_rho_cut = " << xrb.potential_rho_cut << std::endl;
+        std::cout << "xrb.potential_rho_pow = " << xrb.potential_rho_pow << std::endl;
+      }
+    }
   }
 
   if (restart) return;
 
-  auto &u0_ = pmbp->phydro->u0;
-  auto &w0_ = pmbp->phydro->w0;
+  DvceArray5D<Real> u0_, w0_;
+  if (use_mhd) {
+    u0_ = pmbp->pmhd->u0;
+    w0_ = pmbp->pmhd->w0;
+  } else {
+    u0_ = pmbp->phydro->u0;
+    w0_ = pmbp->phydro->w0;
+  }
 
   int nangles_ = 0;
   DualArray2D<Real> nh_c_;
@@ -562,7 +669,286 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
   });
 
-  pmbp->phydro->peos->PrimToCons(w0_, u0_, is, ie, js, je, ks, ke);
+  //--------------------------------------------------------------------------
+  // Magnetic field (MHD only): start from B=0, then optional mean + turb_seed
+  //--------------------------------------------------------------------------
+  if (use_mhd) {
+    auto &b0_z = pmbp->pmhd->b0;
+    auto &bcc_z = pmbp->pmhd->bcc0;
+    par_for("xrb_zero_b", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      b0_z.x1f(m,k,j,i) = 0.0;
+      b0_z.x2f(m,k,j,i) = 0.0;
+      b0_z.x3f(m,k,j,i) = 0.0;
+      if (i==ie) {b0_z.x1f(m,k,j,i+1) = 0.0;}
+      if (j==je) {b0_z.x2f(m,k,j+1,i) = 0.0;}
+      if (k==ke) {b0_z.x3f(m,k+1,j,i) = 0.0;}
+      bcc_z(m,IBX,k,j,i) = 0.0;
+      bcc_z(m,IBY,k,j,i) = 0.0;
+      bcc_z(m,IBZ,k,j,i) = 0.0;
+    });
+  }
+
+  if (use_mhd && xrb.mean_field_poloidal) {
+    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    DvceArray4D<Real> a1, a2, a3;
+    Kokkos::realloc(a1, nmb, ncells3, ncells2, ncells1);
+    Kokkos::realloc(a2, nmb, ncells3, ncells2, ncells1);
+    Kokkos::realloc(a3, nmb, ncells3, ncells2, ncells1);
+
+    auto &nghbr = pmbp->pmb->nghbr;
+    auto &mblev = pmbp->pmb->mb_lev;
+    auto trs = xrb;
+
+    par_for("xrb_vector_potential", DevExeSpace(), 0,nmb-1,ks,ke+1,js,je+1,is,ie+1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real x1f = LeftEdgeX(i-is, nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      int nx2 = indcs.nx2;
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real x2f = LeftEdgeX(j-js, nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      int nx3 = indcs.nx3;
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real x3f = LeftEdgeX(k-ks, nx3, x3min, x3max);
+
+      Real dx1 = size.d_view(m).dx1;
+      Real dx2 = size.d_view(m).dx2;
+      Real dx3 = size.d_view(m).dx3;
+
+      a1(m,k,j,i) = A1(trs, x1v, x2f, x3f);
+      a2(m,k,j,i) = A2(trs, x1f, x2v, x3f);
+      a3(m,k,j,i) = A3(trs, x1f, x2f, x3v);
+
+      // Fine-neighbor edge averaging (torus / turb_seed scheme)
+      if ((nghbr.d_view(m,8 ).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,9 ).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,10).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,11).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,12).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,13).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,14).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,15).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,24).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,25).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,26).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,27).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,28).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,29).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,30).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,31).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,40).lev > mblev.d_view(m) && j==js && k==ks) ||
+          (nghbr.d_view(m,41).lev > mblev.d_view(m) && j==js && k==ks) ||
+          (nghbr.d_view(m,42).lev > mblev.d_view(m) && j==je+1 && k==ks) ||
+          (nghbr.d_view(m,43).lev > mblev.d_view(m) && j==je+1 && k==ks) ||
+          (nghbr.d_view(m,44).lev > mblev.d_view(m) && j==js && k==ke+1) ||
+          (nghbr.d_view(m,45).lev > mblev.d_view(m) && j==js && k==ke+1) ||
+          (nghbr.d_view(m,46).lev > mblev.d_view(m) && j==je+1 && k==ke+1) ||
+          (nghbr.d_view(m,47).lev > mblev.d_view(m) && j==je+1 && k==ke+1)) {
+        Real xl = x1v + 0.25*dx1;
+        Real xr = x1v - 0.25*dx1;
+        a1(m,k,j,i) = 0.5*(A1(trs, xl,x2f,x3f) + A1(trs, xr,x2f,x3f));
+      }
+
+      if ((nghbr.d_view(m,0 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,1 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,2 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,3 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,4 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,5 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,6 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,7 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,24).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,25).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,26).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,27).lev > mblev.d_view(m) && k==ks) ||
+          (nghbr.d_view(m,28).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,29).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,30).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,31).lev > mblev.d_view(m) && k==ke+1) ||
+          (nghbr.d_view(m,32).lev > mblev.d_view(m) && i==is && k==ks) ||
+          (nghbr.d_view(m,33).lev > mblev.d_view(m) && i==is && k==ks) ||
+          (nghbr.d_view(m,34).lev > mblev.d_view(m) && i==ie+1 && k==ks) ||
+          (nghbr.d_view(m,35).lev > mblev.d_view(m) && i==ie+1 && k==ks) ||
+          (nghbr.d_view(m,36).lev > mblev.d_view(m) && i==is && k==ke+1) ||
+          (nghbr.d_view(m,37).lev > mblev.d_view(m) && i==is && k==ke+1) ||
+          (nghbr.d_view(m,38).lev > mblev.d_view(m) && i==ie+1 && k==ke+1) ||
+          (nghbr.d_view(m,39).lev > mblev.d_view(m) && i==ie+1 && k==ke+1)) {
+        Real xl = x2v + 0.25*dx2;
+        Real xr = x2v - 0.25*dx2;
+        a2(m,k,j,i) = 0.5*(A2(trs, x1f,xl,x3f) + A2(trs, x1f,xr,x3f));
+      }
+
+      if ((nghbr.d_view(m,0 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,1 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,2 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,3 ).lev > mblev.d_view(m) && i==is) ||
+          (nghbr.d_view(m,4 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,5 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,6 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,7 ).lev > mblev.d_view(m) && i==ie+1) ||
+          (nghbr.d_view(m,8 ).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,9 ).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,10).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,11).lev > mblev.d_view(m) && j==js) ||
+          (nghbr.d_view(m,12).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,13).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,14).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,15).lev > mblev.d_view(m) && j==je+1) ||
+          (nghbr.d_view(m,16).lev > mblev.d_view(m) && i==is && j==js) ||
+          (nghbr.d_view(m,17).lev > mblev.d_view(m) && i==is && j==js) ||
+          (nghbr.d_view(m,18).lev > mblev.d_view(m) && i==ie+1 && j==js) ||
+          (nghbr.d_view(m,19).lev > mblev.d_view(m) && i==ie+1 && j==js) ||
+          (nghbr.d_view(m,20).lev > mblev.d_view(m) && i==is && j==je+1) ||
+          (nghbr.d_view(m,21).lev > mblev.d_view(m) && i==is && j==je+1) ||
+          (nghbr.d_view(m,22).lev > mblev.d_view(m) && i==ie+1 && j==je+1) ||
+          (nghbr.d_view(m,23).lev > mblev.d_view(m) && i==ie+1 && j==je+1)) {
+        Real xl = x3v + 0.25*dx3;
+        Real xr = x3v - 0.25*dx3;
+        a3(m,k,j,i) = 0.5*(A3(trs, x1f,x2f,xl) + A3(trs, x1f,x2f,xr));
+      }
+    });
+
+    auto &b0 = pmbp->pmhd->b0;
+    par_for("xrb_b0", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real dx1 = size.d_view(m).dx1;
+      Real dx2 = size.d_view(m).dx2;
+      Real dx3 = size.d_view(m).dx3;
+
+      b0.x1f(m,k,j,i) = ((a3(m,k,j+1,i) - a3(m,k,j,i))/dx2 -
+                         (a2(m,k+1,j,i) - a2(m,k,j,i))/dx3);
+      b0.x2f(m,k,j,i) = ((a1(m,k+1,j,i) - a1(m,k,j,i))/dx3 -
+                         (a3(m,k,j,i+1) - a3(m,k,j,i))/dx1);
+      b0.x3f(m,k,j,i) = ((a2(m,k,j,i+1) - a2(m,k,j,i))/dx1 -
+                         (a1(m,k,j+1,i) - a1(m,k,j,i))/dx2);
+
+      if (i==ie) {
+        b0.x1f(m,k,j,i+1) = ((a3(m,k,j+1,i+1) - a3(m,k,j,i+1))/dx2 -
+                             (a2(m,k+1,j,i+1) - a2(m,k,j,i+1))/dx3);
+      }
+      if (j==je) {
+        b0.x2f(m,k,j+1,i) = ((a1(m,k+1,j+1,i) - a1(m,k,j+1,i))/dx3 -
+                             (a3(m,k,j+1,i+1) - a3(m,k,j+1,i))/dx1);
+      }
+      if (k==ke) {
+        b0.x3f(m,k+1,j,i) = ((a2(m,k+1,j,i+1) - a2(m,k+1,j,i))/dx1 -
+                             (a1(m,k+1,j+1,i) - a1(m,k+1,j,i))/dx2);
+      }
+    });
+
+    auto &bcc_ = pmbp->pmhd->bcc0;
+    par_for("xrb_bcc", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      bcc_(m,IBX,k,j,i) = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
+      bcc_(m,IBY,k,j,i) = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
+      bcc_(m,IBZ,k,j,i) = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
+    });
+
+    // Volume-weighted <p_mag> and <p_gas(+p_rad)> over donor support (rho > cut)
+    const Real arad_ = is_radiation_enabled ? pmbp->prad->arad : 0.0;
+    const bool is_rad = is_radiation_enabled;
+    Real pmag_sum = 0.0, pgas_sum = 0.0, vol_sum = 0.0;
+    Kokkos::parallel_reduce("xrb_beta_norm",
+                            Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int idx, Real &lpmag, Real &lpgas, Real &lvol) {
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/indcs.nx1;
+      int i = (idx - m*nkji - k*nji - j*indcs.nx1) + is;
+      k += ks;
+      j += js;
+
+      Real rho = w0_(m,IDN,k,j,i);
+      if (rho <= trs.potential_rho_cut) return;
+
+      Real vol = size.d_view(m).dx1 * size.d_view(m).dx2 * size.d_view(m).dx3;
+      Real pgas = gm1 * w0_(m,IEN,k,j,i);
+      if (is_rad) {
+        Real tgas = pgas / rho;
+        pgas += arad_ * SQR(SQR(tgas)) / 3.0;
+      }
+      Real bx = bcc_(m,IBX,k,j,i);
+      Real by = bcc_(m,IBY,k,j,i);
+      Real bz = bcc_(m,IBZ,k,j,i);
+      Real pmag = 0.5*(SQR(bx) + SQR(by) + SQR(bz));
+      lpmag += pmag * vol;
+      lpgas += pgas * vol;
+      lvol  += vol;
+    }, pmag_sum, pgas_sum, vol_sum);
+
+#if MPI_PARALLEL_ENABLED
+    Real red[3] = {pmag_sum, pgas_sum, vol_sum};
+    MPI_Allreduce(MPI_IN_PLACE, red, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    pmag_sum = red[0];
+    pgas_sum = red[1];
+    vol_sum = red[2];
+#endif
+
+    Real bnorm = 0.0;
+    if (vol_sum > 0.0 && pmag_sum > 0.0 && pgas_sum > 0.0) {
+      Real pmag_mean = pmag_sum / vol_sum;
+      Real pgas_mean = pgas_sum / vol_sum;
+      bnorm = sqrt((pgas_mean / pmag_mean) / xrb.potential_beta_min);
+    }
+    if (!std::isfinite(bnorm)) {
+      bnorm = 0.0;
+      if (global_variable::my_rank == 0) {
+        std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "donor vector potential is zero or degenerate; "
+                  << "skipping magnetic field normalization (b0=0)" << std::endl;
+      }
+    }
+
+    Real bnorm_ = bnorm;
+    par_for("xrb_normb0", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      b0.x1f(m,k,j,i) *= bnorm_;
+      b0.x2f(m,k,j,i) *= bnorm_;
+      b0.x3f(m,k,j,i) *= bnorm_;
+      if (i==ie) { b0.x1f(m,k,j,i+1) *= bnorm_; }
+      if (j==je) { b0.x2f(m,k,j+1,i) *= bnorm_; }
+      if (k==ke) { b0.x3f(m,k+1,j,i) *= bnorm_; }
+    });
+
+    par_for("xrb_normbcc", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      bcc_(m,IBX,k,j,i) = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
+      bcc_(m,IBY,k,j,i) = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
+      bcc_(m,IBZ,k,j,i) = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
+    });
+
+    if (global_variable::my_rank == 0) {
+      std::cout << "xrb poloidal mean field: bnorm = " << bnorm
+                << " (target beta_min = " << xrb.potential_beta_min << ")" << std::endl;
+    }
+  }
+
+  // One-shot turbulence / B seeds (operate on primitives / face B; before PrimToCons)
+  for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+    if (it->block_name.compare(0, 9, "turb_seed") == 0) {
+      TurbSeed tseed(it->block_name, pmbp, pin);
+      tseed.Apply();
+    }
+  }
+
+  // Convert primitives to conserved
+  if (use_mhd) {
+    auto &bcc0_ = pmbp->pmhd->bcc0;
+    pmbp->pmhd->peos->PrimToCons(w0_, bcc0_, u0_, is, ie, js, je, ks, ke);
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_, u0_, is, ie, js, je, ks, ke);
+  }
   return;
 }
 
@@ -710,9 +1096,19 @@ void XRBSourceTerms(Mesh *pm, const Real bdt) {
   int js = indcs.js, je = indcs.je;
   int ks = indcs.ks, ke = indcs.ke;
   auto &size = pmbp->pmb->mb_size;
-  auto &w0_ = pmbp->phydro->w0;
-  auto &u0_ = pmbp->phydro->u0;
-  const bool is_ideal = pmbp->phydro->peos->eos_data.is_ideal;
+
+  DvceArray5D<Real> w0_, u0_;
+  bool is_ideal;
+  if (pmbp->pmhd != nullptr) {
+    w0_ = pmbp->pmhd->w0;
+    u0_ = pmbp->pmhd->u0;
+    is_ideal = pmbp->pmhd->peos->eos_data.is_ideal;
+  } else {
+    w0_ = pmbp->phydro->w0;
+    u0_ = pmbp->phydro->u0;
+    is_ideal = pmbp->phydro->peos->eos_data.is_ideal;
+  }
+
   auto pgen = xrb;
   int nmb1 = pmbp->nmb_thispack - 1;
   Real time = pm->time;
@@ -753,7 +1149,7 @@ void XRBSourceTerms(Mesh *pm, const Real bdt) {
         u0_(m,IEN,k,j,i) += work;
       }
 
-      //  et al. 2025 Eq. (7): Gaussian in Roche potential, tanh time ramp.
+      // Scherbak et al. 2025 Eq. (7): Gaussian in Roche potential, tanh time ramp.
       if (pgen.heating) {
         Real phi = CalculateRochePotential(pgen, x1v, x2v, x3v);
         Real profile = HeatProfile(pgen, phi, x1v, x2v, x3v);
@@ -780,53 +1176,129 @@ void ApplyDonorMask(Mesh *pm) {
   int js = indcs.js, je = indcs.je;
   int ks = indcs.ks, ke = indcs.ke;
   auto &size = pmbp->pmb->mb_size;
-  auto &w0_ = pmbp->phydro->w0;
-  auto &u0_ = pmbp->phydro->u0;
+  const bool use_mhd = (pmbp->pmhd != nullptr);
+
+  DvceArray5D<Real> w0_, u0_;
+  if (use_mhd) {
+    w0_ = pmbp->pmhd->w0;
+    u0_ = pmbp->pmhd->u0;
+  } else {
+    w0_ = pmbp->phydro->w0;
+    u0_ = pmbp->phydro->u0;
+  }
+
   auto pgen = xrb;
   Real gm1 = pgen.gamma_adi - 1.0;
   int nmb1 = pmbp->nmb_thispack - 1;
+  auto &coord = pmbp->pcoord->coord_data;
 
-  par_for("xrb_donor_mask", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+  if (use_mhd) {
+    // Fluid only inside mask; face B untouched (divB preserved).
+    // Refresh bcc from faces and set conserved via MHD PrimToCons algebra.
+    auto &b0 = pmbp->pmhd->b0;
+    auto &bcc_ = pmbp->pmhd->bcc0;
+    Real gamma = pgen.gamma_adi;
 
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    par_for("xrb_donor_mask_mhd", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
-    Real &dx1 = size.d_view(m).dx1;
-    Real &dx2 = size.d_view(m).dx2;
-    Real &dx3 = size.d_view(m).dx3;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-    Real x_d = x1v - pgen.a_sep;
-    Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
-    if (d_donor <= pgen.r_donor_mask) {
+      Real &dx1 = size.d_view(m).dx1;
+      Real &dx2 = size.d_view(m).dx2;
+      Real &dx3 = size.d_view(m).dx3;
+
+      Real x_d = x1v - pgen.a_sep;
+      Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
+      if (d_donor > pgen.r_donor_mask) return;
+
       Real rho, pgas;
       CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
       Real eint = pgas / gm1;
+
+      Real bx = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
+      Real by = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
+      Real bz = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
+      bcc_(m,IBX,k,j,i) = bx;
+      bcc_(m,IBY,k,j,i) = by;
+      bcc_(m,IBZ,k,j,i) = bz;
+
       w0_(m,IDN,k,j,i) = rho;
       w0_(m,IVX,k,j,i) = 0.0;
       w0_(m,IVY,k,j,i) = 0.0;
       w0_(m,IVZ,k,j,i) = 0.0;
-      u0_(m,IDN,k,j,i) = rho;
-      u0_(m,IM1,k,j,i) = 0.0;
-      u0_(m,IM2,k,j,i) = 0.0;
-      u0_(m,IM3,k,j,i) = 0.0;
+      w0_(m,IEN,k,j,i) = eint;
+
+      MHDPrim1D w;
+      w.d = rho; w.vx = 0.0; w.vy = 0.0; w.vz = 0.0; w.e = eint;
+      w.bx = bx; w.by = by; w.bz = bz;
+      HydCons1D u;
       if (pgen.is_gr) {
-        w0_(m,IEN,k,j,i) = -eint;
-        u0_(m,IEN,k,j,i) = -eint;
+        Real glower[4][4], gupper[4][4];
+        ComputeMetricAndInverse(x1v, x2v, x3v, coord.is_minkowski, coord.bh_spin,
+                                glower, gupper);
+        SingleP2C_IdealGRMHD(glower, gupper, w, gamma, u);
       } else {
-        w0_(m,IEN,k,j,i) = eint;
-        u0_(m,IEN,k,j,i) = eint;
+        SingleP2C_IdealMHD(w, u);
       }
-    }
-  });
+      u0_(m,IDN,k,j,i) = u.d;
+      u0_(m,IM1,k,j,i) = u.mx;
+      u0_(m,IM2,k,j,i) = u.my;
+      u0_(m,IM3,k,j,i) = u.mz;
+      u0_(m,IEN,k,j,i) = u.e;
+    });
+  } else {
+    par_for("xrb_donor_mask", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+      Real &dx1 = size.d_view(m).dx1;
+      Real &dx2 = size.d_view(m).dx2;
+      Real &dx3 = size.d_view(m).dx3;
+
+      Real x_d = x1v - pgen.a_sep;
+      Real d_donor = sqrt(SQR(x_d) + SQR(x2v) + SQR(x3v));
+      if (d_donor <= pgen.r_donor_mask) {
+        Real rho, pgas;
+        CalculateDonorState(pgen, x1v, x2v, x3v, dx1, dx2, dx3, &rho, &pgas);
+        Real eint = pgas / gm1;
+        w0_(m,IDN,k,j,i) = rho;
+        w0_(m,IVX,k,j,i) = 0.0;
+        w0_(m,IVY,k,j,i) = 0.0;
+        w0_(m,IVZ,k,j,i) = 0.0;
+        u0_(m,IDN,k,j,i) = rho;
+        u0_(m,IM1,k,j,i) = 0.0;
+        u0_(m,IM2,k,j,i) = 0.0;
+        u0_(m,IM3,k,j,i) = 0.0;
+        if (pgen.is_gr) {
+          w0_(m,IEN,k,j,i) = -eint;
+          u0_(m,IEN,k,j,i) = -eint;
+        } else {
+          w0_(m,IEN,k,j,i) = eint;
+          u0_(m,IEN,k,j,i) = eint;
+        }
+      }
+    });
+  }
 }
 
 void UserBcsXRB(Mesh *pm) {
@@ -844,22 +1316,38 @@ void NoInflowXRB(Mesh *pm) {
   int &js = indcs.js;  int &je  = indcs.je;
   int &ks = indcs.ks;  int &ke  = indcs.ke;
   auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  const bool use_mhd = (pmbp->pmhd != nullptr);
 
-  auto &u0_ = pm->pmb_pack->phydro->u0;
-  auto &w0_ = pm->pmb_pack->phydro->w0;
-  int nmb = pm->pmb_pack->nmb_thispack;
+  DvceArray5D<Real> u0_, w0_, bcc_;
+  if (use_mhd) {
+    u0_ = pmbp->pmhd->u0;
+    w0_ = pmbp->pmhd->w0;
+    bcc_ = pmbp->pmhd->bcc0;
+  } else {
+    u0_ = pmbp->phydro->u0;
+    w0_ = pmbp->phydro->w0;
+  }
+  int nmb = pmbp->nmb_thispack;
   int nvar = u0_.extent_int(1);
 
-  const bool is_gr = pm->pmb_pack->pcoord->is_general_relativistic;
-  const bool is_radiation_enabled = (pm->pmb_pack->prad != nullptr);
-  DvceArray5D<Real> i0_; int nang1;
+  const bool is_gr = pmbp->pcoord->is_general_relativistic;
+  const bool is_radiation_enabled = (pmbp->prad != nullptr);
+  DvceArray5D<Real> i0_; int nang1 = 0;
   if (is_gr && is_radiation_enabled) {
-    i0_ = pm->pmb_pack->prad->i0;
-    nang1 = pm->pmb_pack->prad->prgeo->nangles - 1;
+    i0_ = pmbp->prad->i0;
+    nang1 = pmbp->prad->prgeo->nangles - 1;
   }
 
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is,0,(n2-1),0,(n3-1));
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie,ie+ng,0,(n2-1),0,(n3-1));
+  // Face B ghosts come from MHD::BFieldBCs; user BC only adjusts fluid (+ rad).
+  if (use_mhd) {
+    auto &b0 = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0,w0_,bcc_,false,is-ng,is,0,(n2-1),0,(n3-1));
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0,w0_,bcc_,false,ie,ie+ng,0,(n2-1),0,(n3-1));
+  } else {
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is,0,(n2-1),0,(n3-1));
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,ie,ie+ng,0,(n2-1),0,(n3-1));
+  }
 
   par_for("noinflow_hydro_x1", DevExeSpace(),0,(nmb-1),0,(nvar-1),0,(n3-1),0,(n2-1),
   KOKKOS_LAMBDA(int m, int n, int k, int j) {
@@ -897,11 +1385,18 @@ void NoInflowXRB(Mesh *pm) {
       }
     });
   }
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
-
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js,0,(n3-1));
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je,je+ng,0,(n3-1));
+  if (use_mhd) {
+    auto &b0 = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0,w0_,bcc_,false,0,(n1-1),js-ng,js,0,(n3-1));
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0,w0_,bcc_,false,0,(n1-1),je,je+ng,0,(n3-1));
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js,0,(n3-1));
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je,je+ng,0,(n3-1));
+  }
 
   par_for("noinflow_hydro_x2", DevExeSpace(),0,(nmb-1),0,(nvar-1),0,(n3-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int n, int k, int i) {
@@ -939,11 +1434,18 @@ void NoInflowXRB(Mesh *pm) {
       }
     });
   }
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
-
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks);
-  pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke,ke+ng);
+  if (use_mhd) {
+    auto &b0 = pmbp->pmhd->b0;
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0,w0_,bcc_,false,0,(n1-1),0,(n2-1),ks-ng,ks);
+    pmbp->pmhd->peos->ConsToPrim(u0_,b0,w0_,bcc_,false,0,(n1-1),0,(n2-1),ke,ke+ng);
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks);
+    pmbp->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke,ke+ng);
+  }
 
   par_for("noinflow_hydro_x3", DevExeSpace(),0,(nmb-1),0,(nvar-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int n, int j, int i) {
@@ -981,17 +1483,31 @@ void NoInflowXRB(Mesh *pm) {
       }
     });
   }
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-  pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  if (use_mhd) {
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+    pmbp->pmhd->peos->PrimToCons(w0_,bcc_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  } else {
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+    pmbp->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+  }
 }
 
 void AccretorFluxes(HistoryData *pdata, Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
   const bool is_gr = pmbp->pcoord->is_general_relativistic;
 
-  int nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
-  Real gamma = pmbp->phydro->peos->eos_data.gamma;
-  auto &w0_ = pmbp->phydro->w0;
+  int nvars;
+  Real gamma;
+  DvceArray5D<Real> w0_;
+  if (pmbp->pmhd != nullptr) {
+    nvars = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+    gamma = pmbp->pmhd->peos->eos_data.gamma;
+    w0_ = pmbp->pmhd->w0;
+  } else {
+    nvars = pmbp->phydro->nhydro + pmbp->phydro->nscalars;
+    gamma = pmbp->phydro->peos->eos_data.gamma;
+    w0_ = pmbp->phydro->w0;
+  }
 
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
