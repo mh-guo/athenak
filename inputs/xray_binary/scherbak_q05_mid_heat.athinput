@@ -53,7 +53,7 @@ refinement = static    # type of refinement
 
 <refined_region1>
 #level = 22
-level = 3           # accretor region
+level = 4           # accretor region
 x1min = -1.0
 x1max =  1.0
 x2min = -1.0
@@ -63,13 +63,13 @@ x3max =  1.0
 
 <refined_region2>
 #level = 22
-level = 3           # donor region
-x1min = 0.95e6
+level = 4           # donor region
+x1min = 0.50e6
 x1max = 1.05e6
-x2min = -0.5e6
-x2max =  0.5e6
-x3min = -0.5e6
-x3max =  0.5e6
+x2min = -0.25e6
+x2max =  0.25e6
+x3min = -0.25e6
+x3max =  0.25e6
 
 <time>
 evolution  = dynamic     # dynamic/kinematic/static
