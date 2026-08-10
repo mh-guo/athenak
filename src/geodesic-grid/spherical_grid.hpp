@@ -20,17 +20,23 @@ class MeshBlockPack;
 
 class SphericalGrid: public GeodesicGrid {
  public:
-    // Creates a geodesic grid with refinement level nlev and radius rad
-    SphericalGrid(MeshBlockPack *pmy_pack, int nlev, Real rad, int ninterp = -1);
+    // Creates a geodesic grid with refinement level nlev and radius rad.
+    // Optional Cartesian center (cx,cy,cz); default is the coordinate origin.
+    // Nonzero centers are supported for Newtonian/Cartesian only.
+    SphericalGrid(MeshBlockPack *pmy_pack, int nlev, Real rad, int ninterp = -1,
+                  Real cx = 0.0, Real cy = 0.0, Real cz = 0.0);
     ~SphericalGrid();
 
     Real radius;  // const radius for SphericalGrid
+    Real cx, cy, cz;  // Cartesian center of the sphere
     int ninterp;  // number of interpolation points along each dimension
     DualArray2D<Real> interp_coord;  // Cartesian coordinates for grid points
     DualArray2D<Real> interp_vals;   // container for data interpolated to sphere
     void InterpolateToSphere(int nvars, DvceArray5D<Real>& val);  // interpolate to sphere
     // interpolate a range of variables to a sphere
     void InterpolateToSphere(int vs, int ve, DvceArray5D<Real>& val);
+    // true if angle n falls on a MeshBlock owned by this rank
+    bool AngleIsLocal(int n) const;
 
  private:
     MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Hydro

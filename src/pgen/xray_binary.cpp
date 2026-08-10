@@ -79,7 +79,9 @@ struct xrb_pgen {
   Real m_accretor;                            // accretor star mass (1 in GR units)
   Real r_donor;                               // donor star radius
   Real r_donor_mask;                          // radius for fixed donor interior BC
+  Real r_donor_flux;                          // history sphere radius about donor
   bool fix_donor;                             // enforce donor mask each BC call
+  bool donor_hist;                            // enroll donor-centered history diagnostics
   Real mass_ratio;                            // mass ratio: m_accretor / m_total
   Real rho_min, rho_pow, pgas_min, pgas_pow;  // background atmosphere parameters
   bool heating;                               // Scherbak-style envelope heating (Eq. 7)
@@ -487,8 +489,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     rflux_inner = pin->GetOrAddReal("problem", "flux_radius_inner", xrb.r_soft);
   }
   grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rflux_inner));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
+  // Near-horizon diagnostic spheres (gr_torus heritage); useless for Newtonian
+  // XRB where r_soft ~ 1e4 and a_sep ~ 1e6.
+  if (is_gr) {
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
+  }
 
   if (use_mhd) {
     xrb.gamma_adi = pmbp->pmhd->peos->eos_data.gamma;
@@ -502,12 +508,27 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.r_donor = pin->GetReal("problem", "r_donor");
   xrb.fix_donor = pin->GetOrAddBoolean("problem", "fix_donor", false);
   xrb.r_donor_mask = pin->GetOrAddReal("problem", "r_donor_mask", xrb.r_donor);
+  xrb.r_donor_flux = pin->GetOrAddReal("problem", "flux_radius_donor", 1.05*xrb.r_donor);
+  xrb.donor_hist = false;
   xrb.mass_ratio = xrb.m_accretor / (xrb.m_donor + xrb.m_accretor);
   xrb.rho_min = pin->GetReal("problem", "rho_min");
   xrb.rho_pow = pin->GetReal("problem", "rho_pow");
   xrb.pgas_min = pin->GetReal("problem", "pgas_min");
   xrb.pgas_pow = pin->GetReal("problem", "pgas_pow");
 
+  // Donor-centered flux sphere (Newtonian only): must lie outside fix_donor mask
+  if (!is_gr) {
+    if (xrb.r_donor_flux <= xrb.r_donor_mask) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "flux_radius_donor (" << xrb.r_donor_flux
+                << ") must be > r_donor_mask (" << xrb.r_donor_mask << ")" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    grids.push_back(std::make_unique<SphericalGrid>(
+        pmbp, 5, xrb.r_donor_flux, -1, xrb.a_sep, 0.0, 0.0));
+    xrb.donor_hist = true;
+  }
   // MHD mean-field options
   xrb.mean_field_poloidal = false;
   xrb.potential_beta_min = 100.0;
@@ -539,6 +560,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << "xrb.r_donor = " << xrb.r_donor << std::endl;
     std::cout << "xrb.fix_donor = " << xrb.fix_donor << std::endl;
     std::cout << "xrb.r_donor_mask = " << xrb.r_donor_mask << std::endl;
+    if (xrb.donor_hist) {
+      std::cout << "xrb.r_donor_flux = " << xrb.r_donor_flux << std::endl;
+    }
     std::cout << "xrb.mass_ratio = " << xrb.mass_ratio << std::endl;
     std::cout << "xrb.rho_min = " << xrb.rho_min << std::endl;
     std::cout << "xrb.rho_pow = " << xrb.rho_pow << std::endl;
@@ -1508,19 +1532,23 @@ void AccretorFluxes(HistoryData *pdata, Mesh *pm) {
     gamma = pmbp->phydro->peos->eos_data.gamma;
     w0_ = pmbp->phydro->w0;
   }
+  const Real gm1 = gamma - 1.0;
 
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
   const int nflux = 3;
+  const bool donor_hist = xrb.donor_hist;
+  const int n_acc = donor_hist ? (nradii - 1) : nradii;
+  const int n_donor = donor_hist ? 3 : 0;  // mdot_donor, rho_donor, pgas_donor
 
-  pdata->nhist = nradii*nflux;
+  pdata->nhist = n_acc*nflux + n_donor;
   if (pdata->nhist > NHISTORY_VARIABLES) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "User history function specified pdata->nhist larger than"
               << " NHISTORY_VARIABLES" << std::endl;
     exit(EXIT_FAILURE);
   }
-  for (int g=0; g<nradii; ++g) {
+  for (int g=0; g<n_acc; ++g) {
     std::stringstream stream;
     stream << std::fixed << std::setprecision(1) << grids[g]->radius;
     std::string rad_str = stream.str();
@@ -1528,11 +1556,18 @@ void AccretorFluxes(HistoryData *pdata, Mesh *pm) {
     pdata->label[nflux*g+1] = "edot_" + rad_str;
     pdata->label[nflux*g+2] = "ldot_" + rad_str;
   }
+  if (donor_hist) {
+    const int i0 = n_acc*nflux;
+    // labels <= 10 chars (history header truncates with %.10s)
+    pdata->label[i0+0] = "mdot_donor";  // outflow from donor > 0
+    pdata->label[i0+1] = "rho_donor";   // area-weighted <rho> on donor sphere
+    pdata->label[i0+2] = "pgas_donor";  // area-weighted <P> on donor sphere
+  }
 
   bool &flat = pmbp->pcoord->coord_data.is_minkowski;
   Real &spin = pmbp->pcoord->coord_data.bh_spin;
 
-  for (int g=0; g<nradii; ++g) {
+  for (int g=0; g<n_acc; ++g) {
     pdata->hdata[nflux*g+0] = 0.0;
     pdata->hdata[nflux*g+1] = 0.0;
     pdata->hdata[nflux*g+2] = 0.0;
@@ -1609,6 +1644,66 @@ void AccretorFluxes(HistoryData *pdata, Mesh *pm) {
         Real ldot_flux = int_dn*vr*(x1*int_vy - x2*int_vx);
         pdata->hdata[nflux*g+2] += ldot_flux*area*domega;
       }
+    }
+  }
+
+  // Donor-centered sphere: mdot_donor > 0 is mass leaving the donor.
+  // Area averages use the same dA weight as the Newtonian accretor fluxes.
+  if (donor_hist) {
+    const int g = n_acc;  // last grid
+    const int i0 = n_acc*nflux;
+    grids[g]->InterpolateToSphere(nvars, w0_);
+
+    Real mdot_loc = 0.0;
+    Real sum_rho_A = 0.0;
+    Real sum_pgas_A = 0.0;
+    Real sum_A = 0.0;
+    for (int n=0; n<grids[g]->nangles; ++n) {
+      if (!grids[g]->AngleIsLocal(n)) continue;
+
+      Real r = grids[g]->radius;
+      Real theta = grids[g]->polar_pos.h_view(n,0);
+      Real phi = grids[g]->polar_pos.h_view(n,1);
+      Real &int_dn = grids[g]->interp_vals.h_view(n,IDN);
+      Real &int_vx = grids[g]->interp_vals.h_view(n,IVX);
+      Real &int_vy = grids[g]->interp_vals.h_view(n,IVY);
+      Real &int_vz = grids[g]->interp_vals.h_view(n,IVZ);
+      Real int_ie = grids[g]->interp_vals.h_view(n,IEN);
+      Real &domega = grids[g]->solid_angles.h_view(n);
+
+      Real sth = sin(theta);
+      Real cph = cos(phi);
+      Real sph = sin(phi);
+      // outward radial velocity relative to donor center
+      Real vr = int_vx*sth*cph + int_vy*sth*sph + int_vz*cos(theta);
+      Real r2 = SQR(r);
+      Real dA = r2*sth*domega;
+      Real pgas = gm1*int_ie;
+
+      mdot_loc += int_dn*vr*dA;  // outflow positive
+      sum_rho_A += int_dn*dA;
+      sum_pgas_A += pgas*dA;
+      sum_A += dA;
+    }
+
+#if MPI_PARALLEL_ENABLED
+    Real reduce_buf[4] = {mdot_loc, sum_rho_A, sum_pgas_A, sum_A};
+    MPI_Allreduce(MPI_IN_PLACE, reduce_buf, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    mdot_loc = reduce_buf[0];
+    sum_rho_A = reduce_buf[1];
+    sum_pgas_A = reduce_buf[2];
+    sum_A = reduce_buf[3];
+#endif
+
+    // Rank 0 stores finals; others store 0 so history.cpp MPI_SUM is a no-op.
+    if (global_variable::my_rank == 0) {
+      pdata->hdata[i0+0] = mdot_loc;
+      pdata->hdata[i0+1] = (sum_A > 0.0) ? (sum_rho_A/sum_A) : 0.0;
+      pdata->hdata[i0+2] = (sum_A > 0.0) ? (sum_pgas_A/sum_A) : 0.0;
+    } else {
+      pdata->hdata[i0+0] = 0.0;
+      pdata->hdata[i0+1] = 0.0;
+      pdata->hdata[i0+2] = 0.0;
     }
   }
 

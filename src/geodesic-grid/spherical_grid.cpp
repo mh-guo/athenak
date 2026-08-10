@@ -23,10 +23,12 @@
 //----------------------------------------------------------------------------------------
 // constructor, initializes data structures and parameters
 
-SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp):
+SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp,
+                             Real x0, Real y0, Real z0):
     GeodesicGrid(nlev,true,false),
     pmy_pack(ppack),
     radius(rad),
+    cx(x0), cy(y0), cz(z0),
     interp_coord("interp_coord",1,1),
     interp_indcs("interp_indcs",1,1),
     interp_wghts("interp_wghts",1,1,1),
@@ -37,6 +39,14 @@ SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "ninterp = " << ninterp << " exceeds maximum allowed value of "
               << pmy_pack->pmesh->mb_indcs.ng*2+1 << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if ((cx != 0.0 || cy != 0.0 || cz != 0.0) &&
+      (pmy_pack->pcoord->is_general_relativistic ||
+       pmy_pack->pcoord->is_dynamical_relativistic)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "SphericalGrid center offset is only supported for Newtonian/Cartesian"
+              << std::endl;
     std::exit(EXIT_FAILURE);
   }
   Kokkos::realloc(interp_coord,nangles,3);
@@ -55,6 +65,13 @@ SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp
 //! \brief SphericalGrid destructor
 
 SphericalGrid::~SphericalGrid() {
+}
+
+//----------------------------------------------------------------------------------------
+//! \brief true if geodesic angle n is covered by a MeshBlock on this rank
+
+bool SphericalGrid::AngleIsLocal(int n) const {
+  return interp_indcs.h_view(n, 0) >= 0;
 }
 
 //----------------------------------------------------------------------------------------
@@ -80,9 +97,9 @@ void SphericalGrid::SetInterpolationCoordinates() {
     for (int n=0; n<nangles; ++n) {
       Real &theta = polar_pos.h_view(n,0);
       Real &phi = polar_pos.h_view(n,1);
-      interp_coord.h_view(n,0) = radius*cos(phi)*sin(theta);
-      interp_coord.h_view(n,1) = radius*sin(phi)*sin(theta);
-      interp_coord.h_view(n,2) = radius*cos(theta);
+      interp_coord.h_view(n,0) = cx + radius*cos(phi)*sin(theta);
+      interp_coord.h_view(n,1) = cy + radius*sin(phi)*sin(theta);
+      interp_coord.h_view(n,2) = cz + radius*cos(theta);
     }
   }
 
