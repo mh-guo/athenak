@@ -488,12 +488,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else {
     rflux_inner = pin->GetOrAddReal("problem", "flux_radius_inner", xrb.r_soft);
   }
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rflux_inner));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux_inner));
   // Near-horizon diagnostic spheres (gr_torus heritage); useless for Newtonian
   // XRB where r_soft ~ 1e4 and a_sep ~ 1e6.
   if (is_gr) {
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 12.0));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 24.0));
   }
 
   if (use_mhd) {
@@ -526,7 +526,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       exit(EXIT_FAILURE);
     }
     grids.push_back(std::make_unique<SphericalGrid>(
-        pmbp, 5, xrb.r_donor_flux, -1, xrb.a_sep, 0.0, 0.0));
+        pmbp, 10, xrb.r_donor_flux, -1, xrb.a_sep, 0.0, 0.0));
     xrb.donor_hist = true;
   }
   // MHD mean-field options
