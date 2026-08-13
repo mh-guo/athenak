@@ -488,12 +488,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else {
     rflux_inner = pin->GetOrAddReal("problem", "flux_radius_inner", xrb.r_soft);
   }
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, rflux_inner));
+  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 20, rflux_inner));
   // Near-horizon diagnostic spheres (gr_torus heritage); useless for Newtonian
   // XRB where r_soft ~ 1e4 and a_sep ~ 1e6.
   if (is_gr) {
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 12.0));
-    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 10, 24.0));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 20, 12.0));
+    grids.push_back(std::make_unique<SphericalGrid>(pmbp, 20, 24.0));
   }
 
   if (use_mhd) {
@@ -508,7 +508,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.r_donor = pin->GetReal("problem", "r_donor");
   xrb.fix_donor = pin->GetOrAddBoolean("problem", "fix_donor", false);
   xrb.r_donor_mask = pin->GetOrAddReal("problem", "r_donor_mask", xrb.r_donor);
-  xrb.r_donor_flux = pin->GetOrAddReal("problem", "flux_radius_donor", 1.05*xrb.r_donor);
+  xrb.r_donor_flux = pin->GetOrAddReal("problem", "flux_radius_donor", 1.01*xrb.r_donor);
   xrb.donor_hist = false;
   xrb.mass_ratio = xrb.m_accretor / (xrb.m_donor + xrb.m_accretor);
   xrb.rho_min = pin->GetReal("problem", "rho_min");
@@ -526,7 +526,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       exit(EXIT_FAILURE);
     }
     grids.push_back(std::make_unique<SphericalGrid>(
-        pmbp, 10, xrb.r_donor_flux, -1, xrb.a_sep, 0.0, 0.0));
+        pmbp, 20, xrb.r_donor_flux, -1, xrb.a_sep, 0.0, 0.0));
     xrb.donor_hist = true;
   }
   // MHD mean-field options
@@ -1629,20 +1629,20 @@ void AccretorFluxes(HistoryData *pdata, Mesh *pm) {
         Real t1_3 = (int_dn + gamma*int_ie)*ur*u_ph;
         pdata->hdata[nflux*g+2] += t1_3*sqrtmdet*domega;
       } else {
+        // solid_angles are already dΩ; area element is r^2 dΩ (no extra sinθ).
         Real sth = sin(theta);
         Real cph = cos(phi);
         Real sph = sin(phi);
         Real vr = int_vx*sth*cph + int_vy*sth*sph + int_vz*cos(theta);
-        Real r2 = SQR(r);
-        Real area = r2*sth;
+        Real dA = SQR(r)*domega;
 
-        pdata->hdata[nflux*g+0] += -1.0*int_dn*vr*area*domega;
+        pdata->hdata[nflux*g+0] += -1.0*int_dn*vr*dA;
 
         Real edot_flux = int_dn*(0.5*(SQR(int_vx)+SQR(int_vy)+SQR(int_vz)) + gamma*int_ie)*vr;
-        pdata->hdata[nflux*g+1] += -1.0*edot_flux*area*domega;
+        pdata->hdata[nflux*g+1] += -1.0*edot_flux*dA;
 
         Real ldot_flux = int_dn*vr*(x1*int_vy - x2*int_vx);
-        pdata->hdata[nflux*g+2] += ldot_flux*area*domega;
+        pdata->hdata[nflux*g+2] += ldot_flux*dA;
       }
     }
   }
@@ -1676,8 +1676,8 @@ void AccretorFluxes(HistoryData *pdata, Mesh *pm) {
       Real sph = sin(phi);
       // outward radial velocity relative to donor center
       Real vr = int_vx*sth*cph + int_vy*sth*sph + int_vz*cos(theta);
-      Real r2 = SQR(r);
-      Real dA = r2*sth*domega;
+      // solid_angles are already dΩ; area element is r^2 dΩ (no extra sinθ).
+      Real dA = SQR(r)*domega;
       Real pgas = gm1*int_ie;
 
       mdot_loc += int_dn*vr*dA;  // outflow positive
