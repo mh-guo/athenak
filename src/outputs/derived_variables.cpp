@@ -28,6 +28,7 @@
 #include "radiation/radiation.hpp"
 #include "radiation/radiation_tetrad.hpp"
 #include "particles/particles.hpp"
+#include "pgen/pgen.hpp"
 #include "outputs.hpp"
 #include "utils/current.hpp"
 
@@ -1268,5 +1269,21 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       pdens(m,0,kp,jp,ip) += 1.0;
     });
   }
+  // pgen-specific derived variable (e.g. xray_binary heating rate). The pgen enrolls
+  // pm->pgen->user_derived_func to fill derived_var(m,i_dv,k,j,i).
+  if (name.compare("xrb_heat") == 0) {
+    if (derived_var.extent(4) <= 1) {
+      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+    }
+    if (pm->pgen->user_derived_func == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Output variable '" << name << "' requested but no "
+                << "pgen user_derived_func is enrolled" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    (pm->pgen->user_derived_func)(pm, derived_var, i_dv);
+    i_dv += 1;
+  }
+
   i_dv = i_dv % n_dv; // reset derived variable index
 }

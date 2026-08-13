@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 
+#include "athena.hpp"
 #include "geodesic-grid/spherical_grid.hpp"
 #include "parameter_input.hpp"
 
@@ -19,6 +20,8 @@ using ProblemFinalizeFnPtr = void (*)(ParameterInput *pin, Mesh *pm);
 using UserBoundaryFnPtr = void (*)(Mesh* pm);
 using UserSrctermFnPtr = void (*)(Mesh* pm, const Real bdt);
 using UserRefinementFnPtr = void (*)(MeshBlockPack* pmbp);
+// Fills derived_var(m,i_dv,k,j,i) for a pgen-specific output variable.
+using UserDerivedFnPtr = void (*)(Mesh* pm, DvceArray5D<Real> dv, int i_dv);
 using UserHistoryFnPtr = void (*)(HistoryData *pdata, Mesh *pm);
 
 //----------------------------------------------------------------------------------------
@@ -53,6 +56,8 @@ class ProblemGenerator {
   UserSrctermFnPtr user_srcs_func=nullptr;
   UserRefinementFnPtr user_ref_func=nullptr;
   UserHistoryFnPtr user_hist_func=nullptr;
+  // function pointer for pgen-specific derived output variable (e.g. xrb_heat)
+  UserDerivedFnPtr user_derived_func=nullptr;
 
   // predefined problem generator functions (default test suite)
   void CallProblemGenerator(ParameterInput *pin, bool is_restart);

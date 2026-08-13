@@ -445,6 +445,7 @@ void ApplyDonorMask(Mesh *pm);
 void UserBcsXRB(Mesh *pm);
 void XRBSourceTerms(Mesh *pm, const Real bdt);
 void AccretorFluxes(HistoryData *pdata, Mesh *pm);
+void FillXRBHeatDerived(Mesh *pm, DvceArray5D<Real> dv, int i_dv);
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
@@ -467,6 +468,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   user_bcs_func = UserBcsXRB;
   user_srcs_func = XRBSourceTerms;
   user_hist_func = AccretorFluxes;
+  user_derived_func = FillXRBHeatDerived;
 
   auto &indcs = pmy_mesh_->mb_indcs;
   int is = indcs.is, js = indcs.js, ks = indcs.ks;
@@ -1189,6 +1191,52 @@ void XRBSourceTerms(Mesh *pm, const Real bdt) {
         }
       }
     }
+  });
+}
+
+//----------------------------------------------------------------------------------------
+//! \brief Fill derived output var with the cell-by-cell heating rate density (Scherbak
+//! et al. 2025 Eq. 7): eps_heat = ramp(t) * heating_norm * HeatProfile(Phi,x).
+//! Enrolled as pm->pgen->user_derived_func for output variable "xrb_heat". Value is the
+//! physical (positive) heating rate density regardless of the GR IEN sign convention.
+
+void FillXRBHeatDerived(Mesh *pm, DvceArray5D<Real> dv, int i_dv) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  auto &size = pmbp->pmb->mb_size;
+
+  auto pgen = xrb;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  Real time = pm->time;
+  bool heating = xrb.heating;
+
+  par_for("xrb_heat_dv", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real eps_heat = 0.0;
+    if (heating) {
+      Real phi = CalculateRochePotential(pgen, x1v, x2v, x3v);
+      Real profile = HeatProfile(pgen, phi, x1v, x2v, x3v);
+      if (profile > 0.0) {
+        Real ramp = 0.5*(tanh((time - pgen.heat_t0)/pgen.heat_dt_ramp) + 1.0);
+        eps_heat = ramp * pgen.heating_norm * profile;
+      }
+    }
+    dv(m,i_dv,k,j,i) = eps_heat;
   });
 }
 

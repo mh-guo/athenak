@@ -158,3 +158,10 @@ coarsen_factor = 2      # coarsen factor for binary output
 variable   = hydro_w    # variables to be output
 #dt         = 1.0e3      # time increment between outputs
 dcycle     = 1000       # cycle increment between outputs
+
+<output6>
+file_type  = bin        # Binary data dump
+id         = heat       # output id tag
+variable   = xrb_heat   # cell-by-cell heating rate (Scherbak Eq. 7)
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 1000       # cycle increment between outputs
