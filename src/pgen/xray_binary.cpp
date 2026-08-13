@@ -163,6 +163,7 @@ Real HeatProfile(struct xrb_pgen pgen, Real phi,
   if (phi > pgen.heat_phi_surface) return 0.0;
   Real x_d = x1 - pgen.a_sep;
   Real d_donor = sqrt(SQR(x_d) + SQR(x2) + SQR(x3));
+  if (d_donor >= pgen.r_donor) return 0.0;
   if (pgen.fix_donor && d_donor <= pgen.r_donor_mask) return 0.0;
   Real dphi = pgen.heat_delta_phi;
   if (dphi <= 0.0) return 0.0;
