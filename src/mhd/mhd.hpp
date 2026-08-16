@@ -61,7 +61,6 @@ struct MHDTaskIDs {
   TaskID sendu_shr;
   TaskID recvu_shr;
   TaskID efld;
-  TaskID efldsrc;
   TaskID sende;
   TaskID recve;
   TaskID ct;
@@ -134,6 +133,10 @@ class MHD {
   DvceArray4D<Real> e2x3, e1x3;
   // cell-centered electric fields computed in CornerE
   DvceArray4D<Real> e1_cc, e2_cc, e3_cc;
+  // global per-face L/R buffers for the split-kernel flux path: primitives (nmhd+nscalars
+  // components) and reconstructed cell-centered B-field (3 components)
+  DvceArray5D<Real> wl3d, wr3d;
+  DvceArray5D<Real> bl3d, br3d;
   Real dtnew;
   bool gr_dt = false;         // flag for accurate GR timestep calculation
 
@@ -144,6 +147,7 @@ class MHD {
 
   // following used for FOFC algorithm
   DvceArray4D<bool> fofc;  // flag for each cell to indicate if FOFC is needed
+  DvceArray5D<bool> fofc_scal;  // flag to indicate if FOFC for scalar is needed
   bool use_fofc = false;   // flag to enable FOFC
 
   // container to hold names of TaskIDs
@@ -171,7 +175,7 @@ class MHD {
   TaskStatus SendU_Shr(Driver *d, int stage);
   TaskStatus RecvU_Shr(Driver *d, int stage);
   TaskStatus CornerE(Driver *d, int stage);
-  TaskStatus EFieldSrc(Driver *d, int stage);
+  TaskStatus EField(Driver *d, int stage);
   TaskStatus SendE(Driver *d, int stage);
   TaskStatus RecvE(Driver *d, int stage);
   TaskStatus CT(Driver *d, int stage);

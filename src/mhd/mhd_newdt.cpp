@@ -18,6 +18,8 @@
 #include "eos/eos.hpp"
 #include "mhd.hpp"
 #include "diffusion/conduction.hpp"
+#include "diffusion/viscosity.hpp"
+#include "diffusion/resistivity.hpp"
 #include "srcterms/srcterms.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "coordinates/cartesian_ks.hpp"
@@ -257,6 +259,12 @@ TaskStatus MHD::NewTimeStep(Driver *pdrive, int stage) {
   // compute timestep for diffusion
   if (pcond != nullptr) {
     pcond->NewTimeStep(w0, peos->eos_data);
+  }
+  if (pvisc != nullptr) {
+    pvisc->NewTimeStep(w0, peos->eos_data);
+  }
+  if (presist != nullptr) {
+    presist->NewTimeStep(w0, peos->eos_data);
   }
   // compute source terms timestep
   if (psrc != nullptr) {

@@ -21,7 +21,7 @@
 //     #error NHISTORY > NREDUCTION in outputs.hpp
 // #endif
 
-#define NOUTPUT_CHOICES 161
+#define NOUTPUT_CHOICES 162
 // choices for output variables used in <ouput> blocks in input file
 // TO ADD MORE CHOICES:
 //   - add more strings to array below, change NOUTPUT_CHOICES above appropriately
@@ -99,11 +99,13 @@ static const char *var_choice[NOUTPUT_CHOICES] = {
 
   // Particles (151-152)
   "prtcl_all", "prtcl_d",
+  // Gravity (153)
+  "grav_phi",
 
-  // MHD cell-centered E-fields from CornerE (153-156)
+  // MHD cell-centered E-fields from CornerE (154-157)
   "mhd_ecc1", "mhd_ecc2", "mhd_ecc3", "mhd_ecc",
 
-  // MHD cell-centered E-fields averaged from edge-centered efld (157-160)
+  // MHD cell-centered E-fields averaged from edge-centered efld (158-161)
   "mhd_efcc1", "mhd_efcc2", "mhd_efcc3", "mhd_efcc"
 };
 
