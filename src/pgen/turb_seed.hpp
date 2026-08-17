@@ -53,8 +53,7 @@
 //!                   Amplitude: inv_beta = <p_mag>/<p_gas> (volume-weighted means
 //!                   over the window; seed contribution only). In radiation runs
 //!                   the denominator is p_gas + p_rad (LTE p_rad from the gas
-//!                   temperature), consistent with the ptot convention of the
-//!                   pgen's potential_beta_min.
+//!                   temperature), i.e. a ptot = p_gas + p_rad convention.
 //!   field = erad  : NOT YET IMPLEMENTED (LTE-consistent radiation perturbation).
 //!
 //! Caveats (documented design decisions):
@@ -109,6 +108,7 @@
 #include "mesh/mesh.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "radiation/radiation.hpp"
 #include "eos/eos.hpp"
 #include "utils/random.hpp"
 
@@ -159,8 +159,8 @@ struct TurbSeedField {
     dphidr = dgdr*w + g*dwdr;
   }
 
-  // Scalar field: returns envelope phi and raw (unnormalized, un-windowed) mode sum
-  // f(x); the consumer applies q *= 1 + s*phi*(f - mean_f).
+  // Scalar field: returns envelope Phi and raw mode sum f (not Phi*f).
+  // Consumer: q *= 1 + s*Phi*(f - mu) with mu = Phi-weighted mean of f.
   KOKKOS_INLINE_FUNCTION
   void ScalarEval(Real x, Real y, Real z, Real &phi, Real &f) const {
     Real dx, dy, dz, r, dphidr;
