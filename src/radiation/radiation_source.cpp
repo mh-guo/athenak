@@ -89,7 +89,8 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   }
 
   // Extract adiabatic index
-  Real gm1, dfloor, v_sq_max;
+  Real gm1 = 0.0;
+  Real dfloor, v_sq_max;
   if (is_hydro_enabled_) {
     gm1 = pmy_pack->phydro->peos->eos_data.gamma - 1.0;
     v_sq_max = 1.-1./SQR(pmy_pack->phydro->peos->eos_data.gamma_max);
@@ -433,7 +434,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
         // handle excision
         // NOTE(@pdmullen): The below zeroes all intensities within rks <= r_excision and
         // zeroes intensities within angles where n_0 is about zero. When Compton is
-        // enabled, we delay the n_0_floor excision so that intensites updated via
+        // enabled, we delay the n_0_floor excision so that intensities updated via
         // absorption and scattering inform the Compton update
         if (excise) {
           bool apply_excision = (rad_mask_(m,k,j,i) ||

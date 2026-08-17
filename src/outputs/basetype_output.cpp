@@ -8,10 +8,10 @@
 
 #include <iostream>
 #include <sstream>
-#include <string>   // std::string, to_string()
-#include <cstdio> // snprintf
+#include <string>    // std::string, to_string()
+#include <cstdio>    // snprintf
 #include <algorithm> // min_element
-#include <utility> // pair<>
+#include <utility>   // pair<>
 #include <vector>
 
 #include "athena.hpp"
@@ -29,6 +29,7 @@
 #include "z4c/z4c.hpp"
 #include "srcterms/srcterms.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "gravity/gravity.hpp"
 #include "outputs.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -40,10 +41,10 @@
 // Creates vector of output variable data
 
 BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters opar) :
+    out_params(opar),
     derived_var("derived-var",1,1,1,1,1),
     outarray("cc_outvar",1,1,1,1,1),
-    outfield("fc_outvar",1,1,1,1),
-    out_params(opar) {
+    outfield("fc_outvar",1,1,1,1) {
   // exit for history, restart, or event log files
   if (out_params.file_type.compare("hst") == 0 ||
       out_params.file_type.compare("rst") == 0 ||
@@ -169,7 +170,14 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << std::endl << "Input file is likely missing corresponding block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if ((ivar>=153) && (ivar<161) && (pm->pmb_pack->pmhd == nullptr)) {
+  if (ivar==153 && (pm->pmb_pack->pgrav == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of gravity potential requested in <output> block '"
+       << out_params.block_name << "' but gravity object not constructed."
+       << std::endl << "Input file is likely missing a <gravity> block" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if ((ivar>=154) && (ivar<162) && (pm->pmb_pack->pmhd == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of MHD cell-centered E-field requested in <output> block '"
        << out_params.block_name << "' but no MHD object has been constructed."
@@ -685,6 +693,11 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars.emplace_back("force1",0,&(pm->pmb_pack->pturb->force));
       outvars.emplace_back("force2",1,&(pm->pmb_pack->pturb->force));
       outvars.emplace_back("force3",2,&(pm->pmb_pack->pturb->force));
+    }
+
+    // gravity potential
+    if (variable.compare("grav_phi") == 0) {
+      outvars.emplace_back("grav_phi",0,&(pm->pmb_pack->pgrav->phi));
     }
 
     // ADM variables, excluding gauge

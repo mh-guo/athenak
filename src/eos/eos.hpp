@@ -28,7 +28,6 @@ struct EOS_Data {
   Real gamma;        // ratio of specific heats for ideal gas
   Real iso_cs;       // isothermal sound speed
   bool is_ideal;     // flag to denote ideal gas EOS
-  bool use_e, use_t; // use internal energy density (e) or temperature (t) as primitive
   Real dfloor, pfloor, tfloor, sfloor;  // density, pressure, temperature, entropy floors
   Real sfloor1, sfloor2, rho1, rho2; // density-dependent entropy floor
   Real rdfloor, rdfloor_rad, rdfloor_pow;  // radius-dependent density floor

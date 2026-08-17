@@ -192,6 +192,7 @@ void ZoomMesh::AssignMBLists() {
   int nmb = pzoom->pmesh->pmb_pack->nmb_thispack;
   int mbs = pzoom->pmesh->gids_eachrank[global_variable::my_rank];
   int zmbs = gzms_eachdvce[global_variable::my_rank];
+  // initialize unused entries to -1 (0 is a valid rank/id for Allreduce MAX)
   int lmbs = gzms_eachlevel[pzoom->zstate.zone-1];
   int nlmb = nzmb_eachlevel[pzoom->zstate.zone-1];
   for (int lm=0; lm<nlmb; ++lm) {
@@ -217,8 +218,7 @@ void ZoomMesh::AssignMBLists() {
 
 void ZoomMesh::SyncMBLists() {
 #if MPI_PARALLEL_ENABLED
-  // Each rank writes entries by global ZMB id.  After AMR/load balancing those ids are
-  // not guaranteed to be rank-contiguous, so gather by index rather than by displacement.
+  // Allreduce by global ZMB index; unused entries must be -1
   MPI_Allreduce(MPI_IN_PLACE, mbrank_eachzmb.data(), nzmb_total,
                 MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE, mblid_eachzmb.data(), nzmb_total,
@@ -233,7 +233,7 @@ void ZoomMesh::SyncMBLists() {
 
 void ZoomMesh::SyncLogicalLocations() {
 #if MPI_PARALLEL_ENABLED
-  // Logical locations are also written by global ZMB id, so sync them by index.
+  // Allreduce LogicalLocation as 4 int32s by global ZMB index
   MPI_Allreduce(MPI_IN_PLACE, reinterpret_cast<std::int32_t*>(lloc_eachzmb.data()),
                 4*nzmb_total, MPI_INT32_T, MPI_MAX, MPI_COMM_WORLD);
 #endif
@@ -273,6 +273,7 @@ void ZoomMesh::FindRegion(int zone) {
   int mbs = pzoom->pmesh->gids_eachrank[global_variable::my_rank];
   int nlmb = nzmb_eachlevel[zone]; // number of zoom MBs on previous level
   int lmbs = gzms_eachlevel[zone]; // starting gid of zoom MBs on previous level
+  // initialize unused entries to -1 for Allreduce MAX
   for (int lm=0; lm<nlmb; ++lm) {
     mbrank_eachzmb[lm+lmbs] = -1;
     mblid_eachzmb[lm+lmbs] = -1;

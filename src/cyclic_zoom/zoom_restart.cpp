@@ -107,7 +107,7 @@ void CyclicZoom::WriteRestartFile(IOWrapper &resfile, IOWrapperSizeT offset_zoom
       }
     }
 #if MPI_PARALLEL_ENABLED
-    // Avoid many ranks issuing large non-contiguous writes to the same restart file at once.
+    // Avoid concurrent non-contiguous writes to the same restart file
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
   }
