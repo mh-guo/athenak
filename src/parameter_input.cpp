@@ -110,7 +110,7 @@ void ParameterInput::CheckBlockNames() {
     "hydro", "mhd", "ion-neutral", "radiation", "z4c", "z4c_amr", "cce",
     "rad_srcterms", "hydro_srcterms", "mhd_srcterms", "particles", "turb_driving",
     "gravity", "fastflow",
-    "turb_init", "turb_mhd"
+    "turb_init", "turb_mhd", "turb_seed"
     };
 
   for (auto it1 = block.begin(); it1 != block.end(); ++it1) {

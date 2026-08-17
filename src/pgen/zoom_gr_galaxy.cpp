@@ -29,6 +29,7 @@
 #include "pgen/pgen.hpp"
 #include "pgen/turb_init.hpp"
 #include "pgen/turb_mhd.hpp"
+#include "pgen/turb_seed.hpp"
 #include "cyclic_zoom/cyclic_zoom.hpp"
 
 #include "eos/ideal_c2p_hyd.hpp"
@@ -328,9 +329,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     w0_(m,IM3,k,j,i) = uu3;
   });
 
-  // Add magnetic field
+  // Magnetic field (MHD): always write b0/bcc0 (Kokkos::realloc does not zero).
+  // b_ini is a uniform Bz; 0 is valid and required so a later turb_seed bfld
+  // adds to a clean field rather than uninitialized faces.
   Real b_ini = pin->GetOrAddReal("problem", "b_ini", 0.0);
-  if (is_mhd && b_ini>0.0) {
+  if (is_mhd) {
     auto &bcc0_ = pmbp->pmhd->bcc0;
     auto &b0_ = pmbp->pmhd->b0;
     par_for("pgen_gal_bfield", DevExeSpace(), 0,(nmb-1),0,n3m1,0,n2m1,0,n1m1,
@@ -358,6 +361,23 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       pmbp->pmhd->peos->PrimToCons(w0_, bcc0_, u1_, 0, n1m1, 0, n2m1, 0, n3m1);
     }
     return;
+  }
+
+  // One-shot turbulence / B seeds (operate on primitives / face B; before PrimToCons)
+  for (auto it = pin->block.begin(); it != pin->block.end(); ++it) {
+    if (it->block_name.compare(0, 9, "turb_seed") == 0) {
+      if (pert_amp != 0.0 && global_variable::my_rank == 0) {
+        std::string tfield = pin->GetString(it->block_name, "field");
+        if (tfield == "dens" || tfield == "pres") {
+          std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "problem/pert_amp = " << pert_amp
+                    << " is stacked with <" << it->block_name << "> field="
+                    << tfield << "; prefer one or the other" << std::endl;
+        }
+      }
+      TurbSeed tseed(it->block_name, pmbp, pin);
+      tseed.Apply();
+    }
   }
 
   // Convert primitives to conserved

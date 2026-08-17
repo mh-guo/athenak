@@ -1,0 +1,253 @@
+# AthenaK input file for GR galactic accretion with cyclic zoom
+
+<comment>
+problem   = GR accretion from galactic scale
+
+<job>
+basename  = gal        # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 4          # Number of ghost cells
+nx1       = 128        # Number of zones in X1-direction
+x1min     = -134217728 # minimum value of X1
+x1max     = 134217728  # maximum value of X1
+ix1_bc    = user       # inner-X1 boundary flag
+ox1_bc    = user       # outer-X1 boundary flag
+
+nx2       = 128        # Number of zones in X2-direction
+x2min     = -134217728 # minimum value of X2
+x2max     = 134217728  # maximum value of X2
+ix2_bc    = user       # inner-X2 boundary flag
+ox2_bc    = user       # outer-X2 boundary flag
+
+nx3       = 128        # Number of zones in X3-direction
+x3min     = -134217728 # minimum value of X3
+x3max     = 134217728  # maximum value of X3
+ix3_bc    = user       # inner-X3 boundary flag
+ox3_bc    = user       # outer-X3 boundary flag
+
+<meshblock>
+nx1 = 32
+nx2 = 32
+nx3 = 32
+
+<mesh_refinement>
+#refinement = static    # type of refinement
+refinement       = adaptive  # type of refinement
+max_nmb_per_rank = 1464      # max allowed number of MBs per device (memory limit for AMR)
+ncycle_check     = 1         # cycles between checking mesh for ref/derefinement
+refinement_interval = 1      # cycles between allowing successive ref/derefinement
+num_levels       = 26
+
+<refined_region1>
+level = 25
+x1min = -1.0
+x1max = 1.0
+x2min = -1.0
+x2max = 1.0
+x3min = -1.0
+x3max = 1.0
+
+<amr_criterion1>
+method      = cyclic_zoom   # refinement criterion
+r_0         = 1.0           # radius of zoom region at zone 0
+#nlevels     = 15            # number of levels for zoom data, first 15 to burn in
+nlevels     = 18            # number of levels for zoom data, 18 to speed up
+f_cut       = 0.4           # factor for cutting the zoom region
+r_cut_max   = 1.0e10        # maximum radius for cutting the zoom region
+#emf_fmax    = 3.0           # maximum electric field factor
+emf_fmax    = 1.0           # maximum electric field factor
+trun_fac    = 10.0          # default interval factor (trun = trun_fac * M^trun_pow)
+trun_pow    = 1.5           # power for interval (trun = trun_fac * M^trun_pow)
+trun_max    = 3.0e9         # maximum runtime (t_run = min(t_run, t_run_max))
+trun_fac_0  = 400.0         # interval factor for zone 0
+trun_fac_1  = 0.0           # interval factor for zone 1
+trun_fac_2  = 0.0           # interval factor for zone 2
+trun_fac_3  = 0.0           # interval factor for zone 3
+trun_fac_4  = 10.0          # interval factor for zone 4
+trun_fac_5  = 10.0          # interval factor for zone 5
+trun_fac_6  = 10.0          # interval factor for zone 6
+trun_fac_7  = 10.0          # interval factor for zone 7
+trun_fac_8  = 10.0          # interval factor for zone 8
+trun_fac_9  = 10.0          # interval factor for zone 9
+trun_fac_10 = 10.0          # interval factor for zone 10
+trun_fac_11 = 10.0          # interval factor for zone 11
+trun_fac_12 = 10.0          # interval factor for zone 12
+trun_fac_13 = 10.0          # interval factor for zone 13
+trun_fac_14 = 10.0          # interval factor for zone 14
+trun_fac_15 = 10.0          # interval factor for zone 15
+trun_fac_16 = 10.0          # interval factor for zone 16
+trun_fac_17 = 10.0          # interval factor for zone 17
+
+<cyclic_zoom>
+verbose   = true           # enable verbose output
+max_nzmb_per_dvce = 256    # max allowed number of Zoom MBs per device (memory limit for AMR)
+max_nzmb_per_host = 256    # max allowed number of Zoom MBs per host (memory limit for AMR)
+
+<time>
+evolution  = dynamic     # dynamic/kinematic/static
+integrator = rk2         # time integration algorithm
+cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1          # cycle limit
+tlim       = 1e11        # time limit
+gr_dt      = true        # flag for accurate GR timestep calculation
+ndiag      = 10          # cycles between diagostic output
+
+<coord>
+general_rel = true       # general relativity
+a           = 0.9        # black hole spin a (0 <= a/M < 1)
+excise      = true       # excise r_ks <= 1.0
+dexcise     = 1.0e-4     # density inside excision
+pexcise     = 0.333e-8   # pressure inside excision
+
+<mhd>
+eos         = ideal      # EOS type
+reconstruct = ppm4       # spatial reconstruction method
+rsolver     = hlle       # Riemann-solver to be used
+gamma       = 1.66666666667   # gamma = C_p/C_v
+dfloor      = 1.0e-4     # floor on density rho
+pfloor      = 1.0e-10    # floor on gas pressure p_gas
+tfloor      = 1.5e-9     # floor on gas temperature
+sfloor      = 1.0e-10    # floor on gas entropy
+rdfloor     = 1.0e-1     # radius-dependent density floor
+#rdfloor     = 1.0e0      # radius-dependent density floor
+rdfloor_rad = 1.0e2      # reference radius for density floor
+#rdfloor_rad = 1.0e3      # reference radius for density floor
+#rdfloor_pow = -1.5       # power law index for radius-dependent density floor
+rdfloor_pow = -2.0       # power law index for radius-dependent density floor
+gamma_max   = 10.0       # ceiling on Lorentz factor
+#sigma_max   = 1.0e4      # ceiling on magnetic field
+sigma_max   = 1.0e2      # ceiling on magnetic field
+fofc        = true       # Enable first order flux correction
+
+<problem>
+ic_type    = entropy     # initial condition type
+k_adi      = 1.0         # adiabat K, p_gas = K rho^Gamma
+r_crit     = 336.6       # sonic point radius, in units of mass, T_norm = 3e-6 = 2e7 K
+temp_norm  = 3.0e-6      # temperature normalization, 2e7 K, r_B = 2GM/c_s^2 = 4.0e5
+dens_norm  = 1.0e0       # density normalization, 1.0
+b_ini      = 0.0e0       # uniform magnetic field: 0, beta = inf
+r_in       = 1.0         # inner radius of the problem
+pert_amp   = 2.0e-2      # amplitude of perturbation
+bc_type    = fixed       # boundary condition type
+rb_out     = 134217728   # outer radius of the problem
+user_srcs  = true        # user source terms
+potential  = true        # enable potential
+sigma2     = 4.5e-6      # potential sigma^2, g = sigma^2/r
+r_iso      = 2.2222222e5 # radius of isothermal core, r_iso = GM/sigma^2
+cooling    = true        # add ism cooling
+mu_h        = 1.4        # mean molecular weight of hydrogen nuclei
+tau_cool   = 100.0        # cooling time in dynamical time
+r_entropy  = 3.0e6       # radius of entropy core
+user_hist  = true        # user history output
+#hist_nr    = 45          # number of radial bins in user-defined history
+hist_nr    = 103         # number of radial bins in user-defined history
+ndiag      = 100         # cycles between diagostic output
+
+# One-shot turbulent magnetic field
+<turb_seed_bfld>
+field    = bfld
+inv_beta = 1.0e-2
+r_in     = 1.0e5
+dr_in    = 2.0e5         # tapered inner radius
+r_out    = 134217728
+dr_out   = 33554432
+l_turb   = 16777216      # periodic box size
+nlow     = 4
+nhigh    = 8
+expo     = 0.0
+amp_rpow = 0.0
+seed     = 1
+
+# Density perturbation
+#<turb_seed_dens>
+#field  = dens
+#amp    = 0.02
+#r_in   = 1.0e5
+#dr_in  = 2.0e5
+#r_out  = 134217728
+#dr_out = 33554432
+#l_turb = 16777216      # periodic box size
+#nlow   = 4
+#nhigh  = 8
+#seed   = 0
+
+# Pressure perturbation (set pert_amp=0 if you enable this):
+#<turb_seed_pres>
+#field  = pres
+#amp    = 0.02
+#r_in   = 1.0e5
+#dr_in  = 2.0e5
+#r_out  = 134217728
+#dr_out = 33554432
+#l_turb = 16777216      # periodic box size
+#nlow   = 4
+#nhigh  = 8
+#seed   = 2
+
+<units>
+density_cgs = 1.026213053178e-24     # number density 1 cm^-3
+bhmass_msun = 6.5e9                  # 6.5e9 Msun
+mu          = 0.618                  # mean molecular weight
+
+<output1>
+file_type   = log        # diagnostic data
+dcycle      = 100        # cycle increment between outputs
+
+<output2>
+file_type   = hst        # history data dump
+data_format = %16.9e     # Optional data format string
+# dt          = 1e6        # time increment between outputs
+dcycle      = 500        # cycle increment between outputs
+
+<output3>
+file_type   = rst        # restart data dump
+# dt          = 1e7        # time increment between outputs
+dcycle      = 20000      # cycle increment between outputs
+
+<output4>
+file_type   = bin        # binary data dump
+id         = full       # output id tag
+variable    = mhd_w_bcc  # variables to be output
+# dt          = 1e7        # time increment between outputs
+dcycle      = 20000      # cycle increment between outputs
+
+<output5>
+file_type  = cbin       # Coarsened binary data dump
+id         = full       # output id tag
+coarsen_factor = 2      # coarsen factor for binary output
+variable   = mhd_w_bcc  # variables to be output
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 20000      # cycle increment between outputs
+
+<output6>
+file_type  = cbin       # Coarsened binary data dump
+id         = full       # output id tag
+coarsen_factor = 4      # coarsen factor for binary output
+variable   = mhd_w_bcc  # variables to be output
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 20000      # cycle increment between outputs
+
+<output7>
+file_type  = bin        # Binary data dump
+variable   = mhd_w_bcc  # variables to be output
+id         = slice_x1   # file identifier
+slice_x1   = 0.0        # slice at x1
+#dt         = 1.0e2      # time increment between outputs
+dcycle     = 20000      # cycle increment between outputs
+
+<output8>
+file_type  = bin        # Binary data dump
+variable   = mhd_w_bcc  # variables to be output
+id         = slice_x2   # file identifier
+slice_x2   = 0.0        # slice at x2
+#dt         = 1.0e2      # time increment between outputs
+dcycle     = 20000      # cycle increment between outputs
+
+<output9>
+file_type  = bin        # Binary data dump
+variable   = mhd_w_bcc  # variables to be output
+id         = slice_x3   # file identifier
+slice_x3   = 0.0        # slice at x3
+#dt         = 1.0e2      # time increment between outputs
+dcycle     = 20000      # cycle increment between outputs
