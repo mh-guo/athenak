@@ -1,9 +1,9 @@
-# AthenaK input: Newtonian xray_binary MHD (turb_seed B in donor envelope)
+# AthenaK input: Newtonian xray_binary MHD (poloidal mean field in donor envelope)
 # Accretor at origin, donor on +x; Roche polytropic IC + corotating-frame sources.
 #
 # Purpose:
-#   MHD counterpart to scherbak_q05_mid_heat geometry; B != 0 via turb_seed
-#   (mean_field=none). Same mesh scale as the hydro reference (128^3, nghost=4).
+#   MHD counterpart to scherbak_q05_mid_heat geometry; B from mean_field=poloidal.
+#   Same mesh scale as the hydro reference (128^3, nghost=4).
 #
 # Geometry (same scale as Scherbak q_0.5 reference):
 #   q = 0.5           -> m_accretor/m_donor = 1/2
@@ -11,9 +11,16 @@
 #   gamma = 1.4
 #
 # Magnetic options (independent; both off => B=0):
-#   mean_field = none|poloidal   # optional donor-envelope poloidal A
+#   mean_field = none|poloidal   # donor-envelope poloidal A
 #   <turb_seed_*> blocks         # one-shot dens/vel/pres/bfld seeds
 # fix_donor mask resets fluid only (never face B) to preserve divB=0.
+#
+# poloidal A: A_phi_phys = R^{r_pow} (rho - rho_cut)^{rho_pow}
+#   R = cyl. radius about donor z. rho_pow>=1: no B spike at the cut; r_pow>=1: B finite on axis.
+#   For mid-envelope ~constant beta on this point-mass polytrope, use
+#     rho_pow = 1,  r_pow = gamma / (2*(gamma-1))   (1.75 when gamma=1.4).
+#   potential_beta_min = min(p/p_mag) in r_mask < r < r_donor and rho > cut.
+#   rho_cut ~ 1e-5 is ~0.91 R on L1 (outside mask, off the surface).
 #
 # turb_seed_bfld notes:
 #   Window r_in ~ r_donor_mask, r_out < r_donor (avoid surface).
@@ -65,7 +72,7 @@ refinement = static    # type of refinement
 
 <refined_region1>
 #level = 22
-level = 3           # accretor region
+level = 4           # accretor region
 x1min = -1.0
 x1max =  1.0
 x2min = -1.0
@@ -75,13 +82,13 @@ x3max =  1.0
 
 <refined_region2>
 #level = 22
-level = 3           # donor region
-x1min = 0.95e6
-x1max = 1.05e6
-x2min = -0.5e6
-x2max =  0.5e6
-x3min = -0.5e6
-x3max =  0.5e6
+level = 4           # donor region
+x1min = -0.50e6
+x1max = 1.50e6
+x2min = -0.25e6
+x2max =  0.25e6
+x3min = -0.25e6
+x3max =  0.25e6
 
 <time>
 evolution  = dynamic     # dynamic/kinematic/static
@@ -102,7 +109,7 @@ pexcise     = 2.0e-11    # pressure inside excision
 eos         = ideal      # EOS type
 reconstruct = ppm4       # spatial reconstruction method
 rsolver     = hlld       # Riemann-solver (hlld for MHD)
-dfloor      = 1.0e-10    # floor on density rho
+dfloor      = 1.0e-12    # floor on density rho
 pfloor      = 5.0e-20    # floor on gas pressure p_gas
 tfloor      = 5.0e-10    # floor on gas temperature, 5e-10 = 3.3e3 K
 rdfloor     = 1.0e-4     # radius-dependent floor on density rho
@@ -127,40 +134,44 @@ fix_donor  = true        # fix donor density/vel/e inside mask (not B)
 r_donor_mask = 2.0e5     # donor inner mask radius
 r_soft     = 1.0e4       # Newtonian accretor gravity softening
 k_adi      = 1.0e-5      # polytrope constant K in p = K rho^Gamma
-rho_min    = 1.0e-8      # background on rho given by rho_min ...
-rho_pow    = -2.0        # ... * r^rho_pow
-pgas_min   = 1.0e-10     # background on p_gas given by pgas_min ...
-pgas_pow   = -2.5        # ... * r^pgas_pow
+rho_min    = 1.0e-10     # background on rho given by rho_min ...
+rho_pow    = -0.0        # ... * r^rho_pow
+pgas_min   = 1.0e-15     # background on p_gas given by pgas_min ...
+pgas_pow   = -0.0        # ... * r^pgas_pow
 user_srcs  = true        # enable Roche corotating-frame source terms
-user_hist  = true        # enroll user history (accretor fluxes)
-heating    = false       # Scherbak envelope heating (off for MHD smoke)
-#heating    = true
-#heat_f_ext = 1.5e-3      # M_ext / M_gas
-#t_kh       = 3.03e11     # KH timescale (~525/Omega)
+user_hist  = true        # enroll user history (accretor + donor fluxes)
+#flux_radius_donor = 4.515e5  # donor flux sphere (default 1.05*r_donor; must > r_donor_mask)
+heating    = true        # Scherbak 2025 Eq. (7) envelope heating
+heat_f_ext = 1.5e-3      # M_ext / M_gas (Eq. 11); Scherbak ~1e-3 in normalized units
+t_kh       = 3.03e11     # KH timescale (Eq. 12); default ~525/Omega
+#heat_phi_surface = ...  # default: Phi at (a_sep - r_donor, 0, 0)
+#heat_t0 = ...            # default: 15/Omega
+#heat_dt_ramp = ...       # default: 5/Omega
 
 # Mean magnetic field: none | poloidal (donor-envelope A_phi loops)
-mean_field = none
-#mean_field = poloidal
-#potential_beta_min = 100.0   # target <p_gas>/<p_mag> in support
-#potential_rho_cut  = 2.0e-8  # A support where rho > cut (default 2*rho_min)
-#potential_rho_pow  = 1.0     # A_phi ~ (rho - cut)^pow
+#mean_field = none
+mean_field = poloidal
+potential_beta_min = 100.0   # min(p/p_mag) in live envelope (outside mask)
+potential_rho_cut  = 1.0e-5  # A=0 for rho < cut (~0.91 R on L1)
+potential_rho_pow  = 1.0     # A_phi ~ (rho - cut)^pow  (>=1; no cut-surface spike)
+potential_r_pow    = 1.75    # A_phi_phys ~ R^{r_pow};  gamma/(2*(gamma-1)) for gamma=1.4
 
 # Weak turbulent B seed in donor envelope (r_in ≳ r_donor_mask)
-<turb_seed_bfld>
-field    = bfld          # vel|dens|pres|bfld
-inv_beta = 0.01          # <p_mag>/<p_gas> of seed in window
-x1_0     = 1.0e6         # window center = donor (a_sep, 0, 0)
-x2_0     = 0.0
-x3_0     = 0.0
-r_in     = 2.0e5         # ~ r_donor_mask (avoid seeding deep inside mask)
-r_out    = 3.7e5         # < r_donor to avoid surface effects
-dr_in    = 2.0e4         # inner taper
-dr_out   = 4.0e4         # outer taper
-nlow     = 4             # mode range vs l_turb (default 2*r_out)
-nhigh    = 8
+#<turb_seed_bfld>
+#field    = bfld          # vel|dens|pres|bfld
+#inv_beta = 0.01          # <p_mag>/<p_gas> of seed in window
+#x1_0     = 1.0e6         # window center = donor (a_sep, 0, 0)
+#x2_0     = 0.0
+#x3_0     = 0.0
+#r_in     = 2.0e5         # ~ r_donor_mask (avoid seeding deep inside mask)
+#r_out    = 3.7e5         # < r_donor to avoid surface effects
+#dr_in    = 2.0e4         # inner taper
+#dr_out   = 4.0e4         # outer taper
+#nlow     = 4             # mode range vs l_turb (default 2*r_out)
+#nhigh    = 8
 #expo     = 1.6667
-amp_rpow = -3.5
-seed     = 1
+#amp_rpow = -3.5
+#seed     = 1
 
 # Optional dens/vel seeds (example; leave commented for pure B smoke):
 #<turb_seed_dens>
@@ -191,15 +202,21 @@ dcycle     = 10000      # cycle increment between outputs
 <output4>
 file_type  = bin        # Binary data dump
 id         = full       # output id tag
-variable   = mhd_w_bcc  # MHD primitives + cell-centered B
-#variable   = mhd_w      # fluid primitives only
-#dt         = 1.0e3
-dcycle     = 1000       # cycle increment between outputs
+variable   = mhd_w_bcc  # variables to be output
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 10000      # cycle increment between outputs
 
 <output5>
 file_type  = cbin       # Coarsened binary data dump
 id         = full       # output id tag
 coarsen_factor = 2      # coarsen factor for binary output
-variable   = mhd_w_bcc  # same variables as output4
-#dt         = 1.0e3
-dcycle     = 1000       # cycle increment between outputs
+variable   = mhd_w_bcc  # variables to be output
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 10000      # cycle increment between outputs
+
+<output6>
+file_type  = bin        # Binary data dump
+id         = heat       # output id tag
+variable   = xrb_heat   # cell-by-cell heating rate (Scherbak Eq. 7)
+#dt         = 1.0e3      # time increment between outputs
+dcycle     = 10000      # cycle increment between outputs

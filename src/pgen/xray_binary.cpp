@@ -8,6 +8,12 @@
 //! Supports Newtonian/GR hydro or MHD (+ optional radiation in GR).
 //! MHD magnetic field options (independent; both off => B=0):
 //!   mean_field = poloidal : donor-envelope poloidal field from vector potential
+//!     A_phi_phys = R^{r_pow} [max(rho-rho_cut,0)]^{rho_pow}  (R = cyl. radius about donor z)
+//!     r_pow>=1 keeps B finite on the donor polar axis; no extra theta factor (rho is Roche)
+//!     default r_pow = gamma/(2*(gamma-1)) and rho_pow=1 => mid-envelope |B|~sqrt(p)
+//!       on this point-mass polytrope (1.75 when gamma=1.4)
+//!     potential_beta_min = min(p/p_mag) in the live envelope
+//!       (r_mask < r < r_donor and rho > rho_cut), not a volume mean over the 1/r core
 //!   <turb_seed*> blocks   : one-shot seed (see pgen/turb_seed.hpp)
 //! fix_donor mask resets fluid only (never face B) to preserve divB=0.
 
@@ -102,13 +108,17 @@ struct xrb_pgen {
   Real potential_beta_min;
   Real potential_rho_cut;
   Real potential_rho_pow;
+  Real potential_r_pow;
 };
 
 xrb_pgen xrb;
 
 //----------------------------------------------------------------------------------------
-//! Donor-centered poloidal vector potential A_phi * e_phi (about z through donor).
-//! A_phi = [max(rho - rho_cut, 0)]^rho_pow evaluated from the Roche polytrope.
+//! Donor-centered poloidal vector potential A = A_phi_phys * e_phi (about z through donor).
+//! A_phi_phys = R^{r_pow} [max(rho - rho_cut, 0)]^{rho_pow} from the Roche polytrope.
+//! Cartesian: A = f(rho) * R^{r_pow-1} * (-y, x, 0). r_pow>=1 => B finite on the axis.
+//! Default r_pow = gamma/(2*(gamma-1)) with rho_pow=1 matches |B|~sqrt(p) in the
+//! mid envelope (Delta Phi ~ 1/r).
 
 KOKKOS_INLINE_FUNCTION
 static Real DonorAphi(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
@@ -125,14 +135,16 @@ static void DonorVectorPotential(struct xrb_pgen pgen, Real x1, Real x2, Real x3
   Real xd = x1 - pgen.a_sep;
   Real rcyl = sqrt(SQR(xd) + SQR(x2));
   Real aphi = DonorAphi(pgen, x1, x2, x3);
-  if (rcyl <= 1.0e-30 || aphi == 0.0) {
+  // A = f(rho) R^{r_pow} e_phi  =>  (Ax,Ay) = f R^{r_pow-1} (-y, x)
+  if (aphi == 0.0 || rcyl <= 1.0e-30) {
     *pa1 = 0.0;
     *pa2 = 0.0;
     *pa3 = 0.0;
     return;
   }
-  *pa1 = -aphi * x2 / rcyl;
-  *pa2 =  aphi * xd / rcyl;
+  Real rfac = pow(rcyl, pgen.potential_r_pow - 1.0);
+  *pa1 = -aphi * rfac * x2;
+  *pa2 =  aphi * rfac * xd;
   *pa3 = 0.0;
 }
 
@@ -537,6 +549,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.potential_beta_min = 100.0;
   xrb.potential_rho_cut = 0.0;
   xrb.potential_rho_pow = 1.0;
+  xrb.potential_r_pow = 1.0;
   if (use_mhd) {
     std::string mean_field = pin->GetOrAddString("problem", "mean_field", "none");
     if (mean_field == "poloidal") {
@@ -545,6 +558,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       xrb.potential_rho_cut = pin->GetOrAddReal("problem", "potential_rho_cut",
                                                 2.0*xrb.rho_min);
       xrb.potential_rho_pow = pin->GetOrAddReal("problem", "potential_rho_pow", 1.0);
+      // Mid-envelope |B|~sqrt(p) on a point-mass polytrope: r_pow = gamma/(2*(gamma-1))
+      Real r_pow_def = 1.0;
+      if (xrb.gamma_adi > 1.0) {
+        r_pow_def = xrb.gamma_adi / (2.0*(xrb.gamma_adi - 1.0));
+      }
+      xrb.potential_r_pow = pin->GetOrAddReal("problem", "potential_r_pow", r_pow_def);
+      if (xrb.potential_beta_min <= 0.0) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "problem/potential_beta_min must be positive" << std::endl;
+        exit(EXIT_FAILURE);
+      }
     } else if (mean_field != "none") {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "problem/mean_field must be 'none' or 'poloidal'" << std::endl;
@@ -592,6 +617,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         std::cout << "xrb.potential_beta_min = " << xrb.potential_beta_min << std::endl;
         std::cout << "xrb.potential_rho_cut = " << xrb.potential_rho_cut << std::endl;
         std::cout << "xrb.potential_rho_pow = " << xrb.potential_rho_pow << std::endl;
+        std::cout << "xrb.potential_r_pow = " << xrb.potential_r_pow << std::endl;
       }
     }
   }
@@ -882,13 +908,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       bcc_(m,IBZ,k,j,i) = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
     });
 
-    // Volume-weighted <p_mag> and <p_gas(+p_rad)> over donor support (rho > cut)
+    // Normalize so min(p/p_mag) = potential_beta_min in the live envelope
+    // (outside the donor mask, inside r_donor, and rho > cut). The 1/r core is
+    // excluded: volume means / peaks over all rho>cut are dominated by it.
     const Real arad_ = is_radiation_enabled ? pmbp->prad->arad : 0.0;
     const bool is_rad = is_radiation_enabled;
+    Real beta_min = std::numeric_limits<Real>::max();
     Real pmag_sum = 0.0, pgas_sum = 0.0, vol_sum = 0.0;
+    Real pgas_max = 0.0, pmag_max = 0.0;
     Kokkos::parallel_reduce("xrb_beta_norm",
                             Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-    KOKKOS_LAMBDA(const int idx, Real &lpmag, Real &lpgas, Real &lvol) {
+    KOKKOS_LAMBDA(const int idx, Real &lbmin, Real &lpmag, Real &lpgas, Real &lvol,
+                  Real &lpmax, Real &lpmagmax) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/indcs.nx1;
@@ -898,6 +929,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
       Real rho = w0_(m,IDN,k,j,i);
       if (rho <= trs.potential_rho_cut) return;
+
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+      Real d_donor = sqrt(SQR(x1v - trs.a_sep) + SQR(x2v) + SQR(x3v));
+      if (d_donor <= trs.r_donor_mask || d_donor >= trs.r_donor) return;
 
       Real vol = size.d_view(m).dx1 * size.d_view(m).dx2 * size.d_view(m).dx3;
       Real pgas = gm1 * w0_(m,IEN,k,j,i);
@@ -912,27 +955,37 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       lpmag += pmag * vol;
       lpgas += pgas * vol;
       lvol  += vol;
-    }, pmag_sum, pgas_sum, vol_sum);
+      lpmax = fmax(lpmax, pgas);
+      lpmagmax = fmax(lpmagmax, pmag);
+      if (pmag > 0.0) {
+        lbmin = fmin(lbmin, pgas / pmag);
+      }
+    }, Kokkos::Min<Real>(beta_min), pmag_sum, pgas_sum, vol_sum,
+       Kokkos::Max<Real>(pgas_max), Kokkos::Max<Real>(pmag_max));
 
 #if MPI_PARALLEL_ENABLED
-    Real red[3] = {pmag_sum, pgas_sum, vol_sum};
-    MPI_Allreduce(MPI_IN_PLACE, red, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    pmag_sum = red[0];
-    pgas_sum = red[1];
-    vol_sum = red[2];
+    Real red_sum[3] = {pmag_sum, pgas_sum, vol_sum};
+    MPI_Allreduce(MPI_IN_PLACE, red_sum, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    pmag_sum = red_sum[0];
+    pgas_sum = red_sum[1];
+    vol_sum = red_sum[2];
+    MPI_Allreduce(MPI_IN_PLACE, &beta_min, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+    Real red_max[2] = {pgas_max, pmag_max};
+    MPI_Allreduce(MPI_IN_PLACE, red_max, 2, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    pgas_max = red_max[0];
+    pmag_max = red_max[1];
 #endif
 
     Real bnorm = 0.0;
-    if (vol_sum > 0.0 && pmag_sum > 0.0 && pgas_sum > 0.0) {
-      Real pmag_mean = pmag_sum / vol_sum;
-      Real pgas_mean = pgas_sum / vol_sum;
-      bnorm = sqrt((pgas_mean / pmag_mean) / xrb.potential_beta_min);
+    if (vol_sum > 0.0 && pmag_sum > 0.0 && std::isfinite(beta_min) &&
+        beta_min > 0.0 && beta_min < std::numeric_limits<Real>::max()) {
+      bnorm = sqrt(beta_min / xrb.potential_beta_min);
     }
-    if (!std::isfinite(bnorm)) {
+    if (!std::isfinite(bnorm) || bnorm <= 0.0) {
       bnorm = 0.0;
       if (global_variable::my_rank == 0) {
         std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
-                  << "donor vector potential is zero or degenerate; "
+                  << "donor vector potential is zero or degenerate in the envelope; "
                   << "skipping magnetic field normalization (b0=0)" << std::endl;
       }
     }
@@ -956,8 +1009,22 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     });
 
     if (global_variable::my_rank == 0) {
+      Real beta_mean = (vol_sum > 0.0 && pmag_sum > 0.0) ? (pgas_sum / pmag_sum)
+                                                        : std::numeric_limits<Real>::infinity();
+      Real beta_peak = (pmag_max > 0.0) ? (pgas_max / pmag_max)
+                                        : std::numeric_limits<Real>::infinity();
+      Real scale = (bnorm > 0.0) ? (bnorm * bnorm) : 0.0;
       std::cout << "xrb poloidal mean field: bnorm = " << bnorm
-                << " (target beta_min = " << xrb.potential_beta_min << ")" << std::endl;
+                << " (target envelope min beta = " << xrb.potential_beta_min << ")"
+                << std::endl;
+      std::cout << "  envelope unnorm: beta_min = " << beta_min
+                << "  <p>/<p_mag> = " << beta_mean
+                << "  p_max/p_mag_max = " << beta_peak << std::endl;
+      if (scale > 0.0) {
+        std::cout << "  envelope after norm: beta_min = " << (beta_min / scale)
+                  << "  <p>/<p_mag> = " << (beta_mean / scale)
+                  << "  p_max/p_mag_max = " << (beta_peak / scale) << std::endl;
+      }
     }
   }
 
