@@ -53,8 +53,7 @@
 //!                   Amplitude: inv_beta = <p_mag>/<p_gas> (volume-weighted means
 //!                   over the window; seed contribution only). In radiation runs
 //!                   the denominator is p_gas + p_rad (LTE p_rad from the gas
-//!                   temperature), consistent with the ptot convention of the
-//!                   pgen's potential_beta_min.
+//!                   temperature), i.e. a ptot = p_gas + p_rad convention.
 //!   field = erad  : NOT YET IMPLEMENTED (LTE-consistent radiation perturbation).
 //!
 //! Caveats (documented design decisions):
@@ -109,6 +108,7 @@
 #include "mesh/mesh.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "radiation/radiation.hpp"
 #include "eos/eos.hpp"
 #include "utils/random.hpp"
 
@@ -159,8 +159,8 @@ struct TurbSeedField {
     dphidr = dgdr*w + g*dwdr;
   }
 
-  // Scalar field: returns envelope phi and raw (unnormalized, un-windowed) mode sum
-  // f(x); the consumer applies q *= 1 + s*phi*(f - mean_f).
+  // Scalar field: returns envelope Phi and raw mode sum f (not Phi*f).
+  // Consumer: q *= 1 + s*Phi*(f - mu) with mu = Phi-weighted mean of f.
   KOKKOS_INLINE_FUNCTION
   void ScalarEval(Real x, Real y, Real z, Real &phi, Real &f) const {
     Real dx, dy, dz, r, dphidr;
@@ -252,7 +252,32 @@ struct TurbSeedField {
 
 class TurbSeed {
  public:
-  TurbSeed(std::string bk, MeshBlockPack *pp, ParameterInput *pin) :
+  TurbSeed(std::string bk, MeshBlockPack *pp, ParameterInput *pin);
+  void Apply();
+
+  // CUDA/nvcc: extended __host__ __device__ lambdas cannot live in private/protected
+  // member functions (AMD/HIP does not enforce this). Declared public for that reason.
+  void ApplyVel();
+  void ApplyScalar();
+  void ApplyBfld();
+
+ private:
+  MeshBlockPack *pmy_pack;
+  std::string bname;
+  std::string field;
+  bool solenoidal = true;
+  Real sol_frac = -1.0;
+  Real target;
+  Real l_turb, expo;
+  int nlow, nhigh;
+  int64_t seed;
+  TurbSeedField fld;
+
+  void GenerateModes();
+};
+
+
+inline TurbSeed::TurbSeed(std::string bk, MeshBlockPack *pp, ParameterInput *pin) :
     pmy_pack(pp), bname(bk) {
     field = pin->GetString(bk, "field");
     if (field == "erad") {
@@ -332,7 +357,8 @@ class TurbSeed {
     GenerateModes();
   }
 
-  void Apply() {
+
+inline void TurbSeed::Apply() {
     if (field == "vel") {
       ApplyVel();
     } else if (field == "bfld") {
@@ -342,24 +368,13 @@ class TurbSeed {
     }
   }
 
- private:
-  MeshBlockPack *pmy_pack;
-  std::string bname;
-  std::string field;
-  bool solenoidal = true;
-  Real sol_frac = -1.0;
-  Real target;
-  Real l_turb, expo;
-  int nlow, nhigh;
-  int64_t seed;
-  TurbSeedField fld;
 
-  //--------------------------------------------------------------------------------------
-  // Generate the compact mode list on the host, deterministically from seed.
-  // k runs over a half-space (kz>0; kz=0,ky>0; kz=ky=0,kx>0) so that, with a random
-  // phase per mode and component, a general real random field is represented (this
-  // replaces the historical 8-fold sin/cos coefficient bookkeeping).
-  void GenerateModes() {
+//--------------------------------------------------------------------------------------
+// Generate the compact mode list on the host, deterministically from seed.
+// k runs over a half-space (kz>0; kz=0,ky>0; kz=ky=0,kx>0) so that, with a random
+// phase per mode and component, a general real random field is represented (this
+// replaces the historical 8-fold sin/cos coefficient bookkeeping).
+inline void TurbSeed::GenerateModes() {
     // number of independent scalar components carrying randomness
     const int ncomp = (field == "vel" || field == "bfld") ? 3 : 1;
     // solenoidal velocity and bfld are built as curl of a potential: potential
@@ -447,11 +462,12 @@ class TurbSeed {
     fld.ph.template sync<DevExeSpace>();
   }
 
-  //--------------------------------------------------------------------------------------
-  // Velocity seed: dv added to w0 velocities; normalized so that the mass-weighted
-  // rms of |dv|/c_s over the window equals `mach`. Field evaluated twice (reduce +
-  // apply) instead of stored -- no persistent arrays needed.
-  void ApplyVel() {
+
+//--------------------------------------------------------------------------------------
+// Velocity seed: dv added to w0 velocities; normalized so that the mass-weighted
+// rms of |dv|/c_s over the window equals `mach`. Field evaluated twice (reduce +
+// apply) instead of stored -- no persistent arrays needed.
+inline void TurbSeed::ApplyVel() {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     int is = indcs.is, js = indcs.js, ks = indcs.ks;
     int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
@@ -565,11 +581,12 @@ class TurbSeed {
     }
   }
 
-  //--------------------------------------------------------------------------------------
-  // Scalar seed (dens or pres): q *= 1 + s*phi*(f - mu). The mean mu is q-weighted
-  // over the window so that the net integral of q is conserved exactly (pre-floor);
-  // rms is q-weighted so `amp` = rms relative fluctuation.
-  void ApplyScalar() {
+
+//--------------------------------------------------------------------------------------
+// Scalar seed (dens or pres): q *= 1 + s*phi*(f - mu). The mean mu is q-weighted
+// over the window so that the net integral of q is conserved exactly (pre-floor);
+// rms is q-weighted so `amp` = rms relative fluctuation.
+inline void TurbSeed::ApplyScalar() {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     int is = indcs.is, js = indcs.js, ks = indcs.ks;
     int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
@@ -668,14 +685,15 @@ class TurbSeed {
     }
   }
 
-  //--------------------------------------------------------------------------------------
-  // Magnetic seed: windowed potential sampled at cell edges, discrete (CT) curl to
-  // face fields, ADDED to existing b0. At faces/edges shared with a finer MeshBlock
-  // the edge value is the average of the two fine-level samples so that the coarse
-  // face flux equals the sum of the fine fluxes (scheme copied from zoom_gr_torus);
-  // discrete divB stays zero across refinement boundaries. Normalized by a single
-  // global constant so divB is unaffected: <p_mag>/<p_gas> over window = inv_beta.
-  void ApplyBfld() {
+
+//--------------------------------------------------------------------------------------
+// Magnetic seed: windowed potential sampled at cell edges, discrete (CT) curl to
+// face fields, ADDED to existing b0. At faces/edges shared with a finer MeshBlock
+// the edge value is the average of the two fine-level samples so that the coarse
+// face flux equals the sum of the fine fluxes (scheme copied from zoom_gr_torus);
+// discrete divB stays zero across refinement boundaries. Normalized by a single
+// global constant so divB is unaffected: <p_mag>/<p_gas> over window = inv_beta.
+inline void TurbSeed::ApplyBfld() {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     int is = indcs.is, js = indcs.js, ks = indcs.ks;
     int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
@@ -965,6 +983,6 @@ class TurbSeed {
                 << " divb_rel_max=" << divb_rel_max << std::endl;
     }
   }
-};
+
 
 #endif  // PGEN_TURB_SEED_HPP_
