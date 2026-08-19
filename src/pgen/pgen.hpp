@@ -23,6 +23,8 @@ using UserRefinementFnPtr = void (*)(MeshBlockPack* pmbp);
 // Fills derived_var(m,i_dv,k,j,i) for a pgen-specific output variable.
 using UserDerivedFnPtr = void (*)(Mesh* pm, DvceArray5D<Real> dv, int i_dv);
 using UserHistoryFnPtr = void (*)(HistoryData *pdata, Mesh *pm);
+// Called at the end of MHD::EFieldSrc (last mutation of E before SendE/RecvE).
+using UserEfieldFnPtr = void (*)(Mesh* pm);
 
 //----------------------------------------------------------------------------------------
 //! \class ProblemGenerator
@@ -58,6 +60,7 @@ class ProblemGenerator {
   UserHistoryFnPtr user_hist_func=nullptr;
   // function pointer for pgen-specific derived output variable (e.g. xrb_heat)
   UserDerivedFnPtr user_derived_func=nullptr;
+  UserEfieldFnPtr user_efield_func=nullptr;
 
   // predefined problem generator functions (default test suite)
   void CallProblemGenerator(ParameterInput *pin, bool is_restart);

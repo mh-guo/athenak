@@ -15,7 +15,8 @@
 //!     potential_beta_min = min(p/p_mag) in the live envelope
 //!       (r_mask < r < r_donor and rho > rho_cut), not a volume mean over the 1/r core
 //!   <turb_seed*> blocks   : one-shot seed (see pgen/turb_seed.hpp)
-//! fix_donor mask resets fluid only (never face B) to preserve divB=0.
+//! fix_donor mask resets fluid each BC. With MHD, E=0 on mask-cell edges in EFieldSrc
+//!   (last step before SendE) so interior B is CT-frozen and divB stays 0.
 
 #include <stdio.h>
 #include <math.h>
@@ -167,6 +168,12 @@ static Real A3(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
   Real a1, a2, a3;
   DonorVectorPotential(pgen, x1, x2, x3, &a1, &a2, &a3);
   return a3;
+}
+
+KOKKOS_INLINE_FUNCTION
+static bool CellInDonorMask(struct xrb_pgen pgen, Real x1, Real x2, Real x3) {
+  Real xd = x1 - pgen.a_sep;
+  return (SQR(xd) + SQR(x2) + SQR(x3)) <= SQR(pgen.r_donor_mask);
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -454,6 +461,7 @@ void InitializeHeating(ParameterInput *pin, Mesh *pm) {
 
 void NoInflowXRB(Mesh *pm);
 void ApplyDonorMask(Mesh *pm);
+void ZeroDonorMaskEMF(Mesh *pm);
 void UserBcsXRB(Mesh *pm);
 void XRBSourceTerms(Mesh *pm, const Real bdt);
 void AccretorFluxes(HistoryData *pdata, Mesh *pm);
@@ -523,6 +531,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   xrb.r_donor = pin->GetReal("problem", "r_donor");
   xrb.fix_donor = pin->GetOrAddBoolean("problem", "fix_donor", false);
   xrb.r_donor_mask = pin->GetOrAddReal("problem", "r_donor_mask", xrb.r_donor);
+  if (use_mhd && xrb.fix_donor) {
+    user_efield_func = ZeroDonorMaskEMF;
+  }
   xrb.r_donor_flux = pin->GetOrAddReal("problem", "flux_radius_donor", 1.01*xrb.r_donor);
   xrb.donor_hist = false;
   xrb.mass_ratio = xrb.m_accretor / (xrb.m_donor + xrb.m_accretor);
@@ -588,6 +599,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << "xrb.r_donor = " << xrb.r_donor << std::endl;
     std::cout << "xrb.fix_donor = " << xrb.fix_donor << std::endl;
     std::cout << "xrb.r_donor_mask = " << xrb.r_donor_mask << std::endl;
+    if (use_mhd && xrb.fix_donor) {
+      std::cout << "xrb.fix_donor_emf = 1 (E=0 on mask edges; CT-frozen B)"
+                << std::endl;
+    }
     if (xrb.donor_hist) {
       std::cout << "xrb.r_donor_flux = " << xrb.r_donor_flux << std::endl;
     }
@@ -1307,6 +1322,88 @@ void FillXRBHeatDerived(Mesh *pm, DvceArray5D<Real> dv, int i_dv) {
   });
 }
 
+void ZeroDonorMaskEMF(Mesh *pm) {
+  // Enrolled as user_efield_func; runs at the end of EFieldSrc, before SendE.
+  if (!xrb.fix_donor) return;
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  if (pmbp->pmhd == nullptr) return;
+
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &size = pmbp->pmb->mb_size;
+  auto e1 = pmbp->pmhd->efld.x1e;
+  auto e2 = pmbp->pmhd->efld.x2e;
+  auto e3 = pmbp->pmhd->efld.x3e;
+  auto pgen = xrb;
+  int nmb1 = pmbp->nmb_thispack - 1;
+
+  // e1[is:ie, js:je+1, ks:ke+1]: x1-edge touches cells (i, j-1..j, k-1..k)
+  par_for("xrb_mask_e1", DevExeSpace(), 0, nmb1, ks, ke+1, js, je+1, is, ie,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real x1min = size.d_view(m).x1min;
+    Real x1max = size.d_view(m).x1max;
+    Real x2min = size.d_view(m).x2min;
+    Real x2max = size.d_view(m).x2max;
+    Real x3min = size.d_view(m).x3min;
+    Real x3max = size.d_view(m).x3max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    bool touch = false;
+    for (int kk = k-1; kk <= k; ++kk) {
+      Real x3v = CellCenterX(kk-ks, nx3, x3min, x3max);
+      for (int jj = j-1; jj <= j; ++jj) {
+        Real x2v = CellCenterX(jj-js, nx2, x2min, x2max);
+        if (CellInDonorMask(pgen, x1v, x2v, x3v)) touch = true;
+      }
+    }
+    if (touch) e1(m,k,j,i) = 0.0;
+  });
+
+  // e2[is:ie+1, js:je, ks:ke+1]: x2-edge touches cells (i-1..i, j, k-1..k)
+  par_for("xrb_mask_e2", DevExeSpace(), 0, nmb1, ks, ke+1, js, je, is, ie+1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real x1min = size.d_view(m).x1min;
+    Real x1max = size.d_view(m).x1max;
+    Real x2min = size.d_view(m).x2min;
+    Real x2max = size.d_view(m).x2max;
+    Real x3min = size.d_view(m).x3min;
+    Real x3max = size.d_view(m).x3max;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    bool touch = false;
+    for (int kk = k-1; kk <= k; ++kk) {
+      Real x3v = CellCenterX(kk-ks, nx3, x3min, x3max);
+      for (int ii = i-1; ii <= i; ++ii) {
+        Real x1v = CellCenterX(ii-is, nx1, x1min, x1max);
+        if (CellInDonorMask(pgen, x1v, x2v, x3v)) touch = true;
+      }
+    }
+    if (touch) e2(m,k,j,i) = 0.0;
+  });
+
+  // e3[is:ie+1, js:je+1, ks:ke]: x3-edge touches cells (i-1..i, j-1..j, k)
+  par_for("xrb_mask_e3", DevExeSpace(), 0, nmb1, ks, ke, js, je+1, is, ie+1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real x1min = size.d_view(m).x1min;
+    Real x1max = size.d_view(m).x1max;
+    Real x2min = size.d_view(m).x2min;
+    Real x2max = size.d_view(m).x2max;
+    Real x3min = size.d_view(m).x3min;
+    Real x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    bool touch = false;
+    for (int jj = j-1; jj <= j; ++jj) {
+      Real x2v = CellCenterX(jj-js, nx2, x2min, x2max);
+      for (int ii = i-1; ii <= i; ++ii) {
+        Real x1v = CellCenterX(ii-is, nx1, x1min, x1max);
+        if (CellInDonorMask(pgen, x1v, x2v, x3v)) touch = true;
+      }
+    }
+    if (touch) e3(m,k,j,i) = 0.0;
+  });
+}
+
 void ApplyDonorMask(Mesh *pm) {
   if (!xrb.fix_donor) return;
 
@@ -1333,7 +1430,8 @@ void ApplyDonorMask(Mesh *pm) {
   auto &coord = pmbp->pcoord->coord_data;
 
   if (use_mhd) {
-    // Fluid only inside mask; face B untouched (divB preserved).
+    // Fluid reset inside mask; face B is not overwritten. Interior B is frozen
+    // by E=0 on mask-cell edges in ZeroDonorMaskEMF (end of MHD::EFieldSrc, before SendE).
     // Refresh bcc from faces and set conserved via MHD PrimToCons algebra.
     auto &b0 = pmbp->pmhd->b0;
     auto &bcc_ = pmbp->pmhd->bcc0;

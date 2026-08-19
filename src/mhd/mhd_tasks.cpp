@@ -27,6 +27,7 @@
 #include "shearing_box/orbital_advection.hpp"
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "pgen/pgen.hpp"
 
 namespace mhd {
 //----------------------------------------------------------------------------------------
@@ -383,6 +384,11 @@ TaskStatus MHD::EFieldSrc(Driver *pdrive, int stage) {
   }
   if (pmy_pack->pmesh->pzoom != nullptr) {
     pmy_pack->pmesh->pzoom->SourceTermsFC(efld);
+  }
+  // Last mutation of E before SendE/RecvE: fine zeros restrict onto coarse, and
+  // same-level ranks then average a consistent E (do not re-zero after RecvE).
+  if (pmy_pack->pmesh->pgen->user_efield_func != nullptr) {
+    (pmy_pack->pmesh->pgen->user_efield_func)(pmy_pack->pmesh);
   }
   return TaskStatus::complete;
 }
