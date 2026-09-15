@@ -35,6 +35,14 @@ TaskStatus MHD::NewTimeStep(Driver *pdrive, int stage) {
     return TaskStatus::complete; // only execute last stage
   }
 
+  RecomputeTimeStepFromCurrentState(pdriver);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \brief Recompute hyperbolic and parabolic timestep limits from the current state.
+
+void MHD::RecomputeTimeStepFromCurrentState(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
   int js = indcs.js, nx2 = indcs.nx2;
@@ -271,6 +279,6 @@ TaskStatus MHD::NewTimeStep(Driver *pdrive, int stage) {
     psrc->NewTimeStep(w0, peos->eos_data);
   }
 
-  return TaskStatus::complete;
+  return;
 }
 } // namespace mhd

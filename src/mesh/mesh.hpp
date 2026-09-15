@@ -16,6 +16,7 @@
 #include <string>
 
 #include "athena.hpp"
+#include "diffusion/sts_types.hpp"
 
 // Define following structure before other "include" files to resolve declarations
 //----------------------------------------------------------------------------------------
@@ -138,7 +139,8 @@ class Mesh {
   // following 1x arrays allocated with length [nranks] in AddCoordinatesAndPhysics()
   int *nprtcl_eachrank;    // number of particles on each rank
 
-  Real time, dt, dtold, dt_last_completed, cfl_no;
+  Real time, dt, dtold, dt_last_completed, dt_parabolic_sts, sts_max_dt_ratio, cfl_no;
+  parabolic::STSIntegrator sts_integrator;
   int ncycle;
   EventCounters ecounter;
 
@@ -155,6 +157,7 @@ class Mesh {
   void PrintMeshDiagnostics();
   void WriteMeshStructure();
   void NewTimeStep(const Real tlim);
+  void RefreshSTSParabolicTimeStep();
   void AddCoordinatesAndPhysics(ParameterInput *pinput);
   void AddCyclicZoom(ParameterInput *pin);
   BoundaryFlag GetBoundaryFlag(const std::string& input_string);
