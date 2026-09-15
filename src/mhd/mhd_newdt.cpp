@@ -30,8 +30,8 @@ namespace mhd {
 // \!fn void MHD::NewTimeStep()
 // \brief calculate the minimum timestep within a MeshBlockPack for MHD problems
 
-TaskStatus MHD::NewTimeStep(Driver *pdrive, int stage) {
-  if (stage != (pdrive->nexp_stages)) {
+TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
+  if (stage != (pdriver->nexp_stages)) {
     return TaskStatus::complete; // only execute last stage
   }
 
@@ -66,7 +66,7 @@ void MHD::RecomputeTimeStepFromCurrentState(Driver *pdriver) {
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
 
-  if (pdrive->time_evolution == TimeEvolution::kinematic) {
+  if (pdriver->time_evolution == TimeEvolution::kinematic) {
     // find smallest (dx/v) in each direction for advection problems
     Kokkos::parallel_reduce("MHDNudt1",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
