@@ -145,6 +145,7 @@ class MHD {
   DvceArray5D<Real> wl3d, wr3d;
   DvceArray5D<Real> bl3d, br3d;
   Real dtnew;
+  bool gr_dt = false;         // use GR characteristic speeds for the timestep
 
   // following used for time derivatives in computation of jcon
   bool wbcc_saved = false;

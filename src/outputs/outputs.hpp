@@ -21,6 +21,9 @@
     #error NHISTORY > NREDUCTION in outputs.hpp
 #endif
 
+// Host-side capacity for histories that do not use the fixed-size device reduction.
+#define MAX_HISTORY_VARIABLES 4096
+
 #define NOUTPUT_CHOICES 154
 // choices for output variables used in <ouput> blocks in input file
 // TO ADD MORE CHOICES:
@@ -185,8 +188,8 @@ struct OutputMeshBlockInfo {
 struct HistoryData {
   int nhist;
   PhysicsModule physics;
-  std::string label[NHISTORY_VARIABLES];
-  Real hdata[NHISTORY_VARIABLES];
+  std::string label[MAX_HISTORY_VARIABLES];
+  Real hdata[MAX_HISTORY_VARIABLES];
   bool header_written;
   // constructor
   explicit HistoryData(PhysicsModule name) : physics(name), header_written(false) {}

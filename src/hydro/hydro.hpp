@@ -103,6 +103,7 @@ class Hydro {
   DvceArray5D<Real> u_sts_rhs;  // cached first-stage RKL2 operator contribution
   DvceFaceFld5D<Real> uflx;   // fluxes of conserved quantities on cell faces
   Real dtnew;
+  bool gr_dt = false;         // use GR characteristic speeds for the timestep
 
   bool has_explicit_viscosity = false;
   bool has_explicit_conduction = false;
