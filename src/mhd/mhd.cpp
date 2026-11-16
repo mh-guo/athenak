@@ -67,6 +67,22 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     e1_cc("e1_cc",1,1,1,1),
     e2_cc("e2_cc",1,1,1,1),
     e3_cc("e3_cc",1,1,1,1) {
+  // The zoom object is constructed after the physics task lists. Detect the
+  // active refinement criterion here so ordinary MHD keeps its task ordering.
+  if (pmy_pack->pmesh->adaptive) {
+    for (const auto &block : pin->block) {
+      if (block.block_name.compare(0, 13, "amr_criterion") == 0 &&
+          pin->GetString(block.block_name, "method") == "cyclic_zoom") {
+        uses_cyclic_zoom = true;
+      }
+    }
+  }
+  if (uses_cyclic_zoom && (pin->DoesBlockExist("shearing_box") ||
+      pmy_pack->pcoord->is_dynamical_relativistic)) {
+    std::cout << "### FATAL ERROR: cyclic-zoom MHD supports static metrics"
+              << " without orbital advection/shearing boundaries only" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   // Total number of MeshBlocks on this rank to be used in array dimensioning
   int nmb = std::max((ppack->nmb_thispack), (ppack->pmesh->nmb_maxperrank));
 
@@ -186,6 +202,12 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
   // Then initialize memory and algorithms for reconstruction and Riemann solvers
   std::string evolution_t = pin->GetString("time","evolution");
   gr_dt = pin->GetOrAddBoolean("time","gr_dt",false);
+  gr_cfl = pin->GetOrAddReal("time", "gr_cfl", 1.0);
+  if (!(gr_cfl > 0.0 && gr_cfl <= 1.0)) {
+    std::cout << "### FATAL ERROR: time/gr_cfl must satisfy 0 < gr_cfl <= 1"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // allocate memory for conserved and primitive variables
   // With AMR, maximum size of Views are limited by total device memory through an input

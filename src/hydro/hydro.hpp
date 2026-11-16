@@ -104,6 +104,7 @@ class Hydro {
   DvceFaceFld5D<Real> uflx;   // fluxes of conserved quantities on cell faces
   Real dtnew;
   bool gr_dt = false;         // flag for accurate GR timestep calculation
+  Real gr_cfl = 1.0;  // dt-only wave-speed safety factor (0,1]
 
   bool has_explicit_viscosity = false;
   bool has_explicit_conduction = false;

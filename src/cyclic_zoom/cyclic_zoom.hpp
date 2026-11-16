@@ -10,6 +10,32 @@
 
 #include <string>
 #include <vector>
+namespace cyclic_zoom {
+enum class RefinementShape { sphere, box };
+}
+
+// Optional operation-level budget; sampling never modifies the fluid state.
+class Mesh;
+namespace zoom_diagnostics {
+struct Totals {
+  Real value[4][5];
+};
+class BudgetScope {
+ public:
+  BudgetScope(Mesh *mesh, const char *label, int stage, Real g0 = 1.0, Real g1 = 0.0);
+  ~BudgetScope();
+  BudgetScope(const BudgetScope &) = delete;
+  BudgetScope &operator=(const BudgetScope &) = delete;
+
+ private:
+  Mesh *mesh_;
+  const char *label_;
+  int stage_;
+  bool enabled_;
+  Real radius_;
+  Totals before_;
+};
+}  // namespace zoom_diagnostics
 
 //----------------------------------------------------------------------------------------
 //! \struct ZoomState
@@ -35,6 +61,7 @@ typedef struct ZoomAMR {
   int refine_flag;              // flag for refinement (+1: refine, -1: coarsen)
   bool zooming_in;              // flag for performing zoom in (refinement)
   bool zooming_out;             // flag for performing zoom out (coarsening)
+  cyclic_zoom::RefinementShape ref_shape;  // mesh criterion only, not mask geometry
 } ZoomAMR;
 
 //----------------------------------------------------------------------------------------
@@ -117,6 +144,9 @@ class CyclicZoom {
   // data
   // TODO(@mhguo): may extend to accept multiple zoom criteria later
   std::string block_name;  // block name for reading parameters
+  int debug_interval;      // 0 disables exterior-shell diagnostics (zones >= 4)
+  Real debug_stop_temp;    // <=0 disables temperature stop; invalid states still stop
+  bool InterfaceDiagnostics(int stage);
   bool verbose;            // flag for verbose output
   bool read_rst;           // flag for reading zoom data restart file
   bool write_rst;          // flag for writing zoom data restart file
@@ -164,6 +194,7 @@ class CyclicZoom {
 
  private:
   // data
+  Real restart_next_time_;  // one-shot absolute deadline override; -1 keeps saved state
   Mesh *pmesh;            // ptr to Mesh containing this CyclicZoom module
 };
 

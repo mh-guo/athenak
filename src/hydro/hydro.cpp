@@ -133,6 +133,12 @@ Hydro::Hydro(MeshBlockPack *ppack, ParameterInput *pin) :
   // Then initialize memory and algorithms for reconstruction and Riemann solvers
   std::string evolution_t = pin->GetString("time","evolution");
   gr_dt = pin->GetOrAddBoolean("time","gr_dt",false);
+  gr_cfl = pin->GetOrAddReal("time", "gr_cfl", 1.0);
+  if (!(gr_cfl > 0.0 && gr_cfl <= 1.0)) {
+    std::cout << "### FATAL ERROR: time/gr_cfl must satisfy 0 < gr_cfl <= 1"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // allocate memory for conserved and primitive variables
   // With AMR, maximum size of Views are limited by total device memory through an input

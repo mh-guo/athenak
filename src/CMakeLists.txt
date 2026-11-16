@@ -33,6 +33,7 @@ add_executable(
 
         cyclic_zoom/cyclic_zoom.cpp
         cyclic_zoom/zoom_criteria.cpp
+        cyclic_zoom/zoom_diagnostics.cpp
         cyclic_zoom/zoom_data.cpp
         cyclic_zoom/zoom_datablock.cpp
         cyclic_zoom/zoom_fluxes.cpp

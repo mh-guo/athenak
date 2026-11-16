@@ -125,6 +125,7 @@ void CyclicZoom::MaskVariables(int zone, const ZoomRegion &zreg) {
 
 void CyclicZoom::ApplyMask() {
   if (zstate.zone > 0 && !zamr.zooming_out && !zamr.zooming_in) {
+    zoom_diagnostics::BudgetScope budget(pmesh, "mask", -1);
     MaskVariables(zstate.zone-1, zregion);
   }
   return;

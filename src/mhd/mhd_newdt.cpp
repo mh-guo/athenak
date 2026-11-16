@@ -60,6 +60,7 @@ void MHD::RecomputeTimeStepFromCurrentState(Driver *pdriver) {
   auto &is_general_relativistic_ = pmy_pack->pcoord->is_general_relativistic;
   auto &is_dynamical_relativistic_ = pmy_pack->pcoord->is_dynamical_relativistic;
   auto &gr_dt_ = gr_dt;
+  const Real gr_cfl_ = gr_cfl;
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
   auto &spin = pmy_pack->pcoord->coord_data.bh_spin;
   const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
@@ -198,6 +199,13 @@ void MHD::RecomputeTimeStepFromCurrentState(Driver *pdriver) {
           eos.IdealGRMHDFastSpeeds(wd, p, uu[0], uu[IVZ], b_sq, gupper[0][0],
                                   gupper[0][IVZ], gupper[IVZ][IVZ], lp, lm);
           max_dv3 = fmax(fabs(lm), lp);
+          // Cartesian Kerr-Schild/Minkowski coordinate signal speeds are <= 1.
+          // This safety factor affects timestep estimation only.
+          if (gr_cfl_ < 1.0) {
+            max_dv1 = fmin(max_dv1 / gr_cfl_, 1.0);
+            max_dv2 = fmin(max_dv2 / gr_cfl_, 1.0);
+            max_dv3 = fmin(max_dv3 / gr_cfl_, 1.0);
+          }
         }
       // timestep in SR MHD
       } else if (is_special_relativistic_) {

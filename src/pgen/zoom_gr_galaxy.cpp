@@ -20,6 +20,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "cyclic_zoom/cyclic_zoom.hpp"
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -30,7 +31,6 @@
 #include "pgen/turb_init.hpp"
 #include "pgen/turb_mhd.hpp"
 #include "pgen/turb_seed.hpp"
-#include "cyclic_zoom/cyclic_zoom.hpp"
 
 #include "eos/ideal_c2p_hyd.hpp"
 #include "eos/ideal_c2p_mhd.hpp"
@@ -91,6 +91,7 @@ struct gal_pgen {
   bool potential = false;   // add potential term
   Real sigma2 = 0.0;        // potential term coefficient
   Real r_iso = 0.0;         // radius of isothermal core
+  Real cooling_rate_scale = 1.0;  // cooling multiplier; zero skips the source
   bool cooling = false;     // add ISM cooling
   Real mu_h = 0.6;          // mean molecular weight of hydrogen
   Real tau_cool = -1.0;     // cooling time in dynamical time
@@ -188,6 +189,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   gal.c_s_norm = sqrt(gal.gm * gal.temp_norm);
   gal.r_bondi = 2.0/SQR(gal.c_s_norm);
 
+  gal.cooling_rate_scale = pin->GetOrAddReal("problem", "cooling_rate_scale", 1.0);
+  if (gal.cooling_rate_scale < 0.0 || !std::isfinite(gal.cooling_rate_scale)) {
+    std::cout << "### FATAL ERROR: cooling_rate_scale must be finite and nonnegative"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  // Legacy inputs/restarts may disable only the source through cooling_apply.
+  if (pin->DoesParameterExist("problem", "cooling_apply") &&
+      !pin->GetBoolean("problem", "cooling_apply")) {
+    gal.cooling_rate_scale = 0.0;
+    pin->SetReal("problem", "cooling_rate_scale", 0.0);
+  }
   gal.cooling = pin->GetOrAddBoolean("problem", "cooling", false);
   gal.mu_h = pin->GetOrAddReal("problem", "mu_h", 1.0);
   gal.tau_cool = pin->GetOrAddReal("problem", "tau_cool", -1.0);
@@ -1545,10 +1558,12 @@ void AddUserSrcs(Mesh *pm, const Real bdt) {
                              pmbp->pmhd->peos->eos_data : pmbp->phydro->peos->eos_data;
   if (gal.potential) {
     //std::cout << "AddAccel" << std::endl;
+    zoom_diagnostics::BudgetScope budget(pm, "potential", -1);
     AddAccel(pm,bdt,u0,w0);
   }
   if (gal.cooling) {
     //std::cout << "AddISMCooling" << std::endl;
+    zoom_diagnostics::BudgetScope budget(pm, "cooling", -1);
     AddISMCooling(pm,bdt,u0,w0,eos_data);
   }
   return;
@@ -1618,6 +1633,8 @@ void AddAccel(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
 
 void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
                    const DvceArray5D<Real> &w0, const EOS_Data &eos_data) {
+  // Zero cooling must not trigger primitive recovery or floors in any fluid model.
+  if (gal.cooling_rate_scale == 0.0) return;
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pmbp->pmesh->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
@@ -1630,6 +1647,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real beta = bdt/pm->dt;
   Real cfl_no = pm->cfl_no;
   auto &eos = eos_data;
+  const Real cooling_scale = gal.cooling_rate_scale;
   Real tfloor = eos_data.tfloor;
   Real gamma = eos_data.gamma;
   Real gm1 = gamma - 1.0;
@@ -1643,11 +1661,8 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   Real &spin = pmbp->pcoord->coord_data.bh_spin;
 
   bool is_hydro = true;
-  DvceArray5D<Real> bcc;
   if (pmbp->pmhd != nullptr) {
     is_hydro = false;
-    // using bcc is ok here because b0 is not updated yet
-    bcc = pmbp->pmhd->bcc0;
   }
 
   int nsubcycle=0, nsubcycle_count=0;
@@ -1662,7 +1677,7 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
     Real dens = w0(m,IDN,k,j,i);
     Real temp = w0(m,IEN,k,j,i)/w0(m,IDN,k,j,i)*gm1;
     // compute cooling/heating terms
-    Real lambda_cooling = (temp<=tfloor) ? 0.0 : ISMCoolFn(temp*temp_unit)/cooling_unit;
+    Real lambda_cooling = (temp<=tfloor) ? 0.0 : cooling_scale*ISMCoolFn(temp*temp_unit)/cooling_unit;
     Real cooling_heating = dens * dens * lambda_cooling;
 
     bool sub_cycling = true;
@@ -1685,7 +1700,6 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
       HydPrim1D w;
       HydCons1D u;
       MHDCons1D u_m;
-      MHDPrim1D w_m;
       bool dfloor_used=false, efloor_used=false, c2p_failure=false;
       int iter_used=0;
       if (is_hydro) {
@@ -1731,71 +1745,63 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
         u_m.my = u0(m,IM2,k,j,i);
         u_m.mz = u0(m,IM3,k,j,i);
         u_m.e  = u0(m,IEN,k,j,i);
-        //TODO(@mhguo): are you sure bcc is updated?
-        u_m.bx = bcc(m,IBX,k,j,i);
-        u_m.by = bcc(m,IBY,k,j,i);
-        u_m.bz = bcc(m,IBZ,k,j,i);
-        MHDCons1D u_sr;
-        Real s2, b2, rpar;
-        TransformToSRMHD(u_m,glower,gupper,s2,b2,rpar,u_sr);
-
-        // calculate local eos parameters
-        EOS_Data eos_ = eos;
-        if (eos.rdfloor > 0.0) {
-          Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-          auto &z = x3v;
-          auto &a = spin;
-          Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
-          Real rdfloor_ = eos.rdfloor * pow(r/eos.rdfloor_rad, eos.rdfloor_pow);
-          // bound to [dfloor, rdfloor]
-          Real dfloor_ = fmax(fmin(rdfloor_, eos.rdfloor), eos.dfloor);
-          // apply radius-dependent density floor to u_sr.d if enabled
-          // not u.d so u_sr.e is computed from the original u.d self-consistently
-          // not w.d so the c2p algorithm is self-consistent
-          if (u_sr.d < dfloor_) {
-            rpar *= u_sr.d / dfloor_;  // keep rpar = (B.m)/D consistent with floored D
-            u_sr.d = dfloor_;
-            dfloor_used = true;
-          }
-          // assign local pressure floor
-          eos_.pfloor = fmax(eos.pfloor, dfloor_*eos.tfloor);
-        }
-
-        // call c2p function
-        // (inline function in ideal_c2p_mhd.hpp file)
-        SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
-                            dfloor_used, efloor_used, c2p_failure, iter_used);
+        // u0 contains the RK flux update; w0 is the stage state. Add the
+        // cooling increment without reinverting updated U against pre-CT B.
+        w.d = w0(m,IDN,k,j,i);
+        w.vx = w0(m,IVX,k,j,i);
+        w.vy = w0(m,IVY,k,j,i);
+        w.vz = w0(m,IVZ,k,j,i);
+        w.e = w0(m,IEN,k,j,i);
+        const Real eint_before = w.e;
         // add cooling/heating term using subcycling if necessary
-        // TODO(@mhguo): w.d is updated, not equal to dens, should think which one to use
+        // Retain stage density while limiting the cooled internal energy.
+        Real e_min = w.d * tfloor / gm1;
         do {
+          if (w.e <= e_min) {
+            w.e = e_min;
+            break;
+          }
           Real dt_cool = (w.e/(FLT_MIN + fabs(cooling_heating)));
           // half of the timestep
           Real bdt_cool = 0.5*beta*cfl_no*dt_cool;
+          if (!(bdt_cool > 0.0) || !Kokkos::isfinite(bdt_cool)) {
+            w.e = fmax(w.e, e_min);
+            break;
+          }
           if (bdt_now+bdt_cool<bdt) {
             w.e -= bdt_cool * cooling_heating;
+            w.e = fmax(w.e, e_min);
             temp = w.e/w.d*gm1;
-            lambda_cooling = (temp>tfloor) ? ISMCoolFn(temp*temp_unit)/cooling_unit : 0.0;
+            lambda_cooling = (temp>tfloor) ? cooling_scale*ISMCoolFn(temp*temp_unit)/cooling_unit : 0.0;
             cooling_heating = w.d * w.d * lambda_cooling;
             sub_cycling_used = true;
             sum1++;
           } else {
             w.e -= (bdt-bdt_now) * cooling_heating;
+            w.e = fmax(w.e, e_min);
             sub_cycling = false;
           }
           bdt_now += bdt_cool;
         } while (sub_cycling);
-        // load single state of primitive variables
-        w_m.d  = w.d;
-        w_m.vx = w.vx;
-        w_m.vy = w.vy;
-        w_m.vz = w.vz;
-        w_m.e  = w.e;
-        // load cell-centered fields into primitive state
-        w_m.bx = u_m.bx;
-        w_m.by = u_m.by;
-        w_m.bz = u_m.bz;
-        // call p2c function
-        SingleP2C_IdealGRMHD(glower, gupper, w_m, gamma, u);
+        // Exact gas-only P2C(w,e+de)-P2C(w,e) at fixed rho, velocity and B.
+        // Adding this increment preserves the RK flux update and rest mass;
+        // analytic differences avoid subtracting large magnetic energies.
+        Real q = glower[1][1]*SQR(w.vx)+glower[2][2]*SQR(w.vy)
+               + glower[3][3]*SQR(w.vz)+2.0*(glower[1][2]*w.vx*w.vy
+               + glower[1][3]*w.vx*w.vz+glower[2][3]*w.vy*w.vz);
+        Real alpha = sqrt(-1.0/gupper[0][0]);
+        Real lor = sqrt(1.0+q);
+        Real vcon[4] = {lor/alpha, w.vx-alpha*lor*gupper[0][1],
+                       w.vy-alpha*lor*gupper[0][2], w.vz-alpha*lor*gupper[0][3]};
+        Real vcov[4] = {};
+        for (int mu=0; mu<4; ++mu)
+          for (int nu=0; nu<4; ++nu) vcov[mu] += glower[mu][nu]*vcon[nu];
+        Real de = w.e-eint_before;
+        u.d = u_m.d;
+        u.mx = u_m.mx + gamma*de*vcon[0]*vcov[1];
+        u.my = u_m.my + gamma*de*vcon[0]*vcov[2];
+        u.mz = u_m.mz + gamma*de*vcon[0]*vcov[3];
+        u.e = u_m.e + de*(gamma*vcon[0]*vcov[0]+gm1);
       }
       u0(m,IDN,k,j,i) = u.d;
       u0(m,IM1,k,j,i) = u.mx;
@@ -1815,8 +1821,8 @@ void AddISMCooling(Mesh *pm, const Real bdt, DvceArray5D<Real> &u0,
   MPI_Allreduce(MPI_IN_PLACE, pnsubcycle, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE, pnsubcycle_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 #endif
-  if (global_variable::my_rank == 0) {
-    if (gal.ndiag>0 && pm->ncycle % gal.ndiag == 0) {
+  if (gal.ndiag>0 && pm->ncycle % gal.ndiag == 0) {
+    if (global_variable::my_rank == 0) {
       if (nsubcycle>0 || nsubcycle_count >0) {
         std::cout << " nsubcycle_cell=" << nsubcycle << std::endl
                   << " nsubcycle_count=" << nsubcycle_count << std::endl;

@@ -11,6 +11,7 @@
 
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
+#include "cyclic_zoom/cyclic_zoom.hpp"
 #include "driver/driver.hpp"
 #include "eos/eos.hpp"
 #include "mhd.hpp"
@@ -33,6 +34,7 @@ TaskStatus MHD::RKUpdate(Driver *pdriver, int stage) {
   Real &gam0 = pdriver->gam0[stage-1];
   Real &gam1 = pdriver->gam1[stage-1];
   Real beta_dt = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
+  zoom_diagnostics::BudgetScope budget(pmy_pack->pmesh, "rk_flux", stage, gam0, gam1);
   int nmb1 = pmy_pack->nmb_thispack - 1;
   int nv1 = nmhd + nscalars - 1;
   auto u0_ = u0;

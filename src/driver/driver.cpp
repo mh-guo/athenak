@@ -28,6 +28,7 @@
 #include "driver.hpp"
 #include "gravity/gravity.hpp"
 #include "utils/utils.hpp"
+#include "cyclic_zoom/cyclic_zoom.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -568,6 +569,9 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
             {pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);}
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
+        if (pmesh->pzoom != nullptr && pmesh->pzoom->InterfaceDiagnostics(stage)) {
+          nlim = pmesh->ncycle + 1;  // detection only; do not retune the state
+        }
       }
 
       // Work after time integrator indicated by "1" in stage
@@ -786,6 +790,9 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
   mhd::MHD *pmhd = pm->pmb_pack->pmhd;
   dyngr::DynGRMHD *pdyngr = pm->pmb_pack->pdyngr;
   if (pmhd != nullptr) {
+    if (pmhd->uses_cyclic_zoom) {
+      (void) pmhd->ApplyZoomMask(this, 0);
+    }
     (void) pmhd->RestrictU(this, 0);
     (void) pmhd->RestrictB(this, 0);
     (void) pmhd->InitRecv(this, -1);  // stage < 0 suppresses InitFluxRecv

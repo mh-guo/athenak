@@ -80,6 +80,11 @@ trun_fac_16 = 10.0          # interval factor for zone 16
 trun_fac_17 = 10.0          # interval factor for zone 17
 
 <cyclic_zoom>
+# restart_next_time = -1     # one-shot absolute restart deadline; -1 keeps saved time
+# Optional diagnostics; disabled by default, sampled in zones >= 4.
+# debug_interval = 100         # exterior-shell diagnostics; 0 disables (default)
+# debug_stop_temp = 1.0e6      # optional code-unit T threshold; <=0 disables
+# Diagnostics detect invalid states/thresholds and stop after the current cycle.
 verbose   = true           # enable verbose output
 max_nzmb_per_dvce = 256    # max allowed number of Zoom MBs per device (memory limit for AMR)
 max_nzmb_per_host = 256    # max allowed number of Zoom MBs per host (memory limit for AMR)
@@ -136,6 +141,7 @@ potential  = true        # enable potential
 sigma2     = 4.5e-6      # potential sigma^2, g = sigma^2/r
 r_iso      = 2.2222222e5 # radius of isothermal core, r_iso = GM/sigma^2
 cooling    = true        # add ism cooling
+# cooling_rate_scale = 1.0          # 0 skips cooling for both hydro and MHD
 mu_h        = 1.4        # mean molecular weight of hydrogen nuclei
 tau_cool   = 100.0        # cooling time in dynamical time
 r_entropy  = 3.0e6       # radius of entropy core

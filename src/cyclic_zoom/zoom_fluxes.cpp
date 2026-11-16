@@ -22,23 +22,49 @@
 void CyclicZoom::UpdateFluxes(Driver *pdriver) {
   // call MHD functions to update electric fields in all MeshBlocks
   mhd::MHD *pmhd = pmesh->pmb_pack->pmhd;
+  int incomplete[4]={0,0,0,0};
+  auto receive = [&](auto fn, int slot) {
+    TaskStatus status = (pmhd->*fn)(pdriver, 1);
+    if (status == TaskStatus::incomplete) incomplete[slot]=1;
+    // Each receive unpacks only after every message has arrived. ClearRecv alone
+    // only waits for MPI and cannot replace the successful receive/unpack call.
+    while (status == TaskStatus::incomplete) {
+      status = (pmhd->*fn)(pdriver, 1);
+    }
+    if (status == TaskStatus::fail) {
+      std::cout << "### FATAL ERROR: cyclic zoom flux receive failed" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  };
   (void) pmhd->InitRecv(pdriver, 1);  // stage = 1
   (void) pmhd->CopyCons(pdriver, 1);  // stage = 1: copy u0 to u1
   (void) pmhd->Fluxes(pdriver, 1);
   // (void) pmhd->RestrictU(this, 0);
   // TODO(@mhguo): may only send/recv electric fields if possible
   (void) pmhd->SendFlux(pdriver, 1);  // stage = 1
-  (void) pmhd->RecvFlux(pdriver, 1);  // stage = 1
+  receive(&mhd::MHD::RecvFlux, 0);  // stage = 1
   (void) pmhd->SendU(pdriver, 1);
-  (void) pmhd->RecvU(pdriver, 1);
+  receive(&mhd::MHD::RecvU, 1);
   (void) pmhd->CornerE(pdriver, 1);
   (void) pmhd->EField(pdriver, 1);
   (void) pmhd->SendE(pdriver, 1);
-  (void) pmhd->RecvE(pdriver, 1);
+  receive(&mhd::MHD::RecvE, 2);
   (void) pmhd->SendB(pdriver, 1);
-  (void) pmhd->RecvB(pdriver, 1);
+  receive(&mhd::MHD::RecvB, 3);
   (void) pmhd->ClearSend(pdriver, 1); // stage = 1
   (void) pmhd->ClearRecv(pdriver, 1); // stage = 1
+  if (debug_interval > 0) {
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, incomplete, 4, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    if (global_variable::my_rank == 0) {
+      std::cout << "DBG_ZOOM_RECV cycle=" << pmesh->ncycle << " zone=" << zstate.zone
+                << " initially_incomplete_F=" << incomplete[0]
+                << " initially_incomplete_U=" << incomplete[1]
+                << " initially_incomplete_E=" << incomplete[2]
+                << " initially_incomplete_B=" << incomplete[3] << std::endl;
+    }
+  }
   if (verbose && global_variable::my_rank == 0) {
     std::cout << "CyclicZoom: Calculated electric fields after AMR" << std::endl;
   }

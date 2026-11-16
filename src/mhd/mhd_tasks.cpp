@@ -16,6 +16,7 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "mesh/mesh.hpp"
+#include "cyclic_zoom/cyclic_zoom.hpp"
 #include "coordinates/coordinates.hpp"
 #include "eos/eos.hpp"
 #include "diffusion/viscosity.hpp"
@@ -51,14 +52,17 @@ void MHD::AssembleMHDTasks(std::map<std::string, std::shared_ptr<TaskList>> tl) 
   id.recvf     = tl["stagen"]->AddTask(&MHD::RecvFlux, this, id.sendf);
   id.rkupdt    = tl["stagen"]->AddTask(&MHD::RKUpdate, this, id.recvf);
   id.srctrms   = tl["stagen"]->AddTask(&MHD::MHDSrcTerms, this, id.rkupdt);
-  id.sendu_oa  = tl["stagen"]->AddTask(&MHD::SendU_OA, this, id.srctrms);
-  id.recvu_oa  = tl["stagen"]->AddTask(&MHD::RecvU_OA, this, id.sendu_oa);
-  id.restu     = tl["stagen"]->AddTask(&MHD::RestrictU, this, id.recvu_oa);
-  id.sendu     = tl["stagen"]->AddTask(&MHD::SendU, this, id.restu);
-  id.recvu     = tl["stagen"]->AddTask(&MHD::RecvU, this, id.sendu);
-  id.sendu_shr = tl["stagen"]->AddTask(&MHD::SendU_Shr, this, id.recvu);
-  id.recvu_shr = tl["stagen"]->AddTask(&MHD::RecvU_Shr, this, id.sendu_shr);
-  id.efld      = tl["stagen"]->AddTask(&MHD::EField, this, id.recvu_shr);
+  if (!uses_cyclic_zoom) {
+    id.sendu_oa  = tl["stagen"]->AddTask(&MHD::SendU_OA, this, id.srctrms);
+    id.recvu_oa  = tl["stagen"]->AddTask(&MHD::RecvU_OA, this, id.sendu_oa);
+    id.restu     = tl["stagen"]->AddTask(&MHD::RestrictU, this, id.recvu_oa);
+    id.sendu     = tl["stagen"]->AddTask(&MHD::SendU, this, id.restu);
+    id.recvu     = tl["stagen"]->AddTask(&MHD::RecvU, this, id.sendu);
+    id.sendu_shr = tl["stagen"]->AddTask(&MHD::SendU_Shr, this, id.recvu);
+    id.recvu_shr = tl["stagen"]->AddTask(&MHD::RecvU_Shr, this, id.sendu_shr);
+  }
+  id.efld      = tl["stagen"]->AddTask(&MHD::EField, this,
+      uses_cyclic_zoom ? id.srctrms : id.recvu_shr);
   id.sende     = tl["stagen"]->AddTask(&MHD::SendE, this, id.efld);
   id.recve     = tl["stagen"]->AddTask(&MHD::RecvE, this, id.sende);
   id.ct        = tl["stagen"]->AddTask(&MHD::CT, this, id.recve);
@@ -69,7 +73,20 @@ void MHD::AssembleMHDTasks(std::map<std::string, std::shared_ptr<TaskList>> tl) 
   id.recvb     = tl["stagen"]->AddTask(&MHD::RecvB, this, id.sendb);
   id.sendb_shr = tl["stagen"]->AddTask(&MHD::SendB_Shr, this, id.recvb);
   id.recvb_shr = tl["stagen"]->AddTask(&MHD::RecvB_Shr, this, id.sendb_shr);
-  id.prol      = tl["stagen"]->AddTask(&MHD::Prolongate, this, id.recvb_shr);
+  // Mask reconstructs U from frozen primitives and the newly evolved B. Complete
+  // B communication first, apply the mask, then transmit the final owner U.
+  if (uses_cyclic_zoom) {
+    id.zoommask = tl["stagen"]->AddTask(&MHD::ApplyZoomMask, this, id.recvb_shr);
+    id.sendu_oa  = tl["stagen"]->AddTask(&MHD::SendU_OA, this, id.zoommask);
+    id.recvu_oa  = tl["stagen"]->AddTask(&MHD::RecvU_OA, this, id.sendu_oa);
+    id.restu     = tl["stagen"]->AddTask(&MHD::RestrictU, this, id.recvu_oa);
+    id.sendu     = tl["stagen"]->AddTask(&MHD::SendU, this, id.restu);
+    id.recvu     = tl["stagen"]->AddTask(&MHD::RecvU, this, id.sendu);
+    id.sendu_shr = tl["stagen"]->AddTask(&MHD::SendU_Shr, this, id.recvu);
+    id.recvu_shr = tl["stagen"]->AddTask(&MHD::RecvU_Shr, this, id.sendu_shr);
+  }
+  id.prol      = tl["stagen"]->AddTask(&MHD::Prolongate, this,
+      uses_cyclic_zoom ? id.recvu_shr : id.recvb_shr);
   id.bcs       = tl["stagen"]->AddTask(&MHD::ApplyPhysicalBCs, this, id.prol);
   id.c2p       = tl["stagen"]->AddTask(&MHD::ConToPrim, this, id.bcs);
   id.newdt     = tl["stagen"]->AddTask(&MHD::NewTimeStep, this, id.c2p);
@@ -79,6 +96,12 @@ void MHD::AssembleMHDTasks(std::map<std::string, std::shared_ptr<TaskList>> tl) 
   // although RecvFlux/U/E/B functions check that all recvs complete, add ClearRecv to
   // task list anyways to catch potential bugs in MPI communication logic
   id.crecv = tl["after_stagen"]->AddTask(&MHD::ClearRecv, this, id.csend);
+
+  if (uses_cyclic_zoom && has_any_sts_diffusion) {
+    std::cout << "### FATAL ERROR: cyclic-zoom MHD is not supported with STS diffusion"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   if (has_any_sts_diffusion) {
     tl["before_parabolic_stagen"]->AddTask(&MHD::InitRecvParabolic, this, none);
@@ -305,6 +328,7 @@ TaskStatus MHD::RecvFlux(Driver *pdrive, int stage) {
 //! variables (u0) have already been partially updated when this fn called.
 
 TaskStatus MHD::MHDSrcTerms(Driver *pdrive, int stage) {
+  zoom_diagnostics::BudgetScope budget(pmy_pack->pmesh, "all_sources", stage);
   Real beta_dt = (pdrive->beta[stage-1])*(pmy_pack->pmesh->dt);
 
   // Add physics source terms (must be computed from primitives)
@@ -553,7 +577,15 @@ TaskStatus MHD::RecvB_Shr(Driver *pdrive, int stage) {
 //! \fn TaskStatus MHD::ApplyPhysicalBCs
 //! \brief Wrapper task list function to call functions that set physical and user BCs
 
+TaskStatus MHD::ApplyZoomMask(Driver *pdrive, int stage) {
+  if (pmy_pack->pmesh->pzoom != nullptr) {
+    pmy_pack->pmesh->pzoom->ApplyMask();
+  }
+  return TaskStatus::complete;
+}
+
 TaskStatus MHD::ApplyPhysicalBCs(Driver *pdrive, int stage) {
+  zoom_diagnostics::BudgetScope budget(pmy_pack->pmesh, "boundary", stage);
   // do not apply BCs if domain is strictly periodic
   if (pmy_pack->pmesh->strictly_periodic) return TaskStatus::complete;
 
@@ -562,11 +594,6 @@ TaskStatus MHD::ApplyPhysicalBCs(Driver *pdrive, int stage) {
   //         boundary read valid data.
   pbval_u->HydroBCs((pmy_pack), (pbval_u->u_in), u0);
   pbval_b->BFieldBCs((pmy_pack), (pbval_b->b_in), b0);
-
-  // TODO(@mhguo): this is temporary, need to move to a general mask function later
-  if (pmy_pack->pmesh->pzoom != nullptr) {
-    pmy_pack->pmesh->pzoom->ApplyMask();
-  }
 
   // user BCs
   if (pmy_pack->pmesh->pgen->user_bcs) {
@@ -582,6 +609,7 @@ TaskStatus MHD::ApplyPhysicalBCs(Driver *pdrive, int stage) {
 //! at fine/coarse bundaries with SMR/AMR
 
 TaskStatus MHD::Prolongate(Driver *pdrive, int stage) {
+  zoom_diagnostics::BudgetScope budget(pmy_pack->pmesh, "prolongation", stage);
   if (pmy_pack->pmesh->multilevel) {  // only prolongate with SMR/AMR
     pbval_u->FillCoarseInBndryCC(u0, coarse_u0);
     pbval_b->FillCoarseInBndryFC(b0, coarse_b0);
@@ -612,6 +640,7 @@ TaskStatus MHD::Prolongate(Driver *pdrive, int stage) {
 //! \brief Wrapper task list function to call ConsToPrim over entire mesh (including gz)
 
 TaskStatus MHD::ConToPrim(Driver *pdrive, int stage) {
+  zoom_diagnostics::BudgetScope budget(pmy_pack->pmesh, "c2p", stage);
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &ng = indcs.ng;
   int n1m1 = indcs.nx1 + 2*ng - 1;

@@ -72,6 +72,7 @@ struct MHDTaskIDs {
   TaskID recvb;
   TaskID sendb_shr;
   TaskID recvb_shr;
+  TaskID zoommask;
   TaskID bcs;
   TaskID prol;
   TaskID c2p;
@@ -148,6 +149,7 @@ class MHD {
   DvceArray5D<Real> bl3d, br3d;
   Real dtnew;
   bool gr_dt = false;         // flag for accurate GR timestep calculation
+  Real gr_cfl = 1.0;  // dt-only wave-speed safety factor (0,1]
 
   // following used for time derivatives in computation of jcon
   bool wbcc_saved = false;
@@ -157,6 +159,7 @@ class MHD {
   // following used for FOFC algorithm
   DvceArray4D<bool> fofc;  // flag for each cell to indicate if FOFC is needed
   DvceArray5D<bool> fofc_scal;  // flag to indicate if FOFC for scalar is needed
+  bool uses_cyclic_zoom = false;  // inferred from adaptive refinement criteria
   bool use_fofc = false;   // flag to enable FOFC
 
   bool has_explicit_viscosity = false;
@@ -206,6 +209,7 @@ class MHD {
   TaskStatus RecvB(Driver *d, int stage);
   TaskStatus SendB_Shr(Driver *d, int stage);
   TaskStatus RecvB_Shr(Driver *d, int stage);
+  TaskStatus ApplyZoomMask(Driver *d, int stage);
   TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage);
   TaskStatus Prolongate(Driver* pdrive, int stage);
   TaskStatus ConToPrim(Driver *d, int stage);

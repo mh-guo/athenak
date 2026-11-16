@@ -15,6 +15,26 @@
 #include "coordinates/cell_locations.hpp"
 #include "cyclic_zoom/cyclic_zoom.hpp"
 
+namespace {
+bool IntersectsRefinementRegion(
+    Real x1min, Real x1max, Real x2min, Real x2max, Real x3min, Real x3max,
+    Real x1c, Real x2c, Real x3c, Real radius, cyclic_zoom::RefinementShape shape) {
+  if (shape == cyclic_zoom::RefinementShape::box) {
+    // Strict overlap excludes a block that only touches the refinement boundary.
+    return x1min < x1c + radius && x1max > x1c - radius
+        && x2min < x2c + radius && x2max > x2c - radius
+        && x3min < x3c + radius && x3max > x3c - radius;
+  }
+  // Keep the original closest-point arithmetic and strict spherical boundary.
+  const Real closest_x1 = std::max(x1min, std::min(x1c, x1max));
+  const Real closest_x2 = std::max(x2min, std::min(x2c, x2max));
+  const Real closest_x3 = std::max(x3min, std::min(x3c, x3max));
+  const Real d1 = x1c - closest_x1, d2 = x2c - closest_x2;
+  const Real d3 = x3c - closest_x3;
+  return d1*d1 + d2*d2 + d3*d3 < radius*radius;
+}
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 //! \fn void CyclicZoom::CheckRefinement()
 //! \brief Main function for CyclicZoom adaptive mesh refinement criteria
@@ -150,13 +170,9 @@ void CyclicZoom::SetRefinementFlags() {
         x3max = LeftEdgeX(plx3+1, nmbx3, ms.x3min, ms.x3max);
       }
       // levels_thisrank.h_view(m) = pmesh->lloc_eachmb[m+mbs].level;
-      // Find the closest point on the box to the sphere center
-      Real closest_x1 = fmax(x1min, fmin(x1c, x1max));
-      Real closest_x2 = fmax(x2min, fmin(x2c, x2max));
-      Real closest_x3 = fmax(x3min, fmin(x3c, x3max));
-      // Calculate the distance from sphere center to this closest point
-      Real r_sq = SQR(x1c - closest_x1) + SQR(x2c - closest_x2) + SQR(x3c - closest_x3);
-      if (r_sq < SQR(r_ref)) {
+      if (IntersectsRefinementRegion(
+              x1min, x1max, x2min, x2max, x3min, x3max,
+              x1c, x2c, x3c, r_ref, zamr.ref_shape)) {
         refine_flag.h_view(m+mbs) = ref_flag;
       }
     }

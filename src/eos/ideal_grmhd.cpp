@@ -7,6 +7,11 @@
 //! \brief derived class that implements ideal gas EOS in general relativistic mhd
 
 #include <float.h>
+#include <cstdlib>
+#include <iomanip>
+#include <sstream>
+#include "globals.hpp"
+#include "mesh/mesh.hpp"
 
 #include "athena.hpp"
 #include "mhd/mhd.hpp"
@@ -62,6 +67,23 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
   const int nkji = (ku - kl + 1)*nji;
   const int nmkji = nmb*nkji;
 
+  // Passive sampled diagnostics. Exclusive flag combinations avoid double counting.
+  static const int audit_interval = []() {
+    const char *s = std::getenv("ATHENA_C2P_DIAG");
+    return s ? std::atoi(s) : 0;
+  }();
+  const int audit_cycle = pmy_pack->pmesh->ncycle;
+  const bool audit = !only_testfloors && audit_interval > 0 &&
+                     audit_cycle % audit_interval == 0;
+  const Real audit_dt = pmy_pack->pmesh->dt;
+  const Real audit_time = pmy_pack->pmesh->time;
+  const char *radius_env = std::getenv("ATHENA_C2P_RADIUS");
+  const Real audit_radius = radius_env ? std::atof(radius_env) : 32768.;
+  DvceArray3D<Real> audit_sums;
+  if (audit) {
+    audit_sums = DvceArray3D<Real>("c2p_audit_sums",4,32,4);
+    Kokkos::deep_copy(audit_sums,0.);
+  }
   int nfloord_=0, nfloore_=0, nceilv_=0, nfail_=0, maxit_=0;
   Kokkos::parallel_reduce("grmhd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, int &sumd, int &sume, int &sumv, int &sumf, int &max_it) {
@@ -224,6 +246,21 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
 
         HydCons1D u_out;
         SingleP2C_IdealGRMHD(glower, gupper, w_in, eos.gamma, u_out);
+        if (audit && i>=indcs.is && i<=indcs.ie && j>=indcs.js &&
+            j<=indcs.je && k>=indcs.ks && k<=indcs.ke) {
+          Real rr = (SQR(x1v)+SQR(x2v)+SQR(x3v))/SQR(audit_radius);
+          if (rr<256.) {
+            int bin = rr<0.16 ? 0 : rr<1. ? 1 : rr<4. ? 2 : 3;
+            int flags = (dfloor_used?1:0) | (efloor_used?2:0) |
+                        (vceiling_used?4:0) | (c2p_failure?8:0) | (excised?16:0);
+            Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+            Real de = (u.e-u_out.e)*vol;  // GR energy excluding rest mass = -U_IEN
+            Kokkos::atomic_add(&audit_sums(bin,flags,0),1.);
+            Kokkos::atomic_add(&audit_sums(bin,flags,1),(u_out.d-u.d)*vol);
+            Kokkos::atomic_add(&audit_sums(bin,flags,2),de);
+            Kokkos::atomic_add(&audit_sums(bin,flags,3),fabs(de));
+          }
+        }
         cons(m,IDN,k,j,i) = u_out.d;
         cons(m,IM1,k,j,i) = u_out.mx;
         cons(m,IM2,k,j,i) = u_out.my;
@@ -239,6 +276,22 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
     }
   }, Kokkos::Sum<int>(nfloord_), Kokkos::Sum<int>(nfloore_), Kokkos::Sum<int>(nceilv_),
      Kokkos::Sum<int>(nfail_), Kokkos::Max<int>(maxit_));
+
+  if (audit) {
+    auto hs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),audit_sums);
+    std::ostringstream out;
+    out << std::scientific << std::setprecision(17);
+    for (int bin=0;bin<4;++bin) for (int f=1;f<32;++f) {
+      if (hs(bin,f,0)==0.) continue;
+      out << "DBG_C2P cycle=" << audit_cycle << " time=" << audit_time
+          << " dt=" << audit_dt << " rank=" << global_variable::my_rank
+          << " bounds=" << il << "," << iu << "," << jl << "," << ju
+          << "," << kl << "," << ku << " bin=" << bin << " flags=" << f
+          << " count=" << hs(bin,f,0) << " deltaD=" << hs(bin,f,1)
+          << " deltaE=" << hs(bin,f,2) << " absdeltaE=" << hs(bin,f,3) << "\n";
+    }
+    std::cout << out.str() << std::flush;
+  }
 
   // store appropriate counters
   if (only_testfloors) {

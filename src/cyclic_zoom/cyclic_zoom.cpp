@@ -7,6 +7,7 @@
 //! \brief Implementation of constructor and functions in CyclicZoom class
 
 #include <iostream>
+#include <cmath>
 #include <string>
 
 #include "athena.hpp"
@@ -60,6 +61,17 @@ CyclicZoom::CyclicZoom(Mesh *pm, ParameterInput *pin) :
   }
 
   // Set basic parameters
+  restart_next_time_ = pin->GetOrAddReal("cyclic_zoom", "restart_next_time", -1.0);
+  if (!std::isfinite(restart_next_time_) ||
+      (restart_next_time_ < 0.0 && restart_next_time_ != -1.0)) {
+    std::cerr << "### FATAL ERROR: restart_next_time must be -1 or finite and >= 0"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  // Consume the request so subsequent checkpoints retain only the updated ZoomState.
+  pin->SetReal("cyclic_zoom", "restart_next_time", -1.0);
+  debug_interval = pin->GetOrAddInteger("cyclic_zoom", "debug_interval", 0);
+  debug_stop_temp = pin->GetOrAddReal("cyclic_zoom", "debug_stop_temp", 0.0);
   verbose = pin->GetOrAddBoolean("cyclic_zoom","verbose",false);
   read_rst = pin->GetOrAddBoolean("cyclic_zoom","read_rst",true);
   write_rst = pin->GetOrAddBoolean("cyclic_zoom","write_rst",true);
@@ -69,6 +81,18 @@ CyclicZoom::CyclicZoom(Mesh *pm, ParameterInput *pin) :
   zstate.zone = pin->GetOrAddInteger(block_name,"zone",0);
   zstate.last_zone = zstate.zone;
   zstate.direction = pin->GetOrAddInteger(block_name,"direction",1);
+
+  // Refinement geometry is independent of spherical mask/storage regions.
+  const std::string ref_shape = pin->GetOrAddString(block_name,"ref_shape","sphere");
+  if (ref_shape == "sphere") {
+    zamr.ref_shape = cyclic_zoom::RefinementShape::sphere;
+  } else if (ref_shape == "box") {
+    zamr.ref_shape = cyclic_zoom::RefinementShape::box;
+  } else {
+    std::cout << "### FATAL ERROR: cyclic zoom ref_shape must be sphere or box"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // Set zoom AMR parameters
   zamr.nlevels = pin->GetOrAddInteger(block_name,"nlevels",2);
@@ -146,6 +170,10 @@ void CyclicZoom::Initialize(ParameterInput *pin) {
 //! \brief Update CyclicZoom runtime parameters after reading restart file
 
 void CyclicZoom::UpdateAMRFromRestart() {
+  if (restart_next_time_ >= 0.0) {
+    zstate.next_time = restart_next_time_;
+    restart_next_time_ = -1.0;
+  }
   zamr.level = pmesh->max_level - zstate.zone;
   zamr.refine_flag = -zstate.direction;
   SetRegionAndInterval();
@@ -178,6 +206,9 @@ void CyclicZoom::PrintCyclicZoomDiagnostics() {
     std::cout << "Funcs: add_emf = " << zemf.add_emf << std::endl;
     std::cout << "Efield: emf_fmax = " << zemf.emf_fmax << " emf_zmax = " << zemf.emf_zmax
               << std::endl;
+    std::cout << "Refinement: ref_shape = "
+              << (zamr.ref_shape == cyclic_zoom::RefinementShape::box ? "box" : "sphere")
+              << " (mask/storage remain spherical)" << std::endl;
     // print region parameters
     std::cout << "Region: x1c = " << zregion.x1c << " x2c = " << zregion.x2c
               << " x3c = " << zregion.x3c << " r_0 = " << zregion.r_0
