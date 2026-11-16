@@ -315,6 +315,11 @@ Hydro::Hydro(MeshBlockPack *ppack, ParameterInput *pin) :
       int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
       int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
       Kokkos::realloc(u1,       nmb, (nhydro+nscalars), ncells3, ncells2, ncells1);
+      if (use_fofc) {
+        Kokkos::realloc(fofc, nmb, ncells3, ncells2, ncells1);
+        Kokkos::realloc(utest, nmb, (nhydro+nscalars), ncells3, ncells2, ncells1);
+        Kokkos::deep_copy(fofc, false);
+      }
       if (has_any_sts_diffusion) {
         Kokkos::realloc(u_sts0,    nmb, (nhydro+nscalars), ncells3, ncells2, ncells1);
         Kokkos::realloc(u_sts1,    nmb, (nhydro+nscalars), ncells3, ncells2, ncells1);

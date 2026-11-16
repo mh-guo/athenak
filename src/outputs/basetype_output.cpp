@@ -184,17 +184,19 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << std::endl << "Input file is likely missing a <mhd> block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if ((ivar==161) && (pm->pmb_pack->prad == nullptr ||
+  if ((out_params.variable == "rad_fluid_sigma" ||
+       out_params.variable == "rad_fluid_opacity") && (pm->pmb_pack->prad == nullptr ||
        (pm->pmb_pack->phydro == nullptr && pm->pmb_pack->pmhd == nullptr))) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-       << "Output of rad_fluid_sigma requested in <output> block '"
+       << "Output of radiation opacity requested in <output> block '"
        << out_params.block_name << "' but Radiation and a Fluid object are required."
        << std::endl;
     exit(EXIT_FAILURE);
   }
-  if ((ivar==161) && !(pm->pmb_pack->prad->rad_source)) {
+  if ((out_params.variable == "rad_fluid_sigma" ||
+       out_params.variable == "rad_fluid_opacity") && !(pm->pmb_pack->prad->rad_source)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-       << "Output of rad_fluid_sigma requires <radiation>/rad_source=true (opacity data)."
+       << "Output of radiation opacity requires <radiation>/rad_source=true (opacity data)."
        << std::endl;
     exit(EXIT_FAILURE);
   }
@@ -637,7 +639,9 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars.emplace_back("efcc3",i_derived,&(derived_var));
     }
 
-    // radiation-fluid sigma_a,s,p (same kernel as RadFluidCoupling; uses current w0/bcc0)
+    // Opacity diagnostics: sigma_a is Rosseland absorption and sigma_s is scattering.
+    // sigma_p is full Planck absorption in table mode; in analytic mode it is
+    // Planck-minus-Rosseland absorption. All fields include opacity corrections.
     if (variable.compare("rad_fluid_sigma") == 0) {
       out_params.contains_derived = true;
       out_params.n_derived += 3;
@@ -645,6 +649,16 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars.emplace_back("sigma_a",i0,&(derived_var));
       outvars.emplace_back("sigma_s",i0+1,&(derived_var));
       outvars.emplace_back("sigma_p",i0+2,&(derived_var));
+    }
+
+    // Source coefficients with the same meaning for all opacity models.
+    if (variable == "rad_fluid_opacity") {
+      out_params.contains_derived = true;
+      out_params.n_derived += 3;
+      int i0 = out_params.n_derived - 3;
+      outvars.emplace_back("sigma_transport",i0,&(derived_var));
+      outvars.emplace_back("sigma_abs_planck",i0+1,&(derived_var));
+      outvars.emplace_back("sigma_scattering",i0+2,&(derived_var));
     }
 
     // Hydro SGS tensor

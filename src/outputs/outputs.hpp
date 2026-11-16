@@ -21,7 +21,7 @@
 //     #error NHISTORY > NREDUCTION in outputs.hpp
 // #endif
 
-#define NOUTPUT_CHOICES 163
+#define NOUTPUT_CHOICES 164
 // choices for output variables used in <ouput> blocks in input file
 // TO ADD MORE CHOICES:
 //   - add more strings to array below, change NOUTPUT_CHOICES above appropriately
@@ -109,8 +109,10 @@ static const char *var_choice[NOUTPUT_CHOICES] = {
   // MHD cell-centered E-fields averaged from edge-centered efld (158-161)
   "mhd_efcc1", "mhd_efcc2", "mhd_efcc3", "mhd_efcc",
 
-  // Radiation fluid opacities sigma_a,s,p (derived; 162)
-  "rad_fluid_sigma"
+  // Opacity diagnostics: Rosseland absorption, scattering, model-dependent sigma_p (162)
+  "rad_fluid_sigma",
+  // Source coefficients: total Rosseland, full Planck absorption, scattering (163)
+  "rad_fluid_opacity"
 };
 
 

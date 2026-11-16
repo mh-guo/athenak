@@ -1159,8 +1159,9 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     });
   }
 
-  // radiation-fluid opacities (sigma_a,s,p); uses current w0 / bcc0 (see rad_fluid_sigma)
-  if (name.compare("rad_fluid_sigma") == 0) {
+  // Evaluate opacity diagnostics and source coefficients from current w0 / bcc0.
+  if (name == "rad_fluid_sigma" || name == "rad_fluid_opacity") {
+    const bool physical_opacity = (name == "rad_fluid_opacity");
     Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &coord = pm->pmb_pack->pcoord->coord_data;
@@ -1251,7 +1252,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       }
 
       Real sigma_a = 0.0, sigma_s = 0.0, sigma_p = 0.0;
-      radiation::RadiationFluidCellSigmas(
+      const auto opacity = radiation::RadiationFluidCellSigmas(
           wdn, wvx, wvy, wvz, wen, gm1, glower, gupper,
           excision_flux_, m, k, j, i,
           size.d_view(m).dx1, size.d_view(m).dx2, size.d_view(m).dx3,
@@ -1267,15 +1268,16 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
           kappa_a_, kappa_p_,
           sigma_a, sigma_s, sigma_p);
 
-      dv(m,i0,k,j,i) = sigma_a;
-      dv(m,i0+1,k,j,i) = sigma_s;
-      dv(m,i0+2,k,j,i) = sigma_p;
+      dv(m,i0,k,j,i) = physical_opacity ? opacity.transport : sigma_a;
+      dv(m,i0+1,k,j,i) = physical_opacity ? opacity.absorption_planck : sigma_s;
+      dv(m,i0+2,k,j,i) = physical_opacity ? opacity.scattering : sigma_p;
     });
     i_dv += 3;
   }
 
   // radiation moments
-  if (name.compare(0, 3, "rad") == 0 && name.compare("rad_fluid_sigma") != 0) {
+  if (name.compare(0, 3, "rad") == 0 && name.compare("rad_fluid_sigma") != 0
+      && name.compare("rad_fluid_opacity") != 0) {
     // Determine if coordinate and/or fluid frame moments required
     bool needs_coord_only = (name.compare("rad_coord") == 0);
     bool needs_fluid_only = (name.compare("rad_fluid") == 0);

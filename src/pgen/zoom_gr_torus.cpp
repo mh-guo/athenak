@@ -21,6 +21,7 @@
 #include <mpi.h>
 #endif
 
+#include <cmath>      // isfinite
 #include <algorithm>  // max(), max_element(), min(), min_element()
 #include <iomanip>
 #include <iostream>   // endl
@@ -44,6 +45,8 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_opacities.hpp"
+#include "units/units.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "cyclic_zoom/cyclic_zoom.hpp"
 #include "pgen/turb_seed.hpp"
@@ -106,7 +109,8 @@ Real A3(struct torus_pgen pgen, Real x1, Real x2, Real x3);
 struct torus_pgen {
   Real spin;                                  // black hole spin
   Real dexcise, pexcise;                      // excision parameters
-  Real gamma_adi;                             // EOS parameters
+  Real gamma_adi;                             // gas EOS gamma
+  Real gamma_torus;                           // initial torus polytropic gamma
   Real arad;                                  // radiation constant
   bool prograde;                              // flag indicating disk is prograde (FM)
   Real r_edge, r_peak, l, rho_max;            // fixed torus parameters
@@ -229,10 +233,24 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     torus.gamma_adi = pmbp->pmhd->peos->eos_data.gamma;
   }
   Real gm1 = torus.gamma_adi - 1.0;
+  // Keep the gas EOS independent of the polytrope used to construct the IC.
+  // Omitting gamma_torus preserves the historical initialization exactly.
+  torus.gamma_torus = pin->GetOrAddReal("problem", "gamma_torus", torus.gamma_adi);
+  if (!std::isfinite(torus.gamma_torus) || torus.gamma_torus <= 1.0) {
+    std::cerr << "### FATAL ERROR: problem/gamma_torus must be finite and > 1"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  Real gm1_torus = torus.gamma_torus - 1.0;
 
-  // Get Radiation constant (if radiation enabled)
+  // The IC needs the radiation constant even when source coupling is disabled.
   if (pmbp->prad != nullptr) {
-    torus.arad = pmbp->prad->arad;
+    if (pmbp->punit != nullptr) {
+      torus.arad = pmbp->punit->rad_constant_cgs *
+          SQR(SQR(pmbp->punit->temperature_cgs())) / pmbp->punit->pressure_cgs();
+    } else {
+      torus.arad = pin->GetReal("radiation", "arad");
+    }
   }
 
   // Read problem-specific parameters from input file
@@ -285,8 +303,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Common to both tori:
   torus.log_h_edge = LogHAux(torus, torus.r_edge, 1.0);
   torus.log_h_peak = LogHAux(torus, torus.r_peak, 1.0) - torus.log_h_edge;
-  torus.ptot_over_rho_peak = gm1/torus.gamma_adi * (exp(torus.log_h_peak)-1.0);
-  torus.rho_peak = pow(torus.ptot_over_rho_peak, 1.0/gm1) / torus.rho_max;
+  torus.ptot_over_rho_peak = gm1_torus/torus.gamma_torus * (exp(torus.log_h_peak)-1.0);
+  torus.rho_peak = pow(torus.ptot_over_rho_peak, 1.0/gm1_torus) / torus.rho_max;
 
   // find "outer edge" of torus (first place log_h > 0)
   Real ra = torus.r_peak;
@@ -418,8 +436,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       rand_pool64.free_state(rand_gen);        // free state for use by other threads
 
       // Calculate thermodynamic variables
-      Real ptot_over_rho = gm1/trs.gamma_adi * (exp(log_h) - 1.0);
-      rho = pow(ptot_over_rho, 1.0/gm1) / trs.rho_peak;
+      Real ptot_over_rho = gm1_torus/trs.gamma_torus * (exp(log_h) - 1.0);
+      rho = pow(ptot_over_rho, 1.0/gm1_torus) / trs.rho_peak;
       Real temp = ptot_over_rho;
       if (is_radiation_enabled) temp = CalculateT(trs, rho, ptot_over_rho);
       pgas = temp * rho;
@@ -1328,12 +1346,12 @@ static void CalculateVectorPotentialInTiltedTorus(struct torus_pgen pgen,
   if (pgen.is_vertical_field) {
     // Determine if we are in the torus
     Real rho;
-    Real gm1 = pgen.gamma_adi - 1.0;
+    Real gm1 = pgen.gamma_torus - 1.0;
     bool in_torus = false;
     Real log_h = LogHAux(pgen, r, sin_vartheta) - pgen.log_h_edge;  // (FM 3.6)
     if (log_h >= 0.0) {
       in_torus = true;
-      Real ptot_over_rho = gm1/pgen.gamma_adi * (exp(log_h) - 1.0);
+      Real ptot_over_rho = gm1/pgen.gamma_torus * (exp(log_h) - 1.0);
       rho = pow(ptot_over_rho, 1.0/gm1) / pgen.rho_peak;
     }
 
@@ -1377,12 +1395,12 @@ static void CalculateVectorPotentialInTiltedTorus(struct torus_pgen pgen,
     if (r >= pgen.r_edge || pgen.l_peak == 0.0) {
       // Determine if we are in the torus (r <= r_edge if non-rotating polytrope)
       Real rho;
-      Real gm1 = pgen.gamma_adi-1.0;
+      Real gm1 = pgen.gamma_torus-1.0;
       bool in_torus = false;
       Real log_h = LogHAux(pgen, r, sin_vartheta) - pgen.log_h_edge;  // (FM 3.6)
       if (log_h >= 0.0) {
         in_torus = true;
-        Real ptot_over_rho = gm1/pgen.gamma_adi * (exp(log_h) - 1.0);
+        Real ptot_over_rho = gm1/pgen.gamma_torus * (exp(log_h) - 1.0);
         rho = pow(ptot_over_rho, 1.0/gm1) / pgen.rho_peak;
       }
 
@@ -1805,16 +1823,16 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
     to_ien = 1.0 / (gamma - 1.);
   }
 
-  // TorusFluxes history row: nbase gas/MHD values, then optional 3 radiation values.
+  // History row: nbase gas/MHD values, then optional 6 radiation values.
   static constexpr int nbase = 29;
-  static constexpr int nradmom = 10;  // upper-triangle r^{mu nu}
+  static constexpr int nradmom = 10;  // upper-triangle R^{mu nu}
+  static constexpr int nraddiag = nradmom + 3;  // plus cell-centered opacities
 
   // extract grids, number of radii, number of fluxes, and history appending index
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
-  // int nflux = (is_mhd) ? 4 : 3;
   const bool is_radiation_enabled = (pmbp->prad != nullptr);
-  const int nflux = nbase + (is_radiation_enabled ? 3 : 0);
+  const int nflux = nbase + (is_radiation_enabled ? 6 : 0);
   int nang1 = 0;
   if (is_radiation_enabled) { nang1 = pmbp->prad->prgeo->nangles - 1; }
 
@@ -1823,30 +1841,33 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   //  (2) energy flux
   //  (3) angular momentum flux
   //  (4) magnetic flux (iff MHD)
-  //  (if radiation) + r00, redot, redoto: r^00; mixed r^r_0 (Boyer r, same as gas ur/br);
-  //     redoto = r^r_0 when r^{0r} > 0, with r^{0r} = (dr/dx^i)r^{0i} (radial part of r^{0\mu})
-  pdata->nhist = nradii*nflux;
+  // Radiation: integrals of E_com, R^r_t, and F^r u_t + u^r F_t;
+  // then solid-angle means of sigma_a,s,p (inverse code length).
+  // Outward Killing-energy powers are minus the stored mixed-index fluxes.
+  pdata->nhist = nradii*nflux + (pm->pzoom != nullptr ? 1 : 0);
   if (pdata->nhist > NHISTORY_VARIABLES) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "User history function specified pdata->nhist larger than"
               << " NHISTORY_VARIABLES" << std::endl;
     exit(EXIT_FAILURE);
   }
-  // no more than 7 characters per label
+  // Short physical-quantity labels; the radius index is appended below.
   std::vector<std::string> data_label = {
     "r", "out", "m", "mout", "mdot", "mdotout", "edot", "edotout", "lx", "ly", "lz",
     "lzout", "phi", "eint", "b^2", "alpha", "lor", "u0", "u_0", "ur", "uph", "b0",
     "b_0", "br", "bph", "edothyd", "edho", "edotadv", "edao"
   };
   if (is_radiation_enabled) {
-    data_label.push_back("r00");
+    data_label.push_back("r00_ff");
     data_label.push_back("redot");
-    data_label.push_back("redoto");
+    data_label.push_back("redot_ff");
+    data_label.push_back("sigma_a");
+    data_label.push_back("sigma_s");
+    data_label.push_back("sigma_p");
   }
   int gi0 = 0;
   if (pm->pzoom != nullptr) {
-    gi0 += 1;
-    pdata->nhist += 1;
+    gi0 = 1;
     pdata->label[0] = "zone";
     pdata->hdata[0] = (global_variable::my_rank == 0)? pm->pzoom->zstate.zone : 0.0;
   }
@@ -1865,33 +1886,139 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   int nmb = pmbp->nmb_thispack;
   DvceArray5D<Real> rad_moments;
   if (is_radiation_enabled) {
-    Kokkos::realloc(rad_moments, nmb, nradmom, n3, n2, n1);
+    Kokkos::realloc(rad_moments, nmb, nraddiag, n3, n2, n1);
     auto rad_moments_ = rad_moments;
     auto i0_ = pmbp->prad->i0;
     auto tet_c_ = pmbp->prad->tet_c;
     auto tetcov_c_ = pmbp->prad->tetcov_c;
     auto nh_c_ = pmbp->prad->nh_c;
     auto solid_angles_ = pmbp->prad->prgeo->solid_angles;
-    par_for("torus_rad_moments", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
+    par_for("accretion_rad_moments", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       const Real n0 = tet_c_(m,0,0,k,j,i);
-      for (int nmu=0, n12=0; nmu<4; ++nmu) {
-        for (int nnu=nmu; nnu<4; ++nnu, ++n12) {
-          Real s = 0.0;
-          for (int ord=0; ord<=nang1; ++ord) {
-            Real nmu_coord = 0.0, nnu_coord = 0.0, n_0 = 0.0;
-            for (int d=0; d<4; ++d) {
-              nmu_coord += tet_c_(m,d,nmu,k,j,i)*nh_c_.d_view(ord,d);
-              nnu_coord += tet_c_(m,d,nnu,k,j,i)*nh_c_.d_view(ord,d);
-              n_0       += tetcov_c_(m,d,0,k,j,i)*nh_c_.d_view(ord,d);
-            }
-            s += nmu_coord*nnu_coord*(i0_(m,ord,k,j,i)/(n0*n_0))*
-                 solid_angles_.d_view(ord);
+      Real moments[nradmom] = {};
+      // Transform each direction once, then accumulate all ten tensor components.
+      for (int ord=0; ord<=nang1; ++ord) {
+        Real nc[4] = {}, n_0 = 0.0;
+        for (int d=0; d<4; ++d) {
+          for (int mu=0; mu<4; ++mu) {
+            nc[mu] += tet_c_(m,d,mu,k,j,i)*nh_c_.d_view(ord,d);
           }
-          rad_moments_(m,n12,k,j,i) = s;
+          n_0 += tetcov_c_(m,d,0,k,j,i)*nh_c_.d_view(ord,d);
+        }
+        if (n0*n_0 == 0.0) continue;
+        const Real weight = i0_(m,ord,k,j,i)/(n0*n_0)*solid_angles_.d_view(ord);
+        for (int mu=0, n12=0; mu<4; ++mu) {
+          for (int nu=mu; nu<4; ++nu, ++n12) {
+            moments[n12] += nc[mu]*nc[nu]*weight;
+          }
         }
       }
+      for (int n=0; n<nradmom; ++n) rad_moments_(m,n,k,j,i) = moments[n];
+      // No coupling coefficients are defined when rad_source is disabled.
+      for (int n=nradmom; n<nraddiag; ++n) rad_moments_(m,n,k,j,i) = 0.0;
     });
+    if (pmbp->prad->rad_source) {
+      // Evaluate the same cell-centered sigma as rad_fluid_sigma, including ghosts
+      // needed by the sphere interpolation stencil.
+      auto &size = pmbp->pmb->mb_size;
+      const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+      auto excision_flux_ = pmbp->pcoord->excision_flux;
+      auto prad = pm->pmb_pack->prad;
+      Real density_scale_ = 1.0, temperature_scale_ = 1.0, length_scale_ = 1.0;
+      Real mean_mol_weight_ = 1.0;
+      Real rosseland_coef_ = 1.0, planck_minus_rosseland_coef_ = 0.0;
+      if (prad->are_units_enabled) {
+        density_scale_ = pm->pmb_pack->punit->density_cgs();
+        temperature_scale_ = pm->pmb_pack->punit->temperature_cgs();
+        length_scale_ = pm->pmb_pack->punit->length_cgs();
+        mean_mol_weight_ = pm->pmb_pack->punit->mu();
+        rosseland_coef_ = pm->pmb_pack->punit->rosseland_coef_cgs;
+        planck_minus_rosseland_coef_ = pm->pmb_pack->punit->planck_minus_rosseland_coef_cgs;
+      }
+
+      Real gm1, dfloor;
+      if (pm->pmb_pack->phydro != nullptr) {
+        gm1 = pm->pmb_pack->phydro->peos->eos_data.gamma - 1.0;
+        dfloor = pm->pmb_pack->phydro->peos->eos_data.dfloor;
+      } else {
+        gm1 = pm->pmb_pack->pmhd->peos->eos_data.gamma - 1.0;
+        dfloor = pm->pmb_pack->pmhd->peos->eos_data.dfloor;
+      }
+
+      const bool is_mhd_pack = is_mhd;
+      bool correct_radsrc_opacity_ = prad->correct_radsrc_opacity;
+      Real dfloor_op_ = prad->dfloor_opacity;
+      Real dtrunc_max_ = prad->dens_trunc_max;
+      Real tau_trunc_ = prad->tau_truncation;
+      Real sigmoid_res_ = prad->sigmoid_residual;
+      Real kappa_s_ = prad->kappa_s;
+      bool table_opacity_ = prad->table_opacity;
+      bool power_opacity_ = prad->power_opacity;
+      bool op_table_use_r_ = prad->op_table_use_r;
+      Real k_elec_opacity_ = prad->k_elec_opacity;
+      auto ross_rho_ = prad->ross_rho;
+      auto ross_t_ = prad->ross_t;
+      auto planck_rho_ = prad->planck_rho;
+      auto planck_t_ = prad->planck_t;
+      auto ross_table_ = prad->ross_table;
+      auto planck_table_ = prad->planck_table;
+      Real kappa_a_ = prad->kappa_a;
+      Real kappa_p_ = prad->kappa_p;
+
+      par_for("torus_history_sigmas", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        Real &x1min = size.d_view(m).x1min;
+        Real &x1max = size.d_view(m).x1max;
+        Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+        Real &x2min = size.d_view(m).x2min;
+        Real &x2max = size.d_view(m).x2max;
+        Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+        Real &x3min = size.d_view(m).x3min;
+        Real &x3max = size.d_view(m).x3max;
+        Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+        Real glower[4][4], gupper[4][4];
+        ComputeMetricAndInverse(x1v,x2v,x3v,flat,spin,glower,gupper);
+
+        Real &wdn = w0_(m,IDN,k,j,i);
+        Real &wvx = w0_(m,IVX,k,j,i);
+        Real &wvy = w0_(m,IVY,k,j,i);
+        Real &wvz = w0_(m,IVZ,k,j,i);
+        Real &wen = w0_(m,IEN,k,j,i);
+
+        Real bccx = 0.0, bccy = 0.0, bccz = 0.0;
+        if (is_mhd_pack) {
+          bccx = bcc0_(m,IBX,k,j,i);
+          bccy = bcc0_(m,IBY,k,j,i);
+          bccz = bcc0_(m,IBZ,k,j,i);
+        }
+
+        Real sigma_a = 0.0, sigma_s = 0.0, sigma_p = 0.0;
+        radiation::RadiationFluidCellSigmas(
+            wdn, wvx, wvy, wvz, wen*to_ien, gm1, glower, gupper,
+            excision_flux_, m, k, j, i,
+            size.d_view(m).dx1, size.d_view(m).dx2, size.d_view(m).dx3,
+            correct_radsrc_opacity_, is_mhd_pack,
+            bccx, bccy, bccz,
+            dfloor, dfloor_op_, dtrunc_max_, tau_trunc_, sigmoid_res_, kappa_s_,
+            table_opacity_, power_opacity_,
+            density_scale_, temperature_scale_, length_scale_,
+            op_table_use_r_,
+            ross_rho_, ross_t_, planck_rho_, planck_t_, ross_table_, planck_table_,
+            k_elec_opacity_,
+            mean_mol_weight_, rosseland_coef_, planck_minus_rosseland_coef_,
+            kappa_a_, kappa_p_,
+            sigma_a, sigma_s, sigma_p);
+
+        rad_moments_(m,nradmom,k,j,i) = sigma_a;
+        rad_moments_(m,nradmom+1,k,j,i) = sigma_s;
+        rad_moments_(m,nradmom+2,k,j,i) = sigma_p;
+      });
+    }
+
   }
 
   // go through angles at each radii:
@@ -1912,8 +2039,8 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       interpolated_bcc.template sync<HostMemSpace>();
     }
     if (is_radiation_enabled) {
-      grids[g]->InterpolateToSphere(nradmom, rad_moments);
-      Kokkos::realloc(interpolated_rad_moments, grids[g]->nangles, nradmom);
+      grids[g]->InterpolateToSphere(nraddiag, rad_moments);
+      Kokkos::realloc(interpolated_rad_moments, grids[g]->nangles, nraddiag);
       Kokkos::deep_copy(interpolated_rad_moments, grids[g]->interp_vals);
       interpolated_rad_moments.template modify<DevExeSpace>();
       interpolated_rad_moments.template sync<HostMemSpace>();
@@ -2028,7 +2155,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
 
       // Coordinate-frame radiation moments are computed cell-centered on device,
       // interpolated to the sphere, then contracted with the surface radial direction.
-      Real r00 = 0.0, redot = 0.0, redoto = 0.0;
+      Real r00_ff = 0.0, redot = 0.0, redot_ff = 0.0;
       if (is_radiation_enabled) {
         Real rup[4][4];
         rup[0][0] = interpolated_rad_moments.h_view(n,0);
@@ -2047,7 +2174,7 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
         rup[2][1] = rup[1][2];
         rup[3][1] = rup[1][3];
         rup[3][2] = rup[2][3];
-        r00 = rup[0][0];
+
         // r^r_0: same radial alignment as gas t1_0 (u^r via dr/dx^i u^i), not Cartesian u^1.
         // r^{r nu} = (dr/dx^i) r^{i nu} for i=1,2,3; static CKS uses r=r(x,y,z) with dr/dt=0.
         // r^r_0 = g_{0 nu} r^{r nu} (nu contravariant on r); sum over nu.
@@ -2056,12 +2183,23 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
           const Real rrnu = drdx*rup[1][nu] + drdy*rup[2][nu] + drdz*rup[3][nu];
           redot += glower[0][nu]*rrnu;
         }
-        // r^{0r} = (dr/dx^i) r^{0i} (i=1,2,3): r-component of the energy current M^i = r^{0i},
-        // not a surface-integrated flux and not the same as mixed r^r_0; used only for sign of
-        // "r-outward" radiative energy flow when masking redotf -> redotof.
-        const Real r0r = drdx*rup[0][1] + drdy*rup[0][2] + drdz*rup[0][3];
-        const Real is_rad_out = (r0r > 0.0) ? 1.0 : 0.0;
-        redoto = redot*is_rad_out;
+        // Exact fluid-frame projection, signature (-+++):
+        // E = R^{mu nu} u_mu u_nu; F^mu = -R^{mu nu}u_nu - E u^mu.
+        // R^r_t = (E u^r u_t + P^r_t) + (F^r u_t + u^r F_t).
+        const Real ucov[4] = {u_0, u_1, u_2, u_3};
+        const Real ucon[4] = {u0, u1, u2, u3};
+        Real ru[4] = {}, fcon[4];
+        for (int mu=0; mu<4; ++mu) {
+          for (int nu=0; nu<4; ++nu) ru[mu] += rup[mu][nu]*ucov[nu];
+          r00_ff += ucov[mu]*ru[mu];
+        }
+        Real f_t = 0.0;
+        for (int mu=0; mu<4; ++mu) {
+          fcon[mu] = -ru[mu] - r00_ff*ucon[mu];
+          f_t += glower[0][mu]*fcon[mu];
+        }
+        const Real fr = drdx*fcon[1] + drdy*fcon[2] + drdz*fcon[3];
+        redot_ff = fr*u_0 + ur*f_t;
       }
 
       // gas/MHD: same order as data_label (0 .. nbase-1)
@@ -2077,9 +2215,13 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
         pdata->hdata[gi0+nflux*g+i] += base_flux[i]*sqrtmdet*domega*on;
       }
       if (is_radiation_enabled) {
-        pdata->hdata[gi0+nflux*g+nbase+0] += r00*sqrtmdet*domega*on;
+        pdata->hdata[gi0+nflux*g+nbase+0] += r00_ff*sqrtmdet*domega*on;
         pdata->hdata[gi0+nflux*g+nbase+1] += redot*sqrtmdet*domega*on;
-        pdata->hdata[gi0+nflux*g+nbase+2] += redoto*sqrtmdet*domega*on;
+        pdata->hdata[gi0+nflux*g+nbase+2] += redot_ff*sqrtmdet*domega*on;
+        for (int q=0; q<3; ++q) {
+          pdata->hdata[gi0+nflux*g+nbase+3+q] +=
+              interpolated_rad_moments.h_view(n,nradmom+q)*domega*on/(4.0*M_PI);
+        }
       }
     }
   }

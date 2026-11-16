@@ -36,6 +36,18 @@
 //! just for SMR/AMR, which is why it is part of the Mesh and not MeshRefinement class.
 
 void Mesh::LoadBalance(float *clist, int *rlist, int *slist, int *nlist, int nb) {
+  // Empty ranks are unsupported, including after cyclic-zoom derefinement.
+  if (nb < global_variable::nranks) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR: Fewer MeshBlocks (" << nb
+                << ") than MPI ranks (" << global_variable::nranks
+                << "). Reduce ranks or limit mesh derefinement." << std::endl;
+    }
+#if MPI_PARALLEL_ENABLED
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
+    std::exit(EXIT_FAILURE);
+  }
   float min_cost = std::numeric_limits<float>::max();
   float max_cost = 0.0, totalcost = 0.0;
   // find min/max and total cost in clist

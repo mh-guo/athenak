@@ -146,7 +146,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
     if (table_opacity) {
       op_table_use_r = pin->GetOrAddBoolean("radiation","table_use_r",false);
-      k_elec_opacity = pin->GetOrAddReal("radiation","k_elec_opacity",0.2);
+      k_elec_opacity = pin->GetOrAddReal("radiation","k_elec_opacity",0.34);
       ross_table_len_x = pin->GetOrAddInteger("radiation","ross_table_x",0);
       ross_table_len_y = pin->GetOrAddInteger("radiation","ross_table_y",0);
       planck_table_len_x = pin->GetOrAddInteger("radiation","planck_table_x",0);

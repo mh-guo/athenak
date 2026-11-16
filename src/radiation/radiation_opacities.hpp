@@ -113,6 +113,8 @@ void BilinearInterpolation(const Real in_x, const Real in_y,
 //! \fn void TableOpacity
 //! \brief Rosseland and Planck mean opacities from 2D tables (values in cgs); splits
 //! Rosseland into absorption vs electron scattering using k_elec (same units as table).
+//! sigma_a and sigma_s are the Rosseland absorption and scattering components.
+//! sigma_p is the full Planck absorption mean multiplied by density and length scale.
 
 KOKKOS_INLINE_FUNCTION
 void TableOpacity(const Real dens, const Real density_scale,
@@ -169,15 +171,27 @@ void TableOpacity(const Real dens, const Real density_scale,
 
 namespace radiation {
 
+// Comoving-frame source coefficients in inverse code length. Total Rosseland
+// opacity controls transport and momentum exchange; Planck absorption controls
+// thermal exchange; electron scattering controls Compton exchange.
+struct FluidOpacity {
+  Real transport;         // total Rosseland mean, including scattering
+  Real absorption_planck; // full Planck absorption mean
+  Real scattering;        // electron scattering used by Compton
+};
+
 //----------------------------------------------------------------------------------------
 //! \fn void RadiationFluidCellSigmas
-//! \brief Comoving-frame sigma_a,s,p from current (rho, v, e) and optional MHD correction
-//!        (`correct_radsrc_opacity`), matching `RadFluidCoupling` before the
-//!        velocity-correction block. Used with `rad_fluid_sigma` output.
+//! \brief Evaluate source coefficients and sigma_a,s,p diagnostics from (rho,v,e),
+//!        including `correct_radsrc_opacity`, before velocity correction.
+//!        The return value supplies RadFluidCoupling and rad_fluid_opacity.
+//!        Reference outputs supply rad_fluid_sigma and history fields: sigma_a is
+//!        Rosseland absorption, sigma_s is scattering, and sigma_p is full Planck
+//!        absorption in table mode or Planck-minus-Rosseland absorption in analytic mode.
 
 template<typename ExcisionFluxView>
 KOKKOS_INLINE_FUNCTION
-void RadiationFluidCellSigmas(
+FluidOpacity RadiationFluidCellSigmas(
     const Real wdn, const Real wvx, const Real wvy, const Real wvz, const Real wen,
     const Real gm1,
     const Real glower[4][4], const Real gupper[4][4],
@@ -248,6 +262,11 @@ void RadiationFluidCellSigmas(
                     sigma_a, sigma_s, sigma_p);
   }
 
+  // Convert the selected opacity model to source coefficients. The analytic
+  // input convention defines full Planck absorption as sigma_a + sigma_p;
+  // the table supplies full Planck absorption directly in sigma_p.
+  FluidOpacity opacity{sigma_a + sigma_s,
+                       table_opacity ? sigma_p : sigma_a + sigma_p, sigma_s};
   Real wdn_opacity = fmax(wdn-dfloor, dfloor_op);
   if (correct_radsrc_opacity) {
     if (excision_flux(m,k,j,i)) {
@@ -274,7 +293,11 @@ void RadiationFluidCellSigmas(
     sigma_a *= wdn_opacity/wdn;
     sigma_s *= wdn_opacity/wdn;
     sigma_p *= wdn_opacity/wdn;
+    opacity.transport *= wdn_opacity/wdn;
+    opacity.absorption_planck *= wdn_opacity/wdn;
+    opacity.scattering *= wdn_opacity/wdn;
   }
+  return opacity;
 }
 
 } // namespace radiation

@@ -1,0 +1,117 @@
+# AthenaK input file for cold reservoir accretion (zoom_gr_feed)
+# Small startup test, not a photosphere production domain.
+# Build with -D PROBLEM=zoom_gr_feed. Change <hydro> to <mhd> and
+# output2/variable to mhd_w for RMHD; remove <radiation> for hydro/MHD.
+# Density scans change units/density_cgs only.
+
+<comment>
+problem   = GR radiation hydro accretion from a cold uniform reservoir
+
+<job>
+basename  = feed  # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 3     # Number of ghost cells
+nx1       = 32    # Number of zones, X1-direction
+x1min     = -16   # minimum value of X1
+x1max     = 16    # maximum value of X1
+ix1_bc    = user  # inner-X1 boundary flag
+ox1_bc    = user  # outer-X1 boundary flag
+
+nx2       = 32    # Number of zones, X2-direction
+x2min     = -16   # minimum value of X2
+x2max     = 16    # maximum value of X2
+ix2_bc    = user  # inner-X2 boundary flag
+ox2_bc    = user  # outer-X2 boundary flag
+
+nx3       = 32    # Number of zones, X3-direction
+x3min     = -16   # minimum value of X3
+x3max     = 16    # maximum value of X3
+ix3_bc    = user  # inner-X3 boundary flag
+ox3_bc    = user  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 16  # Number of cells in each MeshBlock, X1-direction
+nx2       = 16  # Number of cells in each MeshBlock, X2-direction
+nx3       = 16  # Number of cells in each MeshBlock, X3-direction
+
+<coord>
+general_rel = true     # general relativity
+a           = 0.0      # black hole spin a (0 <= a/M < 1)
+excise      = true     # enable black hole excision
+dexcise     = 1.0e-5   # density inside excision
+pexcise     = 1.0e-15  # pressure inside excision
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.2      # Courant number
+nlim       = 8        # cycle limit
+tlim       = 1.0      # time limit
+ndiag      = 1        # cycles between diagnostic output
+
+<hydro>
+eos         = ideal       # EOS type
+reconstruct = plm         # spatial reconstruction method
+rsolver     = hlle        # Riemann solver
+gamma       = 1.666666666666667  # gamma = C_p/C_v
+dfloor      = 1.0e-10     # density floor
+pfloor      = 1.0e-22     # pressure floor
+tfloor      = 1.0e-12     # temperature floor (p_gas/rho)
+fofc        = true        # first-order flux correction
+gamma_max   = 20          # ceiling on Lorentz factor
+
+<units>
+bhmass_msun = 1.0e6    # black hole mass in solar masses
+density_cgs = 1.0e-14  # density unit in g/cm^3
+mu          = 0.618    # mean molecular weight
+
+<radiation>
+nlevel        = 1      # radiation angular grid level
+reconstruct   = plm    # spatial reconstruction method
+rotate_geo    = false  # rotate the angular grid
+power_opacity = false  # use power-law opacity
+table_opacity = false  # use tabulated opacity
+# Constant cgs opacities isolate startup/BC tests from table paths.
+kappa_a       = 1.0    # Rosseland absorption opacity in cm^2/g
+kappa_p       = 0.0    # Planck minus Rosseland absorption opacity in cm^2/g
+kappa_s       = 0.34   # scattering opacity in cm^2/g
+compton       = true   # enable Compton coupling
+n_0_floor     = 0.1    # cutoff on the magnitude of covariant photon n_0
+
+<problem>
+dens_norm    = 1.0     # reservoir density in code units
+temperature  = 3000.0  # reservoir temperature in K
+user_hist    = true    # enable spherical-shell history
+hist_nlevels = 2       # history angular grid level
+hist_rmin    = 4.0     # innermost history radius
+hist_rmax    = 12.0    # outermost history radius
+hist_dr      = 1.0     # log2 spacing between history radii
+
+<turb_seed_vel>
+field      = vel         # one-shot velocity perturbation
+solenoidal = false       # use a divergence-free velocity seed
+mach       = 0.3         # mass-weighted rms Mach normalization
+r_in       = 4.0         # inner seed-window radius
+r_out      = 12.0        # outer seed-window radius
+nlow       = 1           # minimum mode number
+nhigh      = 2           # maximum mode number
+expo       = 1.666666666666667  # spectral exponent
+amp_rpow   = -1.0        # radial amplitude exponent
+seed       = 1           # random seed
+
+# For MHD, optionally append a <turb_seed_b> block with field=bfld,
+# inv_beta=0.01 and the same window/spectrum. Without it, B starts at zero.
+
+<output1>
+file_type = hst  # output format
+dt        = 0.1  # time between outputs
+
+<output2>
+file_type = bin      # output format
+variable  = hydro_w  # output variables
+dt        = 0.1      # time between outputs
+
+<output3>
+file_type = rst  # output format
+dt        = 1.0  # time between outputs

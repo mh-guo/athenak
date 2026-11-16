@@ -6,6 +6,7 @@
 //! \file zoom_fluxes.cpp
 //! \brief Functions for updating and storing fluxes during zooming
 
+#include <cstdlib>
 #include <iostream>
 
 #include "athena.hpp"
@@ -22,21 +23,32 @@
 void CyclicZoom::UpdateFluxes(Driver *pdriver) {
   // call MHD functions to update electric fields in all MeshBlocks
   mhd::MHD *pmhd = pmesh->pmb_pack->pmhd;
+  // Successful receive calls unpack the buffers; ClearRecv only waits for MPI.
+  auto receive = [&](auto fn) {
+    TaskStatus status;
+    do {
+      status = (pmhd->*fn)(pdriver, 1);
+    } while (status == TaskStatus::incomplete);
+    if (status != TaskStatus::complete) {
+      std::cerr << "### FATAL ERROR: cyclic zoom flux receive failed" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  };
   (void) pmhd->InitRecv(pdriver, 1);  // stage = 1
   (void) pmhd->CopyCons(pdriver, 1);  // stage = 1: copy u0 to u1
   (void) pmhd->Fluxes(pdriver, 1);
   // (void) pmhd->RestrictU(this, 0);
   // TODO(@mhguo): may only send/recv electric fields if possible
   (void) pmhd->SendFlux(pdriver, 1);  // stage = 1
-  (void) pmhd->RecvFlux(pdriver, 1);  // stage = 1
+  receive(&mhd::MHD::RecvFlux);  // stage = 1
   (void) pmhd->SendU(pdriver, 1);
-  (void) pmhd->RecvU(pdriver, 1);
+  receive(&mhd::MHD::RecvU);
   (void) pmhd->CornerE(pdriver, 1);
   (void) pmhd->EField(pdriver, 1);
   (void) pmhd->SendE(pdriver, 1);
-  (void) pmhd->RecvE(pdriver, 1);
+  receive(&mhd::MHD::RecvE);
   (void) pmhd->SendB(pdriver, 1);
-  (void) pmhd->RecvB(pdriver, 1);
+  receive(&mhd::MHD::RecvB);
   (void) pmhd->ClearSend(pdriver, 1); // stage = 1
   (void) pmhd->ClearRecv(pdriver, 1); // stage = 1
   if (verbose && global_variable::my_rank == 0) {

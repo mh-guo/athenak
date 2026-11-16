@@ -30,7 +30,7 @@
 //!                   solenoidal and compressive parts).
 //!                   Amplitude: mach = mass-weighted rms of |dv|/c_s in the window.
 //!                   c_s^2 = gamma p_gas/rho, plus (4/3) p_rad/rho in radiation
-//!                   runs (LTE p_rad from the gas temperature), so mach is measured
+//!                   runs (p_rad = E_fluid/3 from initialized intensities), so mach is measured
 //!                   against the effective sound speed even in radiation pressure
 //!                   dominated regions.
 //!   field = dens  : isobaric density perturbation (= entropy/buoyancy seed;
@@ -52,17 +52,19 @@
 //!                   diagnostic of the total b0 is printed to the log.
 //!                   Amplitude: inv_beta = <p_mag>/<p_gas> (volume-weighted means
 //!                   over the window; seed contribution only). In radiation runs
-//!                   the denominator is p_gas + p_rad (LTE p_rad from the gas
-//!                   temperature), i.e. a ptot = p_gas + p_rad convention.
+//!                   the denominator is p_gas + E_fluid/3 from the initialized
+//!                   radiation field, i.e. a total-pressure convention.
 //!   field = erad  : NOT YET IMPLEMENTED (LTE-consistent radiation perturbation).
 //!
 //! Caveats (documented design decisions):
 //!  - vel: a one-shot seed deposits a small random net momentum (reported in the
 //!    log); it is NOT subtracted because any confined subtraction would break the
 //!    divergence-free property. For seeding this kick is O(mach*c_s/sqrt(nmode)).
-//!  - dens/pres in radiation runs: the radiation field is initialized from the
-//!    unperturbed temperature; optically thick regions partially erase thermal
-//!    perturbations within a few source steps. Prefer field=vel there.
+//!  - Initialize the radiation field before applying seeds. Velocity seeds leave
+//!    intensities unchanged; later seeds use the updated fluid frame.
+//!  - dens/pres leave the initialized radiation field unchanged; optically thick
+//!    regions partially erase thermal perturbations within a few source steps.
+//!    Prefer field=vel there.
 //!  - vel in GR: dv is added to the normal-frame velocities w0(IVX..IVZ) assuming
 //!    a near-flat metric; keep the window at r >> r_horizon.
 //!
@@ -105,12 +107,76 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "coordinates/coordinates.hpp"
+#include "coordinates/cartesian_ks.hpp"
+#include "geodesic-grid/geodesic_grid.hpp"
 #include "mesh/mesh.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
 #include "eos/eos.hpp"
 #include "utils/random.hpp"
+
+// Radiation pressure for seed normalization. Pgens must initialize i0 before seeding.
+// Use the same comoving angular quadrature as the radiation source update; no LTE
+// assumption is made. E_fluid/3 is the scalar (trace/3) radiation pressure even
+// for anisotropic fields, not a claim of isotropic dynamical support.
+struct TurbSeedRadiation {
+  int nang = 0;
+  CoordData coord{};
+  DvceArray5D<Real> intensity, prim;
+  DvceArray6D<Real> tetrad, cov_tetrad, normal_to_tetrad;
+  DualArray2D<Real> directions;
+  DualArray1D<Real> weights;
+
+  explicit TurbSeedRadiation(MeshBlockPack *pack) {
+    if (pack->prad == nullptr) return;
+    auto *rad = pack->prad;
+    nang = rad->prgeo->nangles;
+    coord = pack->pcoord->coord_data;
+    intensity = rad->i0;
+    prim = pack->phydro ? pack->phydro->w0 : pack->pmhd->w0;
+    tetrad = rad->tet_c;
+    cov_tetrad = rad->tetcov_c;
+    normal_to_tetrad = rad->norm_to_tet;
+    directions = rad->nh_c;
+    weights = rad->prgeo->solid_angles;
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  Real Pressure(int m, int k, int j, int i, Real x, Real y, Real z) const {
+    if (nang == 0) return 0.0;
+    Real gl[4][4], gu[4][4];
+    ComputeMetricAndInverse(x,y,z,coord.is_minkowski,coord.bh_spin,gl,gu);
+    Real u[4] = {0.0, prim(m,IVX,k,j,i), prim(m,IVY,k,j,i), prim(m,IVZ,k,j,i)};
+    Real q = 0.0;
+    for (int a=1; a<4; ++a) {
+      for (int b=1; b<4; ++b) q += gl[a][b]*u[a]*u[b];
+    }
+    u[0] = sqrt(1.0+q);
+    Real ut[4] = {0.0};
+    for (int a=0; a<4; ++a) {
+      for (int b=0; b<4; ++b) ut[a] += normal_to_tetrad(m,a,b,k,j,i)*u[b];
+    }
+    Real energy = 0.0, omega_tet = 0.0, omega_fluid = 0.0;
+    for (int n=0; n<nang; ++n) {
+      Real doppler = ut[0]*directions.d_view(n,0);
+      for (int a=1; a<4; ++a) doppler -= ut[a]*directions.d_view(n,a);
+      Real weight = weights.d_view(n);
+      omega_tet += weight;
+      omega_fluid += weight/SQR(doppler);
+      // Zero intensity contributes exactly zero, including excised directions.
+      if (intensity(m,n,k,j,i) == 0.0) continue;
+      Real n_0 = 0.0;
+      for (int a=0; a<4; ++a) n_0 += cov_tetrad(m,a,0,k,j,i)*directions.d_view(n,a);
+      Real denom = tetrad(m,0,0,k,j,i)*n_0;
+      if (denom != 0.0) {
+        energy += intensity(m,n,k,j,i)/denom*SQR(doppler)*weight;
+      }
+    }
+    return fmax(energy*omega_tet/omega_fluid, 0.0)/3.0;
+  }
+};
 
 //----------------------------------------------------------------------------------------
 //! \struct TurbSeedField
@@ -487,11 +553,7 @@ inline void TurbSeed::ApplyVel() {
     const Real gm1 = gamma - 1.0;
     const bool use_dyngr = (pmy_pack->pdyngr != nullptr);
     const bool sol = solenoidal;
-    // in radiation runs include LTE radiation pressure in the sound speed, else
-    // mach would be measured against the (much smaller) gas-only c_s in radiation
-    // pressure dominated regions; exact here since the pgen initializes in LTE
-    const bool is_rad = (pmy_pack->prad != nullptr);
-    const Real arad_ = is_rad ? pmy_pack->prad->arad : 0.0;
+    const TurbSeedRadiation radiation(pmy_pack);
     auto fld_ = fld;
 
     // normalization sums: t0 = sum(dm), t1 = sum(dm |dv|^2/c_s^2) over window,
@@ -524,11 +586,8 @@ inline void TurbSeed::ApplyVel() {
       Real rho = w0_(m,IDN,k,j,i);
       Real pgas = use_dyngr ? w0_(m,IPR,k,j,i) : gm1*w0_(m,IEN,k,j,i);
       Real cs2 = gamma*pgas/rho;
-      if (is_rad) {
-        Real tgas = pgas/rho;
-        Real prad = arad_*SQR(SQR(tgas))/3.0;
-        cs2 += (4.0/3.0)*prad/rho;  // Gamma1 -> 4/3 in the radiation-dominated limit
-      }
+      Real prad = radiation.Pressure(m,k,j,i,x1v,x2v,x3v);
+      cs2 += (4.0/3.0)*prad/rho;
       cs2 = fmax(cs2, static_cast<Real>(1.0e-30));
       Real dm = rho*vol;
       s0 += dm;
@@ -710,10 +769,7 @@ inline void TurbSeed::ApplyBfld() {
     const Real gamma = pmy_pack->pmhd->peos->eos_data.gamma;
     const Real gm1 = gamma - 1.0;
     const bool use_dyngr = (pmy_pack->pdyngr != nullptr);
-    // in radiation runs inv_beta is measured against p_gas + p_rad (LTE), matching
-    // the ptot convention of the pgen's own potential_beta_min normalization
-    const bool is_rad = (pmy_pack->prad != nullptr);
-    const Real arad_ = is_rad ? pmy_pack->prad->arad : 0.0;
+    const TurbSeedRadiation radiation(pmy_pack);
     auto fld_ = fld;
 
     // 1. sample windowed potential Phi*A at cell edges, with fine-neighbor
@@ -900,11 +956,7 @@ inline void TurbSeed::ApplyBfld() {
       fld_.Envelope(x1v, x2v, x3v, dx, dy, dz, r, phi, dphidr);
       if (phi > 0.0) {
         Real pgas = use_dyngr ? w0_(m,IPR,k,j,i) : gm1*w0_(m,IEN,k,j,i);
-        Real ptot = pgas;
-        if (is_rad) {
-          Real tgas = pgas/w0_(m,IDN,k,j,i);
-          ptot += arad_*SQR(SQR(tgas))/3.0;
-        }
+        Real ptot = pgas + radiation.Pressure(m,k,j,i,x1v,x2v,x3v);
         pg += vol*ptot;
       }
     }, Kokkos::Sum<Real>(pg_sum), Kokkos::Sum<Real>(pm_sum));
