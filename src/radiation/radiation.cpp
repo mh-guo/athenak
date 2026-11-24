@@ -178,6 +178,16 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       arad = pin->GetReal("radiation","arad");
     }
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
+  } else {
+    // Transport-only tests still need defined opacity/temperature parameters.
+    // The source operator remains disabled; these opacities only enter the flux.
+    kappa_s = pin->GetOrAddReal("radiation", "kappa_s", 0.);
+    kappa_a = pin->GetOrAddReal("radiation", "kappa_a", 0.);
+    kappa_p = pin->GetOrAddReal("radiation", "kappa_p", 0.);
+    arad = pin->GetOrAddReal("radiation", "arad", 1.);
+    power_opacity = false;
+    is_compton_enabled = false;
+    affect_fluid = false;
   }
 
   // Optional near-horizon radiation energy ceiling. This is intended as a
@@ -189,6 +199,38 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   // Check for fluid evolution
   fixed_fluid = pin->GetOrAddBoolean("radiation","fixed_fluid",false);
 
+  // Keep the unmodified upwind solver as the default and explicit reference.
+  // Reject old experimental switches rather than silently changing their meaning.
+  if (pin->DoesParameterExist("radiation", "slab_advection_split") ||
+      pin->DoesParameterExist("radiation", "optical_depth_flux")) {
+    std::cerr << "Use radiation/transport_flux=upwind or optical_depth_split; "
+              << "remove the legacy transport switches\n";
+    std::exit(EXIT_FAILURE);
+  }
+  const auto transport_flux = pin->GetOrAddString("radiation", "transport_flux", "upwind");
+  if (transport_flux != "upwind" && transport_flux != "optical_depth_split" &&
+      transport_flux != "gr_optical_depth_split") {
+    std::cerr << "Unknown radiation/transport_flux: " << transport_flux << "\n";
+    std::exit(EXIT_FAILURE);
+  }
+  gr_split_flux = (transport_flux == "gr_optical_depth_split");
+  optical_depth_flux = (transport_flux == "optical_depth_split" || gr_split_flux);
+  if (optical_depth_flux && !gr_split_flux && !pmy_pack->pcoord->coord_data.is_minkowski) {
+    std::cerr << "optical_depth_split requires Minkowski coordinates; "
+              << "a covariant GR extension is not implemented\n";
+    std::exit(EXIT_FAILURE);
+  }
+  optical_depth_scale = pin->GetOrAddReal("radiation", "optical_depth_scale", 5.0);
+  transport_floor_stats = Kokkos::View<Real[4], DevExeSpace>("transport_floor_stats");
+  Kokkos::deep_copy(transport_floor_stats, 0.0);
+  if (optical_depth_flux && (!(is_hydro_enabled || is_mhd_enabled)
+      || (pin->GetOrAddString("radiation", "reconstruct", "plm") != "dc" &&
+          pin->GetOrAddString("radiation", "reconstruct", "plm") != "plm")
+      || !std::isfinite(optical_depth_scale) || optical_depth_scale <= 0.0)) {
+    std::cerr << "Optical-depth flux requires hydro/MHD, "
+              << "DC/PLM reconstruction, and a positive finite optical_depth_scale\n";
+    std::exit(EXIT_FAILURE);
+  }
   // Source terms (if needed)
   if (pin->DoesBlockExist("rad_srcterms")) {
     psrc = new SourceTerms("rad_srcterms", ppack, pin);
@@ -198,6 +240,10 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   int nlevel = pin->GetInteger("radiation", "nlevel");
   rotate_geo = pin->GetOrAddBoolean("radiation","rotate_geo",true);
   angular_fluxes = pin->GetOrAddBoolean("radiation","angular_fluxes",true);
+  if (gr_split_flux && !pmy_pack->pcoord->coord_data.is_minkowski && !angular_fluxes) {
+    std::cerr << "GR split requires the existing angular/geometric transport\n";
+    std::exit(EXIT_FAILURE);
+  }
   n_0_floor = pin->GetOrAddReal("radiation","n_0_floor",0.1);
   prgeo = new GeodesicGrid(nlevel, rotate_geo, angular_fluxes);
 
@@ -530,6 +576,9 @@ void Radiation::LoadOpacityTables(ParameterInput *pin) {
 // destructor
 
 Radiation::~Radiation() {
+  auto stats = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                 transport_floor_stats);
+  std::cout << "RADIATION_FLOOR " << stats(0) << " " << stats(1) << " " << stats(2) << " " << stats(3) << std::endl;
   delete pbval_i;
   delete prgeo;
   if (psrc != nullptr) {delete psrc;}

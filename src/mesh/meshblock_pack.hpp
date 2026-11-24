@@ -61,7 +61,7 @@ class MeshBlockPack {
   // MeshBlockPack is constructed with pointer to my_pack.
 
   MeshBlock* pmb;         // MeshBlocks in this MeshBlockPack
-  Coordinates* pcoord;
+  Coordinates* pcoord=nullptr;
 
   // physics (controlled by AddPhysics() function in meshblock_pack.cpp)
   hydro::Hydro *phydro=nullptr;

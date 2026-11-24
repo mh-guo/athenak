@@ -22,7 +22,7 @@
 
 namespace radiation {
 //----------------------------------------------------------------------------------------
-//! \fn  void Hydro::Update
+//! \fn  void Radiation::RKUpdate
 //  \brief Explicit RK update of flux divergence and physical source terms
 
 TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
@@ -59,6 +59,8 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
   auto &rad_mask_ = pmy_pack->pcoord->excision_floor;
   Real &n_0_floor_ = n_0_floor;
 
+  auto floor_stats = transport_floor_stats;
+  auto omega = prgeo->solid_angles;
   par_for("r_update",DevExeSpace(),0,nmb1,0,nang1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
     // spatial fluxes
@@ -78,7 +80,20 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
     Real n0  = tt(m,0,0,k,j,i);
     Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1) +
                tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
-    i0_(m,n,k,j,i) = n0*n_0*fmax((i0_(m,n,k,j,i)/(n0*n_0)), 0.0);
+    Real intensity = i0_(m,n,k,j,i)/(n0*n_0);
+    if (!isfinite(intensity))
+      Kokkos::abort("Nonfinite radiation intensity before transport floor");
+    if (intensity < 0.0) {
+      Kokkos::atomic_add(&floor_stats(0), 1.0);
+      Kokkos::atomic_add(&floor_stats(1), -intensity);
+      // Angle/coordinate-volume-weighted stage correction. In Minkowski this
+      // is an energy increment, but the sum is NOT a net RK energy budget.
+      Real dv=mbsize.d_view(m).dx1*mbsize.d_view(m).dx2*mbsize.d_view(m).dx3;
+      Real de=-intensity*omega.d_view(n)*dv;
+      Kokkos::atomic_add(&floor_stats(2), de);
+      Kokkos::atomic_add(&floor_stats(3), de*nh_c_.d_view(n,1));
+    }
+    i0_(m,n,k,j,i) = n0*n_0*fmax(intensity, 0.0);
 
     // handle excision
     // NOTE(@pdmullen): excision criterion are not finalized.  The below zeroes all

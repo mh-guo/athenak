@@ -96,6 +96,14 @@ class Radiation {
 
   // Radiation coupling term parameters
   bool rad_source;          // flag to enable/disable radiation source term
+  // Minkowski optical-depth split transport; standard fixed-mesh flux exchange.
+  bool optical_depth_flux;
+  bool gr_split_flux;  // Experimental stationary Cartesian Kerr-Schild extension.
+  Real optical_depth_scale;
+  DvceArray5D<Real> transport_state;
+  // Per-rank stage sums: clip count, delta I, angle/volume-weighted delta I,
+  // and its x-momentum moment. Not RK-weighted; not a conservation budget.
+  Kokkos::View<Real[4], DevExeSpace> transport_floor_stats;
   bool fixed_fluid;         // flag to enable/disable fluid integration
   bool affect_fluid;        // flag to enable/disable feedback of rad field on fluid
   Real arad;                // radiation constant
@@ -196,6 +204,7 @@ class Radiation {
   TaskStatus ClearRecv(Driver *d, int stage);
 
  private:
+  void PrepareTransportState();
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Radiation
 };
 

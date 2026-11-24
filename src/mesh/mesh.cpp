@@ -388,9 +388,10 @@ void Mesh::PrintMeshDiagnostics() {
 
   // if more than one physical level: compute/output # of blocks and cost per level
   if ((max_level - root_level) > 1) {
-    int *nb_per_plevel = new int[max_level];
-    float *cost_per_plevel = new float[max_level];
-    for (int i=0; i<max_level; ++i) {
+    const int nphysical_levels = max_level - root_level + 1;
+    int *nb_per_plevel = new int[nphysical_levels];
+    float *cost_per_plevel = new float[nphysical_levels];
+    for (int i=0; i<nphysical_levels; ++i) {
       nb_per_plevel[i] = 0;
       cost_per_plevel[i] = 0.0;
     }
