@@ -60,6 +60,8 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
   Real &n_0_floor_ = n_0_floor;
 
   auto floor_stats = transport_floor_stats;
+  constexpr int nbins = 4096;
+  Kokkos::View<Real*[4], DevExeSpace> partial("floor_partial", nbins);
   auto omega = prgeo->solid_angles;
   par_for("r_update",DevExeSpace(),0,nmb1,0,nang1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
@@ -84,14 +86,15 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
     if (!isfinite(intensity))
       Kokkos::abort("Nonfinite radiation intensity before transport floor");
     if (intensity < 0.0) {
-      Kokkos::atomic_add(&floor_stats(0), 1.0);
-      Kokkos::atomic_add(&floor_stats(1), -intensity);
+      const int bin = (i + 37*j + 101*k + 251*n + 509*m) & (nbins-1);
+      Kokkos::atomic_add(&partial(bin,0), 1.0);
+      Kokkos::atomic_add(&partial(bin,1), -intensity);
       // Angle/coordinate-volume-weighted stage correction. In Minkowski this
       // is an energy increment, but the sum is NOT a net RK energy budget.
       Real dv=mbsize.d_view(m).dx1*mbsize.d_view(m).dx2*mbsize.d_view(m).dx3;
       Real de=-intensity*omega.d_view(n)*dv;
-      Kokkos::atomic_add(&floor_stats(2), de);
-      Kokkos::atomic_add(&floor_stats(3), de*nh_c_.d_view(n,1));
+      Kokkos::atomic_add(&partial(bin,2), de);
+      Kokkos::atomic_add(&partial(bin,3), de*nh_c_.d_view(n,1));
     }
     i0_(m,n,k,j,i) = n0*n_0*fmax(intensity, 0.0);
 
@@ -103,6 +106,12 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
       if (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_) { i0_(m,n,k,j,i) = 0.0; }
     }
   });
+  Kokkos::parallel_for("floor_stats_merge", Kokkos::RangePolicy<DevExeSpace>(0,4),
+    KOKKOS_LAMBDA(const int q) {
+      Real sum = 0;
+      for (int b=0; b<nbins; ++b) sum += partial(b,q);
+      floor_stats(q) += sum;
+    });
   return TaskStatus::complete;
 }
 } // namespace radiation
